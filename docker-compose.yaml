@@ -1,0 +1,681 @@
+# ==============================================================================
+# Docker Compose File: Global
+#
+#   Author:   brinkflew <antoine.van.serveyt@gmail.com>
+#   Created:  March 08, 2023
+#   Revision: 1.0.0
+# ------------------------------------------------------------------------------
+# Setup containers and startup in predefined order to account for dependencies.
+# Parameters are defined in the `.env` file next to this one hence you should
+# not need to edit this configuration.
+# ==============================================================================
+
+version: "3.7"
+
+# ------------------------------------------------------------------------------
+# Networking
+# ------------------------------------------------------------------------------
+# The media-network is shared between containers so that they can communicate
+# together. The downloaders are exempt from this network as they connect to
+# the Gluetun (VPN) instance instead.
+# ------------------------------------------------------------------------------
+
+networks:
+  media-network:
+    name: media-network
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+      - subnet: ${NET_DOCKER_SUBNET:?err}
+        gateway: ${NET_DOCKER_GATEWAY:?err}
+
+# ------------------------------------------------------------------------------
+# Services
+# ------------------------------------------------------------------------------
+# Individual containers are defined under this block.
+# ------------------------------------------------------------------------------
+
+services:
+
+  # ----------------------------------------------------------------------------
+  # Gluetun: VPN Client
+  # ----------------------------------------------------------------------------
+  # The qBittorrent container connects to the internet through this one which
+  # uses a VPN to encrypt data transmitted over.
+  #
+  # This container must be running and healthy before qBittorrent can start.
+  #
+  # Image:  https://github.com/qdm12/gluetun/pkgs/container/gluetun
+  # See:    https://github.com/qdm12/gluetun/wiki
+  # ----------------------------------------------------------------------------
+
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: gluetun
+    restart: always
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/gluetun:/gluetun
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      - media-network
+    ports:
+      - "8888:8888/tcp"                                             # Gluetun Local Network HTTP proxy
+      - "8388:8388/tcp"                                             # Gluetun Local Network Shadowsocks
+      - "8388:8388/udp"                                             # Gluetun Local Network Shadowsocks
+      - "${PORT_QBITTORRENT_WEB:?err}:${PORT_QBITTORRENT_WEB:?err}" # WebUI Portal: qBittorrent
+      - "${PORT_QBITTORRENT_TCP:?err}:6881/tcp"                     # qBittorrent Port TCP
+      - "${PORT_QBITTORRENT_UDP:?err}:6881/udp"                     # qBittorrent Port UDP
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - TZ=${TIMEZONE:?err}
+      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER:?err}
+      - OPENVPN_USER=${VPN_USERNAME:?err}
+      - OPENVPN_PASSWORD=${VPN_PASSWORD:?err}
+      - SERVER_REGIONS=${VPN_SERVER_REGION:?err}
+      - SERVER_CITIES=${VPN_SERVER_CITIES}
+      - SERVER_HOSTNAMES=${VPN_SERVER_HOSTS}
+      - FIREWALL_OUTBOUND_SUBNETS=${NET_LOCAL_SUBNET:?err}
+      - OPENVPN_CUSTOM_CONFIG=${VPN_OPENVPN_CONFIG}
+      - VPN_TYPE=${VPN_TYPE}
+      - VPN_ENDPOINT_IP=${VPN_WG_ENDPOINT_ADDR}
+      - VPN_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}
+      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
+      - WIREGUARD_PRIVATE_KEY=${VPN_WG_PRIVATE_KEY}
+      - WIREGUARD_PRESHARED_KEY=${VPN_WG_PRESHARED_KEY}
+      - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}
+      - HTTPPROXY=on
+      - SHADOWSOCKS=on
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 1
+
+  # ----------------------------------------------------------------------------
+  # Torrent Download Client: qBittorrent
+  # ----------------------------------------------------------------------------
+  # Downloader for torrent files.
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-qbittorrent
+  # ----------------------------------------------------------------------------
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    restart: unless-stopped
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/qbittorrent:/config
+      - ${DOCKER_VOLUME_MEDIA:?err}:/data
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+      - WEBUI_PORT=${PORT_QBITTORRENT_WEB:?err}
+      - DOCKER_MODS=ghcr.io/gilbn/theme.park:qbittorrent
+      - TP_THEME=${TP_THEME:?err}
+
+  # ----------------------------------------------------------------------------
+  # Torrent Fake-Upload Client: JOAL (Jack of All Trades)
+  # ----------------------------------------------------------------------------
+  # Fake-upload torrent files to cheat ratios.
+  #
+  # Image:  https://hub.docker.com/r/anthonyraymond/joal
+  # See:    https://github.com/anthonyraymond/joal
+  # ----------------------------------------------------------------------------
+
+  joal:
+    image: anthonyraymond/joal:latest
+    container_name: joal
+    restart: unless-stopped
+    command:
+      - --joal-conf=/config
+      - --spring.main.web-environment=true
+      - --server.port=${PORT_JOAL_WEB:?err}
+      - --joal.ui.path.prefix=${JOAL_OBFUSCATION_PATH:?err}
+      - --joal.ui.secret-token=${JOAL_SECRET_TOKEN:?err}
+    networks:
+      - media-network
+    ports:
+      - "${PORT_JOAL_WEB:?err}:${PORT_JOAL_WEB:?err}"
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/joal:/config
+      - ${DOCKER_VOLUME_MEDIA:?err}/downloads/faking:/config/torrents
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+
+  # ----------------------------------------------------------------------------
+  # Authentication Portal: Authelia
+  # ----------------------------------------------------------------------------
+  # Authentication and authorization server providing two-factor authentication
+  # and single sign-on (SSO) for your applications via a web portal.
+  #
+  # Image:  https://github.com/authelia/authelia/pkgs/container/authelia
+  # See:    https://github.com/authelia/authelia
+  # ----------------------------------------------------------------------------
+
+  authelia:
+    image: ghcr.io/authelia/authelia:latest
+    container_name: authelia
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/authelia:/config
+    networks:
+      - media-network
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+
+  # ----------------------------------------------------------------------------
+  # Reverse Proxy: SWAG
+  # ----------------------------------------------------------------------------
+  # Reverse proxy between the internet and your applications.
+  # IncludesTLS certificates generation and (re)validation with certbot
+  # for Let's Encrypt and ZeroSSL.
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-swag
+  # See:    https://docs.linuxserver.io/general/swag
+  #         https://www.linuxserver.io/blog/zero-trust-hosting-and-reverse-proxy-via-cloudflare-swag-and-authelia
+  # ----------------------------------------------------------------------------
+
+  swag:
+    image: lscr.io/linuxserver/swag:latest
+    container_name: swag
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    depends_on:
+      - authelia
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/swag:/config
+      - ${DOCKER_VOLUME_CONFIG:?err}/swag/cache:/cache
+    networks:
+      - media-network
+    ports:
+      - ${PORT_SWAG_HTTP:?err}:80
+      - ${PORT_SWAG_HTTPS:?err}:443
+      - ${PORT_SWAG_DASHBOARD:?err}:81
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+      - URL=${CERT_DOMAIN:?err}
+      - SUBDOMAINS=${CERT_SUBDOMAINS}
+      - CERTPROVIDER=${CERT_PROVIDER}
+      - VALIDATION=${CERT_CHALLENGE:?err}
+      - DNSPLUGIN=${CERT_DNS_PLUGIN}
+      - PROPAGATION=${CERT_PROPAGATION}
+      - DUCKDNSTOKEN=${CERT_DUCKDNS_TOKEN}
+      - EMAIL=${CERT_EMAIL}
+      - ONLY_SUBDOMAINS=${CERT_SUBDOMAINS_ONLY}
+      - EXTRA_DOMAINS=${CERT_EXTRA_DOMAINS}
+      - STAGING=${CERT_STAGING}
+      - DOCKER_MODS=linuxserver/mods:swag-dashboard
+
+  # ----------------------------------------------------------------------------
+  # Cloudflare Protection Bypass: FlareSolverr
+  # ----------------------------------------------------------------------------
+  # Proxy server to bypass Cloudflare and DDoS-GUARD protection.
+  #
+  # Image:  https://hub.docker.com/r/flaresolverr/flaresolverr
+  # See:    https://github.com/FlareSolverr/FlareSolverr
+  # ----------------------------------------------------------------------------
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    networks:
+      - media-network
+    ports:
+      - "${PORT_FLARESOLVERR:?err}:8191"
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=${TIMEZONE:?err}
+
+  # ----------------------------------------------------------------------------
+  # Dynamic Domin Updater: DuckDNS
+  # ----------------------------------------------------------------------------
+  # Duckdns is a free service which will point a DNS
+  # (sub domains of duckdns.org) to an IP of your choice. The service
+  # is completely free, and doesn't require reactivation or forum posts
+  # to maintain its existence.
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-duckdns
+  # ----------------------------------------------------------------------------
+
+  duckdns:
+    image: lscr.io/linuxserver/duckdns:latest
+    container_name: duckdns
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/duckdns:/config
+    networks:
+      - media-network
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - TZ=${TIMEZONE:?err}
+      - SUBDOMAINS=${DDNS_SUBDOMAINS:?err}
+      - TOKEN=${DDNS_TOKEN:?err}
+      - LOG_FILE=true
+
+  # ----------------------------------------------------------------------------
+  # Search Indexer and Manager: Prowlarr
+  # ----------------------------------------------------------------------------
+  # Prowlarr is a indexer manager/proxy built on the popular arr
+  # `.net`/`reactjs` base stack to integrate with your various PVR apps.
+  # Prowlarr supports both Torrent Trackers and Usenet Indexers. It integrates
+  # seamlessly with Sonarr, Radarr, Lidarr, and Readarr offering complete
+  # management of your indexers with no per app Indexer setup required
+  # (we do it all).
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-prowlarr
+  # ----------------------------------------------------------------------------
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:develop
+    container_name: prowlarr
+    restart: unless-stopped
+    depends_on:
+      - qbittorrent
+      - flaresolverr
+      - gluetun
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/prowlarr:/config
+    networks:
+      - media-network
+    ports:
+      - "${PORT_PROWLARR_WEB:?err}:9696"
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - TZ=${TIMEZONE:?err}
+      - DOCKER_MODS=ghcr.io/gilbn/theme.park:prowlarr
+      - TP_THEME=${TP_THEME:?err}
+
+  # ----------------------------------------------------------------------------
+  # Movie Library Manager: Radarr
+  # ----------------------------------------------------------------------------
+  # Manage searching for and downloading movies.
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-radarr
+  # ----------------------------------------------------------------------------
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    depends_on:
+      - prowlarr
+      - qbittorrent
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/radarr:/config
+      - ${DOCKER_VOLUME_MEDIA:?err}:/data
+    networks:
+      - media-network
+    ports:
+      - "${PORT_RADARR_WEB:?err}:7878"
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - TZ=${TIMEZONE:?err}
+      - DOCKER_MODS=ghcr.io/gilbn/theme.park:radarr
+      - TP_THEME=${TP_THEME:?err}
+
+  # ----------------------------------------------------------------------------
+  # TV Shows Library Manager: Sonarr
+  # ----------------------------------------------------------------------------
+  # Manage searching for and downloading TV shows.
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-sonarr
+  # ----------------------------------------------------------------------------
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    restart: unless-stopped
+    depends_on:
+      - prowlarr
+      - qbittorrent
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/sonarr:/config
+      - ${DOCKER_VOLUME_MEDIA:?err}:/data
+    networks:
+      - media-network
+    ports:
+      - "${PORT_SONARR_WEB:?err}:8989"
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - TZ=${TIMEZONE:?err}
+      - DOCKER_MODS=ghcr.io/gilbn/theme.park:sonarr
+      - TP_THEME=${TP_THEME:?err}
+
+  # ----------------------------------------------------------------------------
+  # Media Server: Jellyfin
+  # ----------------------------------------------------------------------------
+  # Manage searching for and downloading TV shows.
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-jellyfin
+  # See:    https://jellyfin.org/docs/general/administration/installing#docker
+  #         https://jellyfin.org/docs/general/administration/hardware-acceleration/
+  # ----------------------------------------------------------------------------
+
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: 1
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/jellyfin:/config
+      - ${DOCKER_VOLUME_MEDIA:?err}/library:/data/media
+    networks:
+      - media-network
+    ports:
+      - "${PORT_JELLYFIN_WEB:?err}:8096"
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+
+  # ----------------------------------------------------------------------------
+  # Media Request Manager: Jellyseerr
+  # ----------------------------------------------------------------------------
+  # Allows users to search for and download TV shows automatically.
+  #
+  # Image:  https://hub.docker.com/r/fallenbagel/jellyseerr
+  # ----------------------------------------------------------------------------
+
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    restart: unless-stopped
+    depends_on:
+      - jellyfin
+      - radarr
+      - sonarr
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/jellyseerr:/app/config
+    networks:
+      - media-network
+    ports:
+      - "${PORT_JELLYSEERR_WEB:?err}:5055"
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+
+  # ----------------------------------------------------------------------------
+  # Video Transcoding: Tdarr
+  # ----------------------------------------------------------------------------
+  # Automatically transcode video files.
+  # The server orchestrate the work between workers (AKA nodes).
+  # Each node is responsible of transcoding movies and running healthchecks
+  # on the files. They all have access to one and only one disctinct GPU
+  # to ensure equal repartition of the workload over those.
+  #
+  # Image:  https://github.com/users/haveagitgat/packages/container/package/tdarr
+  # See:    https://github.com/HaveAGitGat/Tdarr
+  #         https://docs.tdarr.io/docs/installation/docker/run-compose
+  # ----------------------------------------------------------------------------
+
+  # ----------------------------------------------------------------------------
+  # Tdarr Server
+  # ----------------------------------------------------------------------------
+
+  tdarr-server:
+    image: ghcr.io/haveagitgat/tdarr:latest
+    container_name: tdarr-server
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/server:/app/server
+      - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
+      - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
+      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_MEDIA:?err}:/media
+    networks:
+      - media-network
+    ports:
+      - "${PORT_TDARR_SERVER:?err}:${PORT_TDARR_SERVER:?err}"
+      - "${PORT_TDARR_WEB:?err}:${PORT_TDARR_WEB:?err}"
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+      - internalNode=false
+      - nodeID=TdarrServer
+
+  # ----------------------------------------------------------------------------
+  # Tdarr Node 01
+  # ----------------------------------------------------------------------------
+
+  tdarr-node-01:
+    image: ghcr.io/haveagitgat/tdarr_node:latest
+    container_name: tdarr-node-01
+    restart: unless-stopped
+    depends_on:
+      - tdarr-server
+    runtime: nvidia
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
+      - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
+      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_MEDIA:?err}:/media
+    networks:
+      - media-network
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+      - nodeID=TdarrNode01
+      - serverIP=tdarr-server
+      - serverPort=${PORT_TDARR_SERVER:?err}
+      - NVIDIA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=all
+
+  # ----------------------------------------------------------------------------
+  # Tdarr Node 02
+  # ----------------------------------------------------------------------------
+
+  tdarr-node-02:
+    image: ghcr.io/haveagitgat/tdarr_node:latest
+    container_name: tdarr-node-02
+    restart: unless-stopped
+    depends_on:
+      - tdarr-server
+    runtime: nvidia
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
+      - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
+      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_MEDIA:?err}:/media
+    networks:
+      - media-network
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+      - nodeID=TdarrNode02
+      - serverIP=tdarr-server
+      - serverPort=${PORT_TDARR_SERVER:?err}
+      - NVIDIA_VISIBLE_DEVICES=1
+      - NVIDIA_DRIVER_CAPABILITIES=all
+
+  # ----------------------------------------------------------------------------
+  # Media Archive Extraction: Unpackerr
+  # ----------------------------------------------------------------------------
+  # Check for completed downloads and extract them so Lidarr, Radarr, Readarr,
+  # and Sonarr may import them. Small single-binary with reasonable logging
+  # that can extract downloaded archives and clean up the mess after they've
+  # been imported.
+  #
+  # Image:  https://github.com/Unpackerr/unpackerr
+  # See:    https://github.com/Unpackerr/unpackerr#readme
+  #         https://github.com/Unpackerr/unpackerr#docker-env-variables
+  # ----------------------------------------------------------------------------
+
+  unpackerr:
+    image: ghcr.io/hotio/unpackerr:latest
+    container_name: unpackerr
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/unpackerr:/config
+      - ${DOCKER_VOLUME_MEDIA:?err}:/data
+    network_mode: none
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+      - UN_DEBUG=false
+      - UN_LOG_FILE=/config/unpackerr.log
+      - UN_LOG_FILES=10
+      - UN_LOG_FILE_MB=10
+      - UN_INTERVAL=2m
+      - UN_START_DELAY=1m
+      - UN_RETRY_DELAY=5m
+      - UN_MAX_RETRIES=3
+      - UN_PARALLEL=1
+      - UN_FILE_MODE=0664
+      - UN_DIR_MODE=0775
+
+      # Sonarr
+      - UN_SONARR_0_URL=http://sonarr:8989
+      - UN_SONARR_0_API_KEY=${SONARR_API_KEY}
+      - UN_SONARR_0_PATHS_0=/data/downloads/sonarr
+      - UN_SONARR_0_PROTOCOLS=torrent,usenet
+      - UN_SONARR_0_TIMEOUT=10s
+      - UN_SONARR_0_DELETE_ORIG=false
+      - UN_SONARR_0_DELETE_DELAY=5m
+
+      # Radarr
+      - UN_RADARR_0_URL=http://radarr:7878
+      - UN_RADARR_0_API_KEY=${RADARR_API_KEY}
+      - UN_RADARR_0_PATHS_0=/data/torrents/radarr
+      - UN_RADARR_0_PROTOCOLS=torrent,usenet
+      - UN_RADARR_0_TIMEOUT=10s
+      - UN_RADARR_0_DELETE_ORIG=false
+      - UN_RADARR_0_DELETE_DELAY=5m
+
+  # ----------------------------------------------------------------------------
+  # Homepage: Heimdall
+  # ----------------------------------------------------------------------------
+  # Heimdall is a way to organise all those links to your most used web sites
+  # and web applications in a simple way.
+  #
+  # Image:  https://docs.linuxserver.io/images/docker-heimdall
+  # See:    https://docs.linuxserver.io/general/swag#using-heimdall-as-the-home-page-at-domain-root
+  #         https://heimdall.site/
+  # ----------------------------------------------------------------------------
+
+  # heimdall:
+  #   image: lscr.io/linuxserver/heimdall:latest
+  #   container_name: heimdall
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ${DOCKER_VOLUME_CONFIG:?err}/heimdall:/config
+  #   networks:
+  #     - media-network
+  #   environment:
+  #     - PUID=${PUID:?err}
+  #     - PGID=${PGID:?err}
+  #     - UMASK=${UMASK:?err}
+  #     - TZ=${TIMEZONE:?err}
+
+  # ----------------------------------------------------------------------------
+  # Torrents Monitoring: Flood
+  # ----------------------------------------------------------------------------
+  # Flood is a monitoring service for various torrent clients. It's a Node.js
+  # service that communicates with your favorite torrent client and serves
+  # a decent web UI for administration.
+  #
+  # Image:  https://hub.docker.com/r/jesec/flood/
+  # ----------------------------------------------------------------------------
+
+  flood:
+    image: jesec/flood:master
+    container_name: flood
+    restart: unless-stopped
+    depends_on:
+      - qbittorrent
+    user: ${PUID:?err}:${PGID:?err}
+    command:
+      - --allowedpath=/data
+      - --rundir=/config
+      - --port=${PORT_FLOOD_WEB:?err}
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/flood:/config
+      - ${DOCKER_VOLUME_MEDIA:?err}/downloads:/data:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - media-network
+    ports:
+      - ${PORT_FLOOD_WEB:?err}:${PORT_FLOOD_WEB:?err}
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - UMASK=${UMASK:?err}
+      - TZ=${TIMEZONE:?err}
+      - HOME=/config
+
+  # ----------------------------------------------------------------------------
+  # Containers Orchestration: Portainer
+  # ----------------------------------------------------------------------------
+  # Portainer is a container management interface. It started out as a GUI for
+  # Docker but has expanded to support several other container environments.
+  #
+  # Image:  https://hub.docker.com/r/portainer/portainer
+  # See:    https://github.com/portainer/portainer
+  # ----------------------------------------------------------------------------
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: always
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/portainer:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    # networks:
+    #   - media-network
+    network_mode: bridge
+    ports:
+      - ${PORT_PORTAINER_WEB:?err}:9000
+      - 9443:9443

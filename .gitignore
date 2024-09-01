@@ -1,0 +1,23 @@
+# Ignore config files that should not be persisted
+!config/
+
+config/*
+!config/swag/
+
+config/swag/*
+!config/swag/nginx
+!config/swag/www/
+
+config/swag/nginx/*
+!config/swag/nginx/*.conf
+!config/swag/nginx/proxy-confs
+config/swag/nginx/proxy-confs/*
+!config/swag/nginx/proxy-confs/*.conf
+
+!config/sonarr/
+
+config/sonarr/*
+!config/sonarr/scripts/
+
+# Ignore the environment file containing sensitive values
+.env
