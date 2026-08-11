@@ -44,6 +44,16 @@
 	forward_auth tinyauth:3000 {
 		uri /api/auth/caddy
 		copy_headers Remote-User Remote-Name Remote-Email Remote-Groups
+
+		# Tinyauth answers an unauthenticated request with 401 and puts the
+		# login URL - already carrying the original address to return to - in
+		# X-Tinyauth-Location. It does not send a Location header, so without
+		# this the browser is shown a bare 401 instead of the passkey prompt.
+		# The snippet in Tinyauth's own Caddy documentation omits this.
+		@unauthorized status 401
+		handle_response @unauthorized {
+			redir * {rp.header.X-Tinyauth-Location}
+		}
 	}
 }
 
