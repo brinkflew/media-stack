@@ -497,7 +497,7 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/server:/app/server
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
-      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
       - media-network
@@ -528,7 +528,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
-      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
       - media-network
@@ -559,7 +559,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
-      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
       - media-network
