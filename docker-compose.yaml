@@ -68,9 +68,12 @@ services:
       - "${BIND_LAN:?err}:8388:8388/tcp"                            # Gluetun Local Network Shadowsocks
       - "${BIND_LAN:?err}:8388:8388/udp"                            # Gluetun Local Network Shadowsocks
       - "${BIND_ADMIN:?err}:${PORT_QBITTORRENT_WEB:?err}:${PORT_QBITTORRENT_WEB:?err}" # WebUI Portal: qBittorrent
-      - "${PORT_QBITTORRENT_TCP:?err}:6881/tcp"                     # qBittorrent Port TCP (peers, must stay reachable)
-      - "${PORT_QBITTORRENT_UDP:?err}:6881/udp"                     # qBittorrent Port UDP (peers, must stay reachable)
       - "${BIND_ADMIN:?err}:${PORT_JOAL_WEB:?err}:${PORT_JOAL_WEB:?err}" # WebUI Portal: JOAL (shares this netns)
+      # No peer port is published on the host. Incoming peers arrive through the
+      # WireGuard tunnel on the port ProtonVPN forwards, which lands directly in
+      # this namespace - a host publish of 6881 would forward to a port nothing
+      # listens on, while needlessly opening it on the LAN. PORT_QBITTORRENT_TCP
+      # and _UDP are kept in .env only as a fallback for running without a VPN.
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -92,6 +95,14 @@ services:
       # nodes that actually support it.
       - VPN_PORT_FORWARDING=on
       - PORT_FORWARD_ONLY=on
+
+      # ProtonVPN hands out a different forwarded port on every reconnect, but
+      # qBittorrent's listen port is static in its config. Left alone the two
+      # drift apart and no incoming peer can reach the client. This pushes the
+      # new port into qBittorrent over its API each time the tunnel comes up.
+      # qBittorrent shares this container's network namespace, so 127.0.0.1
+      # reaches it, and WebUI\LocalHostAuth=false lets the call skip auth.
+      - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'wget -qO- --retry-connrefused --post-data="json={\"listen_port\":{{PORTS}}}" http://127.0.0.1:${PORT_QBITTORRENT_WEB:?err}/api/v2/app/setPreferences'
 
       # Server selection filters (all optional, leave blank for any server).
       - SERVER_CITIES=${VPN_SERVER_CITIES}
