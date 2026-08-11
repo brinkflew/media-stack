@@ -334,17 +334,10 @@ services:
     networks:
       - media-network
     ports:
-      # Parallel-run port. SWAG keeps 80/443 until the cutover is verified;
-      # DNS-01 means Caddy can obtain its certificates without either of them.
-      #
-      # Loopback, NOT the LAN. Pocket ID's /setup is unauthenticated until the
-      # first admin account exists, so whoever reaches it first owns the identity
-      # provider. Publishing this on 0.0.0.0 would put that on the public
-      # internet, because Docker's DNAT rules are evaluated before firewalld's
-      # zone filtering and a published port stays reachable regardless of zone.
-      # Reach it over an SSH tunnel instead:
-      #   ssh -L 8443:127.0.0.1:8443 home
-      - "${BIND_ADMIN:?err}:${PORT_CADDY_HTTPS:?err}:443"
+      # Public ingress. These are the only ports the router forwards, and every
+      # service reaches the outside world through them.
+      - "${PORT_CADDY_HTTP:?err}:80"                                # Public ingress
+      - "${PORT_CADDY_HTTPS:?err}:443"                              # Public ingress
     environment:
       - TZ=${TIMEZONE:?err}
       - DOMAIN=${DOMAIN:?err}
