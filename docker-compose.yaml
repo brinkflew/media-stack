@@ -219,6 +219,132 @@ services:
       - TZ=${TIMEZONE:?err}
 
   # ----------------------------------------------------------------------------
+  # Identity Provider: Pocket ID
+  # ----------------------------------------------------------------------------
+  # Passkey-only OpenID Connect provider. There are no passwords to phish, leak
+  # or rotate - authentication is a WebAuthn signature from a device the user
+  # already carries.
+  #
+  # It is only an OIDC *provider*: it has no forward-auth endpoint, so Tinyauth
+  # below is what turns Caddy's forward_auth into an OIDC flow. Applications
+  # that speak OIDC natively can point straight here instead.
+  #
+  # Deliberately publishes no host port. It is reached only through Caddy, which
+  # is also what gives it the HTTPS that WebAuthn refuses to work without.
+  #
+  # Image:  https://github.com/pocket-id/pocket-id/pkgs/container/pocket-id
+  # See:    https://pocket-id.org/docs/configuration/environment-variables
+  # ----------------------------------------------------------------------------
+
+  pocket-id:
+    image: ghcr.io/pocket-id/pocket-id:v2
+    container_name: pocket-id
+    restart: unless-stopped
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/pocket-id:/app/data
+    networks:
+      - media-network
+    environment:
+      - PUID=${PUID:?err}
+      - PGID=${PGID:?err}
+      - TZ=${TIMEZONE:?err}
+      - APP_URL=https://id.${DOMAIN:?err}
+      - TRUST_PROXY=${NET_DOCKER_SUBNET:?err}
+      # Encrypts the passkey and OIDC client material at rest. Losing it means
+      # losing every registered credential, so it belongs in the backup.
+      - ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY:?err}
+
+  # ----------------------------------------------------------------------------
+  # Forward Authentication: Tinyauth
+  # ----------------------------------------------------------------------------
+  # Sits between Caddy and the applications that have no SSO of their own. Caddy
+  # asks it whether a request is authorised; if not, it runs the OIDC flow
+  # against Pocket ID and the passkey prompt happens there.
+  #
+  # The whitelist matters: without it any account Pocket ID knows about can sign
+  # in to everything.
+  #
+  # Image:  https://github.com/tinyauthapp/tinyauth/pkgs/container/tinyauth
+  # See:    https://tinyauth.app/docs/guides/pocket-id
+  # ----------------------------------------------------------------------------
+
+  tinyauth:
+    image: ghcr.io/tinyauthapp/tinyauth:v5
+    container_name: tinyauth
+    restart: unless-stopped
+    depends_on:
+      - pocket-id
+    volumes:
+      - ${DOCKER_VOLUME_CONFIG:?err}/tinyauth:/data
+    networks:
+      - media-network
+    environment:
+      - TZ=${TIMEZONE:?err}
+      - TINYAUTH_APPURL=https://auth.${DOMAIN:?err}
+      - TINYAUTH_DATABASE_PATH=/data/tinyauth.db
+      # Everything reaches Tinyauth through Caddy, so without this it would see
+      # Caddy's address as the client and every IP-based rule would be wrong.
+      - TINYAUTH_AUTH_TRUSTEDPROXIES=${NET_DOCKER_SUBNET:?err}
+      - TINYAUTH_AUTH_SECURECOOKIE=true
+      # Skip Tinyauth's own login page and go straight to the passkey prompt.
+      - TINYAUTH_OAUTH_AUTOREDIRECT=pocketid
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTID=${POCKETID_CLIENT_ID}
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRET=${POCKETID_CLIENT_SECRET}
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_AUTHURL=https://id.${DOMAIN:?err}/authorize
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=https://id.${DOMAIN:?err}/api/oidc/token
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=https://id.${DOMAIN:?err}/api/oidc/userinfo
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL=https://auth.${DOMAIN:?err}/api/oauth/callback/pocketid
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_WHITELIST=${AUTH_WHITELIST}
+
+  # ----------------------------------------------------------------------------
+  # Reverse Proxy: Caddy
+  # ----------------------------------------------------------------------------
+  # Replaces SWAG as the single TLS terminator. Built from ./ingress/Dockerfile
+  # because the stock image carries no DNS provider modules and certificates
+  # here are issued over DNS-01 against Gandi.
+  #
+  # Routing lives in ./ingress/Caddyfile, mounted as a directory rather than a
+  # single file so that a `git pull` replacing the file does not leave the
+  # container holding a stale inode.
+  #
+  # /data holds the certificates, private keys and the ACME account. It is not
+  # regenerable without re-issuing everything, so it belongs in the backup.
+  #
+  # Image:  built locally, see ./ingress/Dockerfile
+  # ----------------------------------------------------------------------------
+
+  caddy:
+    build:
+      context: ./ingress
+    image: media-stack/caddy:latest
+    container_name: caddy
+    restart: unless-stopped
+    depends_on:
+      - tinyauth
+    volumes:
+      - ./ingress:/etc/caddy:ro
+      - ${DOCKER_VOLUME_CONFIG:?err}/caddy/data:/data
+      - ${DOCKER_VOLUME_CONFIG:?err}/caddy/config:/config
+    networks:
+      - media-network
+    ports:
+      # Parallel-run port. SWAG keeps 80/443 until the cutover is verified;
+      # DNS-01 means Caddy can obtain its certificates without either of them.
+      - "${BIND_LAN:?err}:${PORT_CADDY_HTTPS:?err}:443"
+    environment:
+      - TZ=${TIMEZONE:?err}
+      - DOMAIN=${DOMAIN:?err}
+      - GANDI_BEARER_TOKEN=${GANDI_BEARER_TOKEN:?err}
+      # Upstream ports for the services whose listening port is itself set from
+      # the environment, so the Caddyfile cannot drift from the service config.
+      - PORT_TDARR_WEB=${PORT_TDARR_WEB:?err}
+      - PORT_FLOOD_WEB=${PORT_FLOOD_WEB:?err}
+      - PORT_QBITTORRENT_WEB=${PORT_QBITTORRENT_WEB:?err}
+      - PORT_JOAL_WEB=${PORT_JOAL_WEB:?err}
+
+  # ----------------------------------------------------------------------------
   # Reverse Proxy: SWAG
   # ----------------------------------------------------------------------------
   # Reverse proxy between the internet and your applications.

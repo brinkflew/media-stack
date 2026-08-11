@@ -1,0 +1,128 @@
+# ==============================================================================
+# Caddy: reverse proxy and TLS terminator
+# ------------------------------------------------------------------------------
+# Replaces SWAG. One site block per hostname, proxying to a container by name on
+# media-network.
+#
+# Adding a service is two steps: a CNAME to the dynamic-DNS name, and a block
+# below. There is no certificate list to maintain - Caddy issues and renews a
+# certificate per site block on demand. A hostname with no block gets no
+# certificate and fails the TLS handshake, so unlisted names are closed by
+# construction rather than by remembering to remove them.
+#
+# Upstream ports are the ports *inside* the container, which is not always the
+# published one. Where an application's listening port is itself driven by the
+# environment, the same variable is used here so the two cannot drift.
+# ==============================================================================
+{
+	# Certificates are issued over DNS-01 against Gandi, using a Personal Access
+	# Token. DNS-01 needs no inbound port 80, which is what lets this run
+	# alongside SWAG on a spare port until the cutover.
+	acme_dns gandi {env.GANDI_BEARER_TOKEN}
+}
+
+# ------------------------------------------------------------------------------
+# Snippets
+# ------------------------------------------------------------------------------
+
+# Put a service behind single sign-on. Caddy asks Tinyauth whether the request
+# is authorised; Tinyauth runs the OIDC flow against Pocket ID and the passkey
+# prompt happens there. Unauthenticated requests are redirected to auth.
+#
+# Empty until Pocket ID has an admin account - see the note at the bottom.
+(protected) {
+}
+
+# ------------------------------------------------------------------------------
+# Public
+# ------------------------------------------------------------------------------
+# These cannot sit behind an interactive passkey prompt: TVs, phones and the
+# Jellyfin clients have no browser to complete it in. Both applications
+# authenticate their own users.
+# ------------------------------------------------------------------------------
+
+watch.{$DOMAIN} {
+	reverse_proxy jellyfin:8096
+}
+
+request.{$DOMAIN} {
+	reverse_proxy jellyseerr:5055
+}
+
+# ------------------------------------------------------------------------------
+# Identity
+# ------------------------------------------------------------------------------
+# The sign-on pair itself, which obviously cannot be placed behind its own
+# sign-on. Pocket ID insists on HTTPS because WebAuthn refuses to register a
+# passkey over a plain connection.
+# ------------------------------------------------------------------------------
+
+id.{$DOMAIN} {
+	reverse_proxy pocket-id:1411
+}
+
+auth.{$DOMAIN} {
+	reverse_proxy tinyauth:3000
+}
+
+# ------------------------------------------------------------------------------
+# Administration
+# ------------------------------------------------------------------------------
+# Every one of these was previously reachable from the internet behind nothing
+# but its own login, and the access log shows scanners walking their APIs.
+# ------------------------------------------------------------------------------
+
+sonarr.{$DOMAIN} {
+	import protected
+	reverse_proxy sonarr:8989
+}
+
+radarr.{$DOMAIN} {
+	import protected
+	reverse_proxy radarr:7878
+}
+
+prowlarr.{$DOMAIN} {
+	import protected
+	reverse_proxy prowlarr:9696
+}
+
+tdarr.{$DOMAIN} {
+	import protected
+	reverse_proxy tdarr-server:{$PORT_TDARR_WEB}
+}
+
+flood.{$DOMAIN} {
+	import protected
+	reverse_proxy flood:{$PORT_FLOOD_WEB}
+}
+
+# qBittorrent and JOAL have no address of their own: both run inside gluetun's
+# network namespace so that neither can reach the internet outside the VPN.
+# gluetun is what holds their ports, so gluetun is what Caddy talks to.
+#
+# nginx needed seven location blocks each to cover the API, websocket and
+# long-poll paths. reverse_proxy handles all of it, websockets included.
+
+torrent.{$DOMAIN} {
+	import protected
+	reverse_proxy gluetun:{$PORT_QBITTORRENT_WEB}
+}
+
+fakerr.{$DOMAIN} {
+	import protected
+	reverse_proxy gluetun:{$PORT_JOAL_WEB}
+}
+
+# ------------------------------------------------------------------------------
+# Deliberately absent
+# ------------------------------------------------------------------------------
+# `docker` (Portainer) and `home` (Heimdall) have no block. Portainer is being
+# removed along with its docker.sock mount, and Heimdall has been commented out
+# of the stack for a long time. Without a block neither name gets a certificate,
+# so both stop answering.
+#
+# The `protected` snippet is empty until Pocket ID has an admin account: this
+# file is deployed first so that every upstream can be verified on its own,
+# before authentication is layered on top. See CLAUDE.md.
+# ------------------------------------------------------------------------------
