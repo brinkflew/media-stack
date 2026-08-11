@@ -60,22 +60,28 @@ services:
       - /dev/net/tun:/dev/net/tun
     networks:
       - media-network
-    ports:
-      - "${BIND_LAN:?err}:8888:8888/tcp"                            # Gluetun Local Network HTTP proxy
-      - "${BIND_LAN:?err}:8388:8388/tcp"                            # Gluetun Local Network Shadowsocks
-      - "${BIND_LAN:?err}:8388:8388/udp"                            # Gluetun Local Network Shadowsocks
-      # No peer port is published on the host. Incoming peers arrive through the
-      # WireGuard tunnel on the port ProtonVPN forwards, which lands directly in
-      # this namespace - a host publish of 6881 would forward to a port nothing
-      # listens on, while needlessly opening it on the LAN. PORT_QBITTORRENT_TCP
-      # and _UDP are kept in .env only as a fallback for running without a VPN.
+    # Nothing is published on the host.
+    #
+    # The web UIs of the two containers sharing this namespace are reached
+    # through Caddy over the bridge, and no peer port is needed either:
+    # incoming peers arrive through the WireGuard tunnel on the port ProtonVPN
+    # forwards, which lands directly in this namespace. Publishing 6881 would
+    # only forward to a port nothing listens on. PORT_QBITTORRENT_TCP and _UDP
+    # are kept in .env solely as a fallback for running without a VPN.
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
       - TZ=${TIMEZONE:?err}
       - FIREWALL_OUTBOUND_SUBNETS=${NET_LOCAL_SUBNET:?err}
-      - HTTPPROXY=on
-      - SHADOWSOCKS=on
+
+      # Off. Both ran without credentials - HTTPPROXY_USER, HTTPPROXY_PASSWORD
+      # and SHADOWSOCKS_PASSWORD were all empty - which made them an open proxy
+      # into the VPN for anything on the LAN. Nothing here used them. If you
+      # want them back, set credentials at the same time, and remember that
+      # binding them to BIND_LAN does not keep them off the public interface:
+      # Docker's DNAT rules are evaluated before firewalld's zone filtering.
+      - HTTPPROXY=off
+      - SHADOWSOCKS=off
 
       # ProtonVPN over WireGuard. For this provider gluetun already knows every
       # server's public key, endpoint and tunnel address from its embedded server
