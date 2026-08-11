@@ -55,12 +55,18 @@ for optional.
 
 - `media-network` — a bridge with a pinned subnet (`NET_DOCKER_SUBNET`) that most services share
   and address each other on by container name (`http://sonarr:8989`).
-- **`gluetun` is the egress chokepoint.** qBittorrent, Flood and JOAL use
-  `network_mode: "service:gluetun"`, meaning they have no network stack of their own — they live
-  inside the VPN container's namespace. If the VPN drops, they lose connectivity entirely. That
-  is a kill-switch by construction, and it is why qBittorrent's web UI port is published on the
+- **`gluetun` is the egress chokepoint.** **qBittorrent — and only qBittorrent** — uses
+  `network_mode: "service:gluetun"`, meaning it has no network stack of its own and lives inside
+  the VPN container's namespace. If the VPN drops, it loses connectivity entirely. That is a
+  kill-switch by construction, and it is why qBittorrent's web UI port is published on the
   *gluetun* service, not on qBittorrent. **Never give a downloader its own `networks:` entry** —
   it would leak traffic outside the VPN.
+
+⚠️ **JOAL is not behind the VPN.** It sits on `media-network` like any ordinary service, so its
+tracker announces originate from the host's own IP while qBittorrent's go through ProtonVPN.
+If that split is not deliberate, JOAL should move into gluetun's namespace the same way
+qBittorrent has. Flood is also on the bridge, but it only talks to qBittorrent's API, so that
+one is fine.
 
 `unpackerr` runs `network_mode: none`. It only touches the filesystem.
 
