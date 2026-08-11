@@ -686,31 +686,6 @@ services:
       - UN_RADARR_0_DELETE_DELAY=5m
 
   # ----------------------------------------------------------------------------
-  # Homepage: Heimdall
-  # ----------------------------------------------------------------------------
-  # Heimdall is a way to organise all those links to your most used web sites
-  # and web applications in a simple way.
-  #
-  # Image:  https://docs.linuxserver.io/images/docker-heimdall
-  # See:    https://docs.linuxserver.io/general/swag#using-heimdall-as-the-home-page-at-domain-root
-  #         https://heimdall.site/
-  # ----------------------------------------------------------------------------
-
-  # heimdall:
-  #   image: lscr.io/linuxserver/heimdall:latest
-  #   container_name: heimdall
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ${DOCKER_VOLUME_CONFIG:?err}/heimdall:/config
-  #   networks:
-  #     - media-network
-  #   environment:
-  #     - PUID=${PUID:?err}
-  #     - PGID=${PGID:?err}
-  #     - UMASK=${UMASK:?err}
-  #     - TZ=${TIMEZONE:?err}
-
-  # ----------------------------------------------------------------------------
   # Torrents Monitoring: Flood
   # ----------------------------------------------------------------------------
   # Flood is a monitoring service for various torrent clients. It's a Node.js
