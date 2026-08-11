@@ -14,7 +14,7 @@ service definition, and the verification loop is "does the container come up and
 ## Deployment model
 
 This repo is the source of truth. The server runs a **git checkout of it** at `/var/media-stack`,
-reachable over passwordless SSH as `home` (Fedora, user `avanserv`, `PUID`/`PGID` 1000).
+reachable over passwordless SSH as `home`. Containers run as `PUID`/`PGID` 1000.
 
 ```bash
 ssh home 'cd /var/media-stack && git status --short'   # ALWAYS do this before editing
@@ -62,13 +62,19 @@ for optional.
   *gluetun* service, not on qBittorrent. **Never give a downloader its own `networks:` entry** —
   it would leak traffic outside the VPN.
 
-⚠️ **JOAL is not behind the VPN.** It sits on `media-network` like any ordinary service, so its
-tracker announces originate from the host's own IP while qBittorrent's go through ProtonVPN.
-If that split is not deliberate, JOAL should move into gluetun's namespace the same way
-qBittorrent has. Flood is also on the bridge, but it only talks to qBittorrent's API, so that
-one is fine.
+**JOAL shares that namespace too**, because it announces to trackers and would otherwise do so
+from the host's own IP while qBittorrent used the VPN. Both web UIs are therefore published on
+the `gluetun` service. Flood stays on the bridge — it only talks to qBittorrent's API.
 
-`unpackerr` runs `network_mode: none`. It only touches the filesystem.
+**No peer port is published on the host.** With `VPN_PORT_FORWARDING=on`, incoming peers arrive
+through the tunnel on the port ProtonVPN forwards, landing straight in gluetun's namespace.
+That port changes on every reconnect, so `VPN_PORT_FORWARDING_UP_COMMAND` pushes it into
+qBittorrent over its API each time the tunnel comes up; without that the two silently drift apart
+and the client goes unconnectable. Publishing 6881 on the host would only forward to a port
+nothing listens on.
+
+`unpackerr` needs the bridge despite touching only the filesystem — it discovers what to extract
+by polling the Sonarr and Radarr queue APIs.
 
 **One media mount, not several.** Every media-touching service mounts `${DOCKER_VOLUME_MEDIA}`
 (`/mnt/media`) as a single `/data`, so `downloads/` and `library/` are on one filesystem and the
@@ -93,31 +99,32 @@ If you add a config file that should be tracked, you must add a matching `!` rul
 
 ## Known state
 
-Findings from an audit of the running host. Do not rediscover these:
+Conclusions from auditing the running host. Do not rediscover these:
 
-- **The host OS is EOL.** Fedora 37 Workstation, unsupported since 2023-11-14, several hundred
-  pending updates, running a full GNOME desktop. It is being replaced (see below).
 - **`firewalld` does not protect published container ports.** Docker inserts its own DNAT and
-  FORWARD rules ahead of firewalld's zone filtering, so a published port is reachable even when
-  the active zone does not allow it. Verified on this host: the `FedoraWorkstation` zone lists
-  only `dhcpv6-client mdns samba-client ssh` (plus TCP/UDP 1025–65535), yet 80 and 443 answer
-  from the LAN. **Do not assume a firewall rule will contain a container.** Either publish to a
-  specific interface (what `BIND_ADMIN`/`BIND_LAN` are for) or filter in the `DOCKER-USER` chain,
-  which is the only iptables chain Docker leaves under your control.
-- **The `FedoraWorkstation` zone is still too open** for host-level services — it allows TCP+UDP
-  1025–65535, which is worth closing on principle even though it is not what was exposing the
-  containers.
+  FORWARD rules ahead of firewalld's zone filtering, so a published port stays reachable even
+  when the active zone does not allow it — verified on this host, not assumed. **Do not assume a
+  firewall rule will contain a container.** Either publish to a specific interface (what
+  `BIND_ADMIN`/`BIND_LAN` are for) or filter in the `DOCKER-USER` chain, the only iptables chain
+  Docker leaves under your control.
+- **The host OS predates the current stack design** and is being replaced rather than upgraded;
+  see Target architecture below. Do not invest in host-level configuration that the migration
+  will discard.
 - **Images are unpinned.** Everything is `:latest` (Prowlarr is `:develop`), so there is no
-  reproducibility and no way to roll back a bad image.
-- **`config/` has no backup**, and `/mnt/media` is a single 7.3T disk with no redundancy.
-- **An auth migration is half-finished** — Authelia is running, but Tinyauth nginx confs exist on
-  the server. Pick a direction before adding new protected services.
+  reproducibility and no way to roll back a bad image. Pinning is part of the quadlets migration.
+- **`/mnt/media` is a single disk with no redundancy**, holding only re-downloadable media. It is
+  treated as disposable and is deliberately not backed up. `config/` is the part that matters.
+- **Transcode scratch must stay off the media disk.** `DOCKER_VOLUME_CACHE` points at the SSD
+  because both Tdarr nodes otherwise read source media and write scratch to the same spindle and
+  contend for seeks. Do not "simplify" it back under `DOCKER_VOLUME_MEDIA`.
+- **An auth migration is half-finished** — Authelia is live, but Tinyauth nginx confs are staged.
+  Pick a direction before adding new protected services.
 - **`nv-patch.sh` is obsolete.** It lifted the NVENC concurrent-session limit, which NVIDIA raised
-  to 8 for consumer GPUs in Jan 2024. The two RTX 3060 Tis cannot hit that ceiling with two Tdarr
-  nodes. Do not port it forward.
-- **Bug: unpackerr never extracts Radarr archives.** `UN_RADARR_0_PATHS_0=/data/torrents/radarr`,
-  but there is no `/mnt/media/torrents` — the real path is `/data/downloads/radarr`, which is
-  what the Sonarr entry correctly uses.
+  to 8 for consumer GPUs in Jan 2024. Two Tdarr nodes cannot reach that ceiling. Do not port it
+  forward — on an immutable host, patching a driver library in `/usr` fights OSTree every update.
+- **Two known-broken proxy routes**, both awaiting removal rather than repair: the Portainer
+  subdomain 502s because Portainer is not on `media-network`, and the Heimdall one 403s because
+  the service is commented out.
 
 ## Target architecture
 
