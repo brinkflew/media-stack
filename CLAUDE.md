@@ -97,10 +97,16 @@ Findings from an audit of the running host. Do not rediscover these:
 
 - **The host OS is EOL.** Fedora 37 Workstation, unsupported since 2023-11-14, several hundred
   pending updates, running a full GNOME desktop. It is being replaced (see below).
-- **Services are over-exposed.** `firewalld` is on the `FedoraWorkstation` zone, which opens
-  TCP+UDP 1025–65535, and every container publishes on `0.0.0.0` while the host holds a public
-  IPv6. Admin UIs are reachable directly, bypassing SWAG and Authelia. Publish new ports as
-  `127.0.0.1:${PORT_X}:NNNN`.
+- **`firewalld` does not protect published container ports.** Docker inserts its own DNAT and
+  FORWARD rules ahead of firewalld's zone filtering, so a published port is reachable even when
+  the active zone does not allow it. Verified on this host: the `FedoraWorkstation` zone lists
+  only `dhcpv6-client mdns samba-client ssh` (plus TCP/UDP 1025–65535), yet 80 and 443 answer
+  from the LAN. **Do not assume a firewall rule will contain a container.** Either publish to a
+  specific interface (what `BIND_ADMIN`/`BIND_LAN` are for) or filter in the `DOCKER-USER` chain,
+  which is the only iptables chain Docker leaves under your control.
+- **The `FedoraWorkstation` zone is still too open** for host-level services — it allows TCP+UDP
+  1025–65535, which is worth closing on principle even though it is not what was exposing the
+  containers.
 - **Images are unpinned.** Everything is `:latest` (Prowlarr is `:develop`), so there is no
   reproducibility and no way to roll back a bad image.
 - **`config/` has no backup**, and `/mnt/media` is a single 7.3T disk with no redundancy.
