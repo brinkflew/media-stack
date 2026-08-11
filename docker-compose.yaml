@@ -563,7 +563,12 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/unpackerr:/config
       - ${DOCKER_VOLUME_MEDIA:?err}:/data
-    network_mode: none
+    # Unpackerr polls the Sonarr/Radarr queue APIs to learn what to extract, so
+    # it needs the bridge. It previously ran `network_mode: none`, which left it
+    # logging "network is unreachable" every 2 minutes since at least Feb 2025
+    # without ever extracting anything. It publishes no ports of its own.
+    networks:
+      - media-network
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
