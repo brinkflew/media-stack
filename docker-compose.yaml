@@ -10,8 +10,6 @@
 # not need to edit this configuration.
 # ==============================================================================
 
-version: "3.7"
-
 # ------------------------------------------------------------------------------
 # Networking
 # ------------------------------------------------------------------------------
@@ -63,12 +61,9 @@ services:
     networks:
       - media-network
     ports:
-      - "${BIND_ADMIN:?err}:8000:8000/tcp"                          # Gluetun control server API
       - "${BIND_LAN:?err}:8888:8888/tcp"                            # Gluetun Local Network HTTP proxy
       - "${BIND_LAN:?err}:8388:8388/tcp"                            # Gluetun Local Network Shadowsocks
       - "${BIND_LAN:?err}:8388:8388/udp"                            # Gluetun Local Network Shadowsocks
-      - "${BIND_ADMIN:?err}:${PORT_QBITTORRENT_WEB:?err}:${PORT_QBITTORRENT_WEB:?err}" # WebUI Portal: qBittorrent
-      - "${BIND_ADMIN:?err}:${PORT_JOAL_WEB:?err}:${PORT_JOAL_WEB:?err}" # WebUI Portal: JOAL (shares this netns)
       # No peer port is published on the host. Incoming peers arrive through the
       # WireGuard tunnel on the port ProtonVPN forwards, which lands directly in
       # this namespace - a host publish of 6881 would forward to a port nothing
@@ -188,30 +183,6 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/joal:/config
       - ${DOCKER_VOLUME_MEDIA:?err}/downloads/faking:/config/torrents
-    environment:
-      - PUID=${PUID:?err}
-      - PGID=${PGID:?err}
-      - UMASK=${UMASK:?err}
-      - TZ=${TIMEZONE:?err}
-
-  # ----------------------------------------------------------------------------
-  # Authentication Portal: Authelia
-  # ----------------------------------------------------------------------------
-  # Authentication and authorization server providing two-factor authentication
-  # and single sign-on (SSO) for your applications via a web portal.
-  #
-  # Image:  https://github.com/authelia/authelia/pkgs/container/authelia
-  # See:    https://github.com/authelia/authelia
-  # ----------------------------------------------------------------------------
-
-  authelia:
-    image: ghcr.io/authelia/authelia:latest
-    container_name: authelia
-    restart: unless-stopped
-    volumes:
-      - ${DOCKER_VOLUME_CONFIG:?err}/authelia:/config
-    networks:
-      - media-network
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -350,53 +321,6 @@ services:
       - PORT_JOAL_WEB=${PORT_JOAL_WEB:?err}
 
   # ----------------------------------------------------------------------------
-  # Reverse Proxy: SWAG
-  # ----------------------------------------------------------------------------
-  # Reverse proxy between the internet and your applications.
-  # IncludesTLS certificates generation and (re)validation with certbot
-  # for Let's Encrypt and ZeroSSL.
-  #
-  # Image:  https://docs.linuxserver.io/images/docker-swag
-  # See:    https://docs.linuxserver.io/general/swag
-  #         https://www.linuxserver.io/blog/zero-trust-hosting-and-reverse-proxy-via-cloudflare-swag-and-authelia
-  # ----------------------------------------------------------------------------
-
-  swag:
-    image: lscr.io/linuxserver/swag:latest
-    container_name: swag
-    cap_add:
-      - NET_ADMIN
-    restart: unless-stopped
-    depends_on:
-      - authelia
-    volumes:
-      - ${DOCKER_VOLUME_CONFIG:?err}/swag:/config
-      - ${DOCKER_VOLUME_CONFIG:?err}/swag/cache:/cache
-    networks:
-      - media-network
-    ports:
-      - ${PORT_SWAG_HTTP:?err}:80                                   # Public ingress
-      - ${PORT_SWAG_HTTPS:?err}:443                                 # Public ingress
-      - ${BIND_ADMIN:?err}:${PORT_SWAG_DASHBOARD:?err}:81
-    environment:
-      - PUID=${PUID:?err}
-      - PGID=${PGID:?err}
-      - UMASK=${UMASK:?err}
-      - TZ=${TIMEZONE:?err}
-      - URL=${CERT_DOMAIN:?err}
-      - SUBDOMAINS=${CERT_SUBDOMAINS}
-      - CERTPROVIDER=${CERT_PROVIDER}
-      - VALIDATION=${CERT_CHALLENGE:?err}
-      - DNSPLUGIN=${CERT_DNS_PLUGIN}
-      - PROPAGATION=${CERT_PROPAGATION}
-      - DUCKDNSTOKEN=${CERT_DUCKDNS_TOKEN}
-      - EMAIL=${CERT_EMAIL}
-      - ONLY_SUBDOMAINS=${CERT_SUBDOMAINS_ONLY}
-      - EXTRA_DOMAINS=${CERT_EXTRA_DOMAINS}
-      - STAGING=${CERT_STAGING}
-      - DOCKER_MODS=linuxserver/mods:swag-dashboard
-
-  # ----------------------------------------------------------------------------
   # Cloudflare Protection Bypass: FlareSolverr
   # ----------------------------------------------------------------------------
   # Proxy server to bypass Cloudflare and DDoS-GUARD protection.
@@ -411,8 +335,6 @@ services:
     restart: unless-stopped
     networks:
       - media-network
-    ports:
-      - "${BIND_ADMIN:?err}:${PORT_FLARESOLVERR:?err}:8191"
     environment:
       - LOG_LEVEL=info
       - LOG_HTML=false
@@ -471,8 +393,6 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/prowlarr:/config
     networks:
       - media-network
-    ports:
-      - "${BIND_ADMIN:?err}:${PORT_PROWLARR_WEB:?err}:9696"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -500,8 +420,6 @@ services:
       - ${DOCKER_VOLUME_MEDIA:?err}:/data
     networks:
       - media-network
-    ports:
-      - "${BIND_ADMIN:?err}:${PORT_RADARR_WEB:?err}:7878"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -529,8 +447,6 @@ services:
       - ${DOCKER_VOLUME_MEDIA:?err}:/data
     networks:
       - media-network
-    ports:
-      - "${BIND_ADMIN:?err}:${PORT_SONARR_WEB:?err}:8989"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -594,8 +510,6 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/jellyseerr:/app/config
     networks:
       - media-network
-    ports:
-      - "${BIND_ADMIN:?err}:${PORT_JELLYSEERR_WEB:?err}:5055"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -632,9 +546,6 @@ services:
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
       - media-network
-    ports:
-      - "${BIND_ADMIN:?err}:${PORT_TDARR_SERVER:?err}:${PORT_TDARR_SERVER:?err}"
-      - "${BIND_ADMIN:?err}:${PORT_TDARR_WEB:?err}:${PORT_TDARR_WEB:?err}"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -820,35 +731,9 @@ services:
       - /etc/localtime:/etc/localtime:ro
     networks:
       - media-network
-    ports:
-      - ${BIND_ADMIN:?err}:${PORT_FLOOD_WEB:?err}:${PORT_FLOOD_WEB:?err}
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
       - UMASK=${UMASK:?err}
       - TZ=${TIMEZONE:?err}
       - HOME=/config
-
-  # ----------------------------------------------------------------------------
-  # Containers Orchestration: Portainer
-  # ----------------------------------------------------------------------------
-  # Portainer is a container management interface. It started out as a GUI for
-  # Docker but has expanded to support several other container environments.
-  #
-  # Image:  https://hub.docker.com/r/portainer/portainer
-  # See:    https://github.com/portainer/portainer
-  # ----------------------------------------------------------------------------
-
-  portainer:
-    image: portainer/portainer-ce:latest
-    container_name: portainer
-    restart: always
-    volumes:
-      - ${DOCKER_VOLUME_CONFIG:?err}/portainer:/data
-      - /var/run/docker.sock:/var/run/docker.sock
-    # networks:
-    #   - media-network
-    network_mode: bridge
-    ports:
-      - ${BIND_ADMIN:?err}:${PORT_PORTAINER_WEB:?err}:9000
-      - ${BIND_ADMIN:?err}:9443:9443
