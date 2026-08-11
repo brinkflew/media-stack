@@ -36,10 +36,15 @@
 # is authorised; Tinyauth runs the OIDC flow against Pocket ID and the passkey
 # prompt happens there. Unauthenticated requests are redirected to auth.
 #
-# Carries no forward_auth until Pocket ID has an admin account - see the note at
-# the bottom.
+# The copied headers let a service know who the user is without implementing
+# any of this itself, which is what makes it work for applications that have no
+# concept of single sign-on.
 (protected) {
 	import base
+	forward_auth tinyauth:3000 {
+		uri /api/auth/caddy
+		copy_headers Remote-User Remote-Name Remote-Email Remote-Groups
+	}
 }
 
 # ------------------------------------------------------------------------------
@@ -135,7 +140,7 @@ fakerr.{$DOMAIN} {
 # of the stack for a long time. Without a block neither name gets a certificate,
 # so both stop answering.
 #
-# The `protected` snippet carries no forward_auth until Pocket ID has an admin
-# account: this file is deployed first so that every upstream can be verified on
-# its own, before authentication is layered on top. See CLAUDE.md.
+# `watch` and `request` are the only routes reachable without signing in. Both
+# authenticate their own users, and their clients - TVs, phones, the Jellyfin
+# apps - have no browser in which to complete a passkey prompt.
 # ------------------------------------------------------------------------------
