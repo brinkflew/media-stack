@@ -25,12 +25,21 @@
 # Snippets
 # ------------------------------------------------------------------------------
 
+# Caddy emits no access log unless asked, and journald is a better home for it
+# than the rotated files SWAG kept. Worth having: it was the access log that
+# showed internet scanners walking the *arr APIs in the first place.
+(base) {
+	log
+}
+
 # Put a service behind single sign-on. Caddy asks Tinyauth whether the request
 # is authorised; Tinyauth runs the OIDC flow against Pocket ID and the passkey
 # prompt happens there. Unauthenticated requests are redirected to auth.
 #
-# Empty until Pocket ID has an admin account - see the note at the bottom.
+# Carries no forward_auth until Pocket ID has an admin account - see the note at
+# the bottom.
 (protected) {
+	import base
 }
 
 # ------------------------------------------------------------------------------
@@ -42,10 +51,12 @@
 # ------------------------------------------------------------------------------
 
 watch.{$DOMAIN} {
+	import base
 	reverse_proxy jellyfin:8096
 }
 
 request.{$DOMAIN} {
+	import base
 	reverse_proxy jellyseerr:5055
 }
 
@@ -58,10 +69,12 @@ request.{$DOMAIN} {
 # ------------------------------------------------------------------------------
 
 id.{$DOMAIN} {
+	import base
 	reverse_proxy pocket-id:1411
 }
 
 auth.{$DOMAIN} {
+	import base
 	reverse_proxy tinyauth:3000
 }
 
@@ -122,7 +135,7 @@ fakerr.{$DOMAIN} {
 # of the stack for a long time. Without a block neither name gets a certificate,
 # so both stop answering.
 #
-# The `protected` snippet is empty until Pocket ID has an admin account: this
-# file is deployed first so that every upstream can be verified on its own,
-# before authentication is layered on top. See CLAUDE.md.
+# The `protected` snippet carries no forward_auth until Pocket ID has an admin
+# account: this file is deployed first so that every upstream can be verified on
+# its own, before authentication is layered on top. See CLAUDE.md.
 # ------------------------------------------------------------------------------
