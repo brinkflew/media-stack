@@ -248,7 +248,11 @@ services:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
       - TZ=${TIMEZONE:?err}
-      - APP_URL=https://id.${DOMAIN:?err}
+      # Must match the URL the browser actually uses, port included. WebAuthn
+      # validates the full origin string from the browser against this, and a
+      # port mismatch fails the registration ceremony at the finish step with a
+      # generic "couldn't process the response from your passkey".
+      - APP_URL=${POCKETID_APP_URL:?err}
       - TRUST_PROXY=${NET_DOCKER_SUBNET:?err}
       # Encrypts the passkey and OIDC client material at rest. Losing it means
       # losing every registered credential, so it belongs in the backup.
