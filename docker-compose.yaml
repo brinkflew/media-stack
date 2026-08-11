@@ -63,38 +63,71 @@ services:
     networks:
       - media-network
     ports:
-      - "8888:8888/tcp"                                             # Gluetun Local Network HTTP proxy
-      - "8388:8388/tcp"                                             # Gluetun Local Network Shadowsocks
-      - "8388:8388/udp"                                             # Gluetun Local Network Shadowsocks
-      - "${PORT_QBITTORRENT_WEB:?err}:${PORT_QBITTORRENT_WEB:?err}" # WebUI Portal: qBittorrent
-      - "${PORT_QBITTORRENT_TCP:?err}:6881/tcp"                     # qBittorrent Port TCP
-      - "${PORT_QBITTORRENT_UDP:?err}:6881/udp"                     # qBittorrent Port UDP
+      - "${BIND_ADMIN:?err}:8000:8000/tcp"                          # Gluetun control server API
+      - "${BIND_LAN:?err}:8888:8888/tcp"                            # Gluetun Local Network HTTP proxy
+      - "${BIND_LAN:?err}:8388:8388/tcp"                            # Gluetun Local Network Shadowsocks
+      - "${BIND_LAN:?err}:8388:8388/udp"                            # Gluetun Local Network Shadowsocks
+      - "${BIND_ADMIN:?err}:${PORT_QBITTORRENT_WEB:?err}:${PORT_QBITTORRENT_WEB:?err}" # WebUI Portal: qBittorrent
+      - "${BIND_ADMIN:?err}:${PORT_JOAL_WEB:?err}:${PORT_JOAL_WEB:?err}" # WebUI Portal: JOAL (shares this netns)
+      # No peer port is published on the host. Incoming peers arrive through the
+      # WireGuard tunnel on the port ProtonVPN forwards, which lands directly in
+      # this namespace - a host publish of 6881 would forward to a port nothing
+      # listens on, while needlessly opening it on the LAN. PORT_QBITTORRENT_TCP
+      # and _UDP are kept in .env only as a fallback for running without a VPN.
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
       - TZ=${TIMEZONE:?err}
-      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER:?err}
-      - OPENVPN_USER=${VPN_USERNAME:?err}
-      - OPENVPN_PASSWORD=${VPN_PASSWORD:?err}
-      - SERVER_REGIONS=${VPN_SERVER_REGION:?err}
-      - SERVER_CITIES=${VPN_SERVER_CITIES}
-      - SERVER_HOSTNAMES=${VPN_SERVER_HOSTS}
       - FIREWALL_OUTBOUND_SUBNETS=${NET_LOCAL_SUBNET:?err}
-      - OPENVPN_CUSTOM_CONFIG=${VPN_OPENVPN_CONFIG}
-      - VPN_TYPE=${VPN_TYPE}
-      - VPN_ENDPOINT_IP=${VPN_WG_ENDPOINT_ADDR}
-      - VPN_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}
-      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
-      - WIREGUARD_PRIVATE_KEY=${VPN_WG_PRIVATE_KEY}
-      - WIREGUARD_PRESHARED_KEY=${VPN_WG_PRESHARED_KEY}
-      - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}
       - HTTPPROXY=on
       - SHADOWSOCKS=on
+
+      # ProtonVPN over WireGuard. For this provider gluetun already knows every
+      # server's public key, endpoint and tunnel address from its embedded server
+      # list, so WIREGUARD_PRIVATE_KEY is the only credential required - generate
+      # a WireGuard config in the Proton dashboard and copy its PrivateKey.
+      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER:?err}
+      - VPN_TYPE=${VPN_TYPE:?err}
+      - WIREGUARD_PRIVATE_KEY=${VPN_WG_PRIVATE_KEY:?err}
+
+      # Port forwarding requires NAT-PMP to have been ticked when the WireGuard
+      # config was generated; PORT_FORWARD_ONLY restricts server selection to
+      # nodes that actually support it.
+      - VPN_PORT_FORWARDING=on
+      - PORT_FORWARD_ONLY=on
+
+      # ProtonVPN hands out a different forwarded port on every reconnect, but
+      # qBittorrent's listen port is static in its config. Left alone the two
+      # drift apart and no incoming peer can reach the client. This pushes the
+      # new port into qBittorrent over its API each time the tunnel comes up.
+      # qBittorrent shares this container's network namespace, so 127.0.0.1
+      # reaches it, and WebUI\LocalHostAuth=false lets the call skip auth.
+      - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'wget -qO- --retry-connrefused --post-data="json={\"listen_port\":{{PORTS}}}" http://127.0.0.1:${PORT_QBITTORRENT_WEB:?err}/api/v2/app/setPreferences'
+
+      # Server selection filters (all optional, leave blank for any server).
+      - SERVER_CITIES=${VPN_SERVER_CITIES}
+      - SERVER_COUNTRIES=${VPN_SERVER_COUNTRIES}
+      - SERVER_HOSTNAMES=${VPN_SERVER_HOSTS}
+      - SERVER_REGIONS=${VPN_SERVER_REGION}
+
+      # Optional overrides. Only set these to pin a specific server or to use a
+      # provider whose details gluetun does not already ship.
+      - VPN_ENDPOINT_IP=${VPN_WG_ENDPOINT_ADDR}
+      - VPN_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}
+      - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}
+      - WIREGUARD_PRESHARED_KEY=${VPN_WG_PRESHARED_KEY}
+      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
+
+      # OpenVPN fallback. Unused while VPN_TYPE=wireguard. The +pmp suffix on the
+      # username is what enables port forwarding on ProtonVPN's OpenVPN servers.
+      - OPENVPN_CUSTOM_CONFIG=${VPN_OPENVPN_CONFIG}
+      - OPENVPN_USER=${VPN_USERNAME}
+      - OPENVPN_PASSWORD=${VPN_PASSWORD}
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
       interval: 5s
       timeout: 5s
-      start_period: 10s
+      start_period: 30s
       retries: 1
 
   # ----------------------------------------------------------------------------
@@ -106,7 +139,7 @@ services:
   # ----------------------------------------------------------------------------
 
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:latest
+    image: lscr.io/linuxserver/qbittorrent:libtorrentv1
     container_name: qbittorrent
     restart: unless-stopped
     depends_on:
@@ -138,16 +171,20 @@ services:
     image: anthonyraymond/joal:latest
     container_name: joal
     restart: unless-stopped
+    depends_on:
+      gluetun:
+        condition: service_healthy
     command:
       - --joal-conf=/config
       - --spring.main.web-environment=true
       - --server.port=${PORT_JOAL_WEB:?err}
       - --joal.ui.path.prefix=${JOAL_OBFUSCATION_PATH:?err}
       - --joal.ui.secret-token=${JOAL_SECRET_TOKEN:?err}
-    networks:
-      - media-network
-    ports:
-      - "${PORT_JOAL_WEB:?err}:${PORT_JOAL_WEB:?err}"
+    # JOAL announces to trackers, so it belongs behind the VPN for the same
+    # reason qBittorrent does. It previously sat on media-network, which meant
+    # its announces carried the host's own IP while qBittorrent's went through
+    # ProtonVPN. Its web UI is published on the gluetun service above.
+    network_mode: "service:gluetun"
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/joal:/config
       - ${DOCKER_VOLUME_MEDIA:?err}/downloads/faking:/config/torrents
@@ -207,9 +244,9 @@ services:
     networks:
       - media-network
     ports:
-      - ${PORT_SWAG_HTTP:?err}:80
-      - ${PORT_SWAG_HTTPS:?err}:443
-      - ${PORT_SWAG_DASHBOARD:?err}:81
+      - ${PORT_SWAG_HTTP:?err}:80                                   # Public ingress
+      - ${PORT_SWAG_HTTPS:?err}:443                                 # Public ingress
+      - ${BIND_ADMIN:?err}:${PORT_SWAG_DASHBOARD:?err}:81
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -244,7 +281,7 @@ services:
     networks:
       - media-network
     ports:
-      - "${PORT_FLARESOLVERR:?err}:8191"
+      - "${BIND_ADMIN:?err}:${PORT_FLARESOLVERR:?err}:8191"
     environment:
       - LOG_LEVEL=info
       - LOG_HTML=false
@@ -304,7 +341,7 @@ services:
     networks:
       - media-network
     ports:
-      - "${PORT_PROWLARR_WEB:?err}:9696"
+      - "${BIND_ADMIN:?err}:${PORT_PROWLARR_WEB:?err}:9696"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -333,7 +370,7 @@ services:
     networks:
       - media-network
     ports:
-      - "${PORT_RADARR_WEB:?err}:7878"
+      - "${BIND_ADMIN:?err}:${PORT_RADARR_WEB:?err}:7878"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -362,7 +399,7 @@ services:
     networks:
       - media-network
     ports:
-      - "${PORT_SONARR_WEB:?err}:8989"
+      - "${BIND_ADMIN:?err}:${PORT_SONARR_WEB:?err}:8989"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -399,7 +436,7 @@ services:
     networks:
       - media-network
     ports:
-      - "${PORT_JELLYFIN_WEB:?err}:8096"
+      - "${BIND_LAN:?err}:${PORT_JELLYFIN_WEB:?err}:8096"           # LAN clients connect directly
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -427,7 +464,7 @@ services:
     networks:
       - media-network
     ports:
-      - "${PORT_JELLYSEERR_WEB:?err}:5055"
+      - "${BIND_ADMIN:?err}:${PORT_JELLYSEERR_WEB:?err}:5055"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -460,13 +497,13 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/server:/app/server
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
-      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
       - media-network
     ports:
-      - "${PORT_TDARR_SERVER:?err}:${PORT_TDARR_SERVER:?err}"
-      - "${PORT_TDARR_WEB:?err}:${PORT_TDARR_WEB:?err}"
+      - "${BIND_ADMIN:?err}:${PORT_TDARR_SERVER:?err}:${PORT_TDARR_SERVER:?err}"
+      - "${BIND_ADMIN:?err}:${PORT_TDARR_WEB:?err}:${PORT_TDARR_WEB:?err}"
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -491,7 +528,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
-      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
       - media-network
@@ -522,7 +559,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/configs:/app/configs
       - ${DOCKER_VOLUME_CONFIG:?err}/tdarr/logs:/app/logs
-      - ${DOCKER_VOLUME_MEDIA:?err}/transcode/cache:/temp
+      - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
       - media-network
@@ -559,7 +596,12 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/unpackerr:/config
       - ${DOCKER_VOLUME_MEDIA:?err}:/data
-    network_mode: none
+    # Unpackerr polls the Sonarr/Radarr queue APIs to learn what to extract, so
+    # it needs the bridge. It previously ran `network_mode: none`, which left it
+    # logging "network is unreachable" every 2 minutes since at least Feb 2025
+    # without ever extracting anything. It publishes no ports of its own.
+    networks:
+      - media-network
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -589,7 +631,7 @@ services:
       # Radarr
       - UN_RADARR_0_URL=http://radarr:7878
       - UN_RADARR_0_API_KEY=${RADARR_API_KEY}
-      - UN_RADARR_0_PATHS_0=/data/torrents/radarr
+      - UN_RADARR_0_PATHS_0=/data/downloads/radarr
       - UN_RADARR_0_PROTOCOLS=torrent,usenet
       - UN_RADARR_0_TIMEOUT=10s
       - UN_RADARR_0_DELETE_ORIG=false
@@ -648,7 +690,7 @@ services:
     networks:
       - media-network
     ports:
-      - ${PORT_FLOOD_WEB:?err}:${PORT_FLOOD_WEB:?err}
+      - ${BIND_ADMIN:?err}:${PORT_FLOOD_WEB:?err}:${PORT_FLOOD_WEB:?err}
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -677,5 +719,5 @@ services:
     #   - media-network
     network_mode: bridge
     ports:
-      - ${PORT_PORTAINER_WEB:?err}:9000
-      - 9443:9443
+      - ${BIND_ADMIN:?err}:${PORT_PORTAINER_WEB:?err}:9000
+      - ${BIND_ADMIN:?err}:9443:9443
