@@ -1,23 +1,19 @@
-# Ignore config files that should not be persisted
-!config/
-
+# Everything under config/ is runtime state living on the server - application
+# databases, Jellyfin metadata, TLS private keys, session stores. None of it is
+# reproducible from this repository, so it is ignored wholesale and specific
+# paths are re-included by exception.
+#
+# Adding a config file that should be tracked means adding a matching ! rule,
+# and each level has to be un-ignored in turn: git will not descend into an
+# ignored directory to find an exception inside it.
 config/*
-!config/swag/
-
-config/swag/*
-!config/swag/nginx
-!config/swag/www/
-
-config/swag/nginx/*
-!config/swag/nginx/*.conf
-!config/swag/nginx/proxy-confs
-config/swag/nginx/proxy-confs/*
-!config/swag/nginx/proxy-confs/*.conf
-
 !config/sonarr/
 
 config/sonarr/*
 !config/sonarr/scripts/
+
+# Reverse proxy configuration used to live here as SWAG nginx confs. It is now
+# ingress/Caddyfile, which is a normal tracked file outside config/.
 
 # Ignore the environment file containing sensitive values.
 # The wildcard matters as much as the exact name: editing .env tends to leave
