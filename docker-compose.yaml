@@ -63,6 +63,7 @@ services:
     networks:
       - media-network
     ports:
+      - "8000:8000/tcp"
       - "8888:8888/tcp"                                             # Gluetun Local Network HTTP proxy
       - "8388:8388/tcp"                                             # Gluetun Local Network Shadowsocks
       - "8388:8388/udp"                                             # Gluetun Local Network Shadowsocks
@@ -73,28 +74,31 @@ services:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
       - TZ=${TIMEZONE:?err}
-      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER:?err}
-      - OPENVPN_USER=${VPN_USERNAME:?err}
-      - OPENVPN_PASSWORD=${VPN_PASSWORD:?err}
-      - SERVER_REGIONS=${VPN_SERVER_REGION:?err}
-      - SERVER_CITIES=${VPN_SERVER_CITIES}
-      - SERVER_HOSTNAMES=${VPN_SERVER_HOSTS}
       - FIREWALL_OUTBOUND_SUBNETS=${NET_LOCAL_SUBNET:?err}
+      - HTTPPROXY=on
       - OPENVPN_CUSTOM_CONFIG=${VPN_OPENVPN_CONFIG}
-      - VPN_TYPE=${VPN_TYPE}
+      - OPENVPN_PASSWORD=${VPN_PASSWORD:?err}
+      - OPENVPN_USER=${VPN_USERNAME:?err}+pmp
+      - PORT_FORWARD_ONLY=on
+      - SERVER_CITIES=${VPN_SERVER_CITIES}
+      - SERVER_COUNTRIES=${VPN_SERVER_COUNTRIES}
+      - SERVER_HOSTNAMES=${VPN_SERVER_HOSTS}
+      - SERVER_REGIONS=${VPN_SERVER_REGION}
+      - SHADOWSOCKS=on
       - VPN_ENDPOINT_IP=${VPN_WG_ENDPOINT_ADDR}
       - VPN_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}
-      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
-      - WIREGUARD_PRIVATE_KEY=${VPN_WG_PRIVATE_KEY}
-      - WIREGUARD_PRESHARED_KEY=${VPN_WG_PRESHARED_KEY}
+      - VPN_PORT_FORWARDING=on
+      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER:?err}
+      - VPN_TYPE=${VPN_TYPE}
       - WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}
-      - HTTPPROXY=on
-      - SHADOWSOCKS=on
+      - WIREGUARD_PRESHARED_KEY=${VPN_WG_PRESHARED_KEY}
+      - WIREGUARD_PRIVATE_KEY=${VPN_WG_PRIVATE_KEY}
+      - WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
       interval: 5s
       timeout: 5s
-      start_period: 10s
+      start_period: 30s
       retries: 1
 
   # ----------------------------------------------------------------------------
@@ -106,7 +110,7 @@ services:
   # ----------------------------------------------------------------------------
 
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:latest
+    image: lscr.io/linuxserver/qbittorrent:libtorrentv1
     container_name: qbittorrent
     restart: unless-stopped
     depends_on:
