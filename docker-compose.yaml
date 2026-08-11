@@ -322,7 +322,6 @@ services:
       # Upstream ports for the services whose listening port is itself set from
       # the environment, so the Caddyfile cannot drift from the service config.
       - PORT_TDARR_WEB=${PORT_TDARR_WEB:?err}
-      - PORT_FLOOD_WEB=${PORT_FLOOD_WEB:?err}
       - PORT_QBITTORRENT_WEB=${PORT_QBITTORRENT_WEB:?err}
       - PORT_JOAL_WEB=${PORT_JOAL_WEB:?err}
 
@@ -684,37 +683,3 @@ services:
       - UN_RADARR_0_TIMEOUT=10s
       - UN_RADARR_0_DELETE_ORIG=false
       - UN_RADARR_0_DELETE_DELAY=5m
-
-  # ----------------------------------------------------------------------------
-  # Torrents Monitoring: Flood
-  # ----------------------------------------------------------------------------
-  # Flood is a monitoring service for various torrent clients. It's a Node.js
-  # service that communicates with your favorite torrent client and serves
-  # a decent web UI for administration.
-  #
-  # Image:  https://hub.docker.com/r/jesec/flood/
-  # ----------------------------------------------------------------------------
-
-  flood:
-    image: jesec/flood:master
-    container_name: flood
-    restart: unless-stopped
-    depends_on:
-      - qbittorrent
-    user: ${PUID:?err}:${PGID:?err}
-    command:
-      - --allowedpath=/data
-      - --rundir=/config
-      - --port=${PORT_FLOOD_WEB:?err}
-    volumes:
-      - ${DOCKER_VOLUME_CONFIG:?err}/flood:/config
-      - ${DOCKER_VOLUME_MEDIA:?err}/downloads:/data:ro
-      - /etc/localtime:/etc/localtime:ro
-    networks:
-      - media-network
-    environment:
-      - PUID=${PUID:?err}
-      - PGID=${PGID:?err}
-      - UMASK=${UMASK:?err}
-      - TZ=${TIMEZONE:?err}
-      - HOME=/config

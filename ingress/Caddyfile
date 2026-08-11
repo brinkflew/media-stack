@@ -120,11 +120,6 @@ tdarr.{$DOMAIN} {
 	reverse_proxy tdarr-server:{$PORT_TDARR_WEB}
 }
 
-flood.{$DOMAIN} {
-	import protected
-	reverse_proxy flood:{$PORT_FLOOD_WEB}
-}
-
 # qBittorrent and JOAL have no address of their own: both run inside gluetun's
 # network namespace so that neither can reach the internet outside the VPN.
 # gluetun is what holds their ports, so gluetun is what Caddy talks to.

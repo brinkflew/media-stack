@@ -57,7 +57,7 @@ custom build:
 
 ```bash
 docker run --rm -v "$PWD/ingress/Caddyfile:/etc/caddy/Caddyfile:ro" \
-  -e DOMAIN=example.com -e PORT_TDARR_WEB=8265 -e PORT_FLOOD_WEB=3000 \
+  -e DOMAIN=example.com -e PORT_TDARR_WEB=8265 \
   -e PORT_QBITTORRENT_WEB=8200 -e PORT_JOAL_WEB=8221 -e GANDI_BEARER_TOKEN=dummy \
   media-stack/caddy:latest caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
@@ -73,16 +73,17 @@ for optional.
 
 - `media-network` — a bridge with a pinned subnet (`NET_DOCKER_SUBNET`) that most services share
   and address each other on by container name (`http://sonarr:8989`).
-- **`gluetun` is the egress chokepoint.** **qBittorrent — and only qBittorrent** — uses
-  `network_mode: "service:gluetun"`, meaning it has no network stack of its own and lives inside
-  the VPN container's namespace. If the VPN drops, it loses connectivity entirely. That is a
-  kill-switch by construction, and it is why qBittorrent's web UI port is published on the
-  *gluetun* service, not on qBittorrent. **Never give a downloader its own `networks:` entry** —
-  it would leak traffic outside the VPN.
+- **`gluetun` is the egress chokepoint.** qBittorrent and JOAL both use
+  `network_mode: "service:gluetun"`, meaning neither has a network stack of its own: they live
+  inside the VPN container's namespace. If the VPN drops they lose connectivity entirely, which
+  is a kill-switch by construction. **Never give a downloader its own `networks:` entry** — it
+  would leak traffic outside the VPN.
 
-**JOAL shares that namespace too**, because it announces to trackers and would otherwise do so
-from the host's own IP while qBittorrent used the VPN. Both web UIs are therefore published on
-the `gluetun` service. Flood stays on the bridge — it only talks to qBittorrent's API.
+JOAL is in there because it announces to trackers, and would otherwise do so from the host's own
+IP while qBittorrent used the VPN. **Neither has a name of its own on `media-network`**, so
+anything addressing them — Caddy, and the \*arr apps' download client settings — must use
+`gluetun:<port>`. Using `qbittorrent:8200` fails to resolve; that is what broke the JOAL route
+when it moved into the namespace.
 
 **No peer port is published on the host.** With `VPN_PORT_FORWARDING=on`, incoming peers arrive
 through the tunnel on the port ProtonVPN forwards, landing straight in gluetun's namespace.
@@ -190,10 +191,11 @@ Conclusions from auditing the running host. Do not rediscover these:
   `HTTPPROXY_PASSWORD` and `SHADOWSOCKS_PASSWORD` are all empty) and bound to `BIND_LAN`. They are
   not reachable from the internet — the router does not forward 8888/8388, verified — but any LAN
   device can use them as an open proxy into the VPN. Set credentials or turn them off if unused.
-- **Flood must talk to qBittorrent over the bridge**, not through the public hostname. It was
-  configured with `https://torrent.avanserv.com`, which sent its polling out to the internet and
-  back — and broke outright when that route went behind sign-on. Its client URL lives in
-  `config/flood/db/users.db`, not in an env var.
+- **Services must address each other over the bridge, never through a public hostname.** Flood was
+  configured with `https://torrent.avanserv.com`, so its polling left the network and came back
+  through the proxy — and stopped working entirely once that route required a session. A container
+  reaching another container through the front door is always a mistake; it is slower, it depends
+  on DNS and NAT hairpinning, and it breaks the moment authentication is added.
 
 ## Target architecture
 
