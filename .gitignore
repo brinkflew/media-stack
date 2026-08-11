@@ -19,5 +19,14 @@ config/swag/nginx/proxy-confs/*
 config/sonarr/*
 !config/sonarr/scripts/
 
-# Ignore the environment file containing sensitive values
+# Ignore the environment file containing sensitive values.
+# The wildcard matters as much as the exact name: editing .env tends to leave
+# .env.bak, .env.orig or .env.20260811 next to it, and a bare `.env` rule does
+# not match any of those. This repository is public, so an unignored copy is a
+# credential leak waiting for one `git add -A`.
 .env
+.env.*
+!.env.sample
+
+# Transcode scratch (DOCKER_VOLUME_CACHE), regenerable and large.
+cache/
