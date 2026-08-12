@@ -52,5 +52,13 @@ ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/configs ${DOCKER_VO
 Restart=always
 RestartSec=5
 
+# Resource limits - see tdarr-node-01.container.
+CPUWeight=10
+IOWeight=10
+IOReadBandwidthMax=/var/mnt/media 100M
+MemoryHigh=3G
+MemoryMax=4G
+
 [Install]
-WantedBy=default.target
+# DELIBERATELY NOT STARTED AT BOOT - see tdarr-server.container.
+# WantedBy=default.target

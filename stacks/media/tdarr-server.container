@@ -54,5 +54,36 @@ ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/server ${DOCKER_VOL
 Restart=always
 RestartSec=5
 
+# ------------------------------------------------------------------------------
+# Resource limits - added after this unit took the whole host down
+# ------------------------------------------------------------------------------
+# Moving 470 episodes into a watched folder queued 470 Tdarr jobs. A Tdarr health
+# check is a FULL-FILE DECODE, not a metadata read, so that is the entire library
+# read end to end off one 7200rpm spindle, with six libraries scanning at once.
+# The machine stayed up at the kernel level - it answered ICMP and completed TCP
+# handshakes the whole time - while no userspace process could be scheduled:
+# sshd never got far enough to send a banner, and Caddy and Jellyfin answered
+# nothing. It needed a power cycle.
+#
+# These are systemd cgroup v2 controls rather than podman flags, because a
+# quadlet IS a systemd unit and this is the layer that can actually starve it.
+# Transcoding is batch work with no deadline, so under contention it should lose
+# to everything else - that is what the weights say. The point is not to make
+# Tdarr fast; it is to make Tdarr incapable of taking the host with it.
+#
+# NOTE: CPUWeight and IOWeight need the cpu and io controllers DELEGATED to the
+# user manager. memory and pids are delegated by default, cpu and io often are
+# not, and an undelegated controller fails SILENTLY - the directive is accepted
+# and does nothing. Verify with:
+#   cat /sys/fs/cgroup/user.slice/user-1000.slice/cgroup.controllers
+CPUWeight=20
+IOWeight=20
+MemoryHigh=2G
+MemoryMax=3G
+
 [Install]
-WantedBy=default.target
+# DELIBERATELY NOT STARTED AT BOOT. Tdarr is stopped until its own throttles are
+# configured - scanner threads, worker counts and whether a 470-episode health
+# check sweep should ever be queued in one go. Re-enable by restoring the line
+# below and running `systemctl --user enable --now tdarr-server`.
+# WantedBy=default.target

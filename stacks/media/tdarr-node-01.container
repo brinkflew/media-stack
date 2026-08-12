@@ -70,5 +70,27 @@ ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/configs ${DOCKER_VO
 Restart=always
 RestartSec=5
 
+# ------------------------------------------------------------------------------
+# Resource limits - see tdarr-server.container for the incident that prompted them
+# ------------------------------------------------------------------------------
+# The nodes are the heavy readers: a transcode streams the source file, and a
+# health check decodes it end to end. Weighted below the server because this is
+# batch work that should always yield - to Jellyfin serving a stream, to the
+# *arr apps importing, and to sshd, whose inability to get scheduled is what
+# turned a slow library scan into a power cycle.
+#
+# IOReadBandwidthMax is the targeted one: it caps reads from the media spindle
+# so a health-check sweep cannot saturate it however many files are queued. The
+# figure is deliberately below what the disk can do sequentially, to leave
+# headroom for playback. Needs the io controller delegated - see the note in
+# tdarr-server.container, and check it took effect rather than assuming:
+#   systemctl --user show tdarr-node-01 -p IOReadBandwidthMax
+CPUWeight=10
+IOWeight=10
+IOReadBandwidthMax=/var/mnt/media 100M
+MemoryHigh=3G
+MemoryMax=4G
+
 [Install]
-WantedBy=default.target
+# DELIBERATELY NOT STARTED AT BOOT - see tdarr-server.container.
+# WantedBy=default.target

@@ -99,5 +99,10 @@ RestartSec=5
 # on a cold start, and a timeout here cascades into both downloaders.
 TimeoutStartSec=300
 
+# A ceiling, not a tuning knob: high enough never to bite in normal use,
+# low enough that a runaway is killed instead of taking the host down.
+MemoryHigh=256M
+MemoryMax=512M
+
 [Install]
 WantedBy=default.target
