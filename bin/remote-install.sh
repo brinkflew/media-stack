@@ -9,7 +9,9 @@
 # boundary between "recoverable by pressing the power button" and "recoverable
 # only from a disk image" deserves to be a separate act, typed deliberately.
 #
-# After this runs, the old system exists only in ~/backups/nvme0n1.img.zst.
+# After this runs, the old system exists only in the disk image - wherever
+# MEDIA_STACK_DISK_IMAGE points. It is 73GB and usually on external media, so
+# have that drive plugged in before you start.
 # ==============================================================================
 
 set -euo pipefail
@@ -83,6 +85,16 @@ echo "  $(wc -c < "$WORK/ucore.ign") bytes"
 # ------------------------------------------------------------------------------
 # The point of no return
 # ------------------------------------------------------------------------------
+# Report the rollback's actual state in the confirmation banner rather than
+# naming a path and hoping. This is the last moment at which "the image is on a
+# drive in a drawer" is cheap to discover.
+IMAGE="${MEDIA_STACK_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
+if [ -f "$IMAGE" ] && [ "$(stat -c %s "$IMAGE")" -gt 1000000000 ]; then
+  IMAGE_STATUS="present: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
+else
+  IMAGE_STATUS="*** NOT FOUND at $IMAGE - you have no rollback ***"
+fi
+
 cat <<EOF
 
   ────────────────────────────────────────────────────────────────────────
@@ -95,8 +107,9 @@ cat <<EOF
 
    SURVIVES     /mnt/media - 7.3TB XFS on LVM on sda, a different disk
 
-   RECOVERY     only ~/backups/nvme0n1.img.zst, restored from this live
-                environment. There is no console on this machine.
+   RECOVERY     only the disk image, restored from this live environment.
+                There is no console on this machine.
+                $IMAGE_STATUS
   ────────────────────────────────────────────────────────────────────────
 
 EOF
