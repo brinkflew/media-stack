@@ -12,3 +12,15 @@
 [Network]
 NetworkName=net-transcode
 Subnet=${NET_SUBNET_TRANSCODE}
+
+# Quadlet passes [Service] through to the generated unit, and without this the
+# Subnet= above expands to an EMPTY STRING rather than failing: systemd logs
+# "Referenced but unset environment variable" at info level and podman then
+# rejects it with "Error: invalid CIDR address:" - a message that says nothing
+# about which variable, or that a file was never read.
+#
+# The .container units all carry this line; the .network units did not, so the
+# whole stack failed at its first dependency. Every quadlet that interpolates a
+# variable needs it, whatever its type.
+[Service]
+EnvironmentFile=/var/media-stack/.env
