@@ -112,14 +112,25 @@ Watch it, disconnect freely, come back later:
 ssh home.local 'systemctl status diskimage --no-pager | head -4; ls -lh /mnt/media/nvme0n1.img.zst'
 ```
 
-When the unit has exited, pull it down and free the space. `rsync -P` resumes, so a dropped laptop
-costs seconds rather than the whole run:
+**Leave the image on `/mnt/media` — that is where it does the most good, not a staging area to be
+emptied.** `sda` is untouched by the install, so a copy sitting there can be written straight back to
+`nvme0n1` from the live session, at disk speed, with no network in the path. Moving it to the
+workstation and deleting the original converts the cheapest possible rollback into a 73 GB upload
+to a machine you cannot see. There is 6.9 TB free; the space was never the constraint.
+
+When the unit has exited, bring the stack back up until the real run:
+
+```bash
+ssh home.local 'cd /var/media-stack && docker compose up -d'
+```
+
+A **second** copy on the workstation is still worth taking, because the on-box one does not survive
+`sda` failing or an install aimed at the wrong device. `rsync -P` resumes, so a dropped laptop costs
+seconds rather than the whole run:
 
 ```bash
 export MEDIA_STACK_DISK_IMAGE=/mnt/e/nvme0n1.img.zst              # external drive; see below
 rsync -P home.local:/mnt/media/nvme0n1.img.zst "$MEDIA_STACK_DISK_IMAGE"
-ssh home.local 'sudo rm /mnt/media/nvme0n1.img.zst'
-ssh home.local 'cd /var/media-stack && docker compose up -d'      # bring it back until the real run
 ```
 
 **73 GB probably does not fit on the workstation, and `df` will lie to you about it.** Under WSL,
@@ -133,9 +144,6 @@ External media is the normal answer. Tell the tooling where it went:
 export MEDIA_STACK_DISK_IMAGE=/mnt/e/nvme0n1.img.zst    # wherever it actually is
 ```
 
-`bin/remote-kexec.sh` checks for it there. **Have the drive plugged in before the real run** — a
-rollback you have to go and find is not a rollback.
-
 Verify the copy rather than assuming it, because a transfer that runs out of space truncates
 quietly and the result still looks like a file:
 
@@ -143,6 +151,10 @@ quietly and the result still looks like a file:
 stat -c %s "$MEDIA_STACK_DISK_IMAGE"                    # 73579900029
 zstd -dc "$MEDIA_STACK_DISK_IMAGE" | wc -c              # 250059350016 - the whole device
 ```
+
+`bin/remote-install.sh` reports which copies it can actually see, on the media disk and on the
+workstation, in the banner at the point of no return — so a drive that is not plugged in is
+discovered there rather than after.
 
 Taken with the stack stopped and after `sync`, so the btrfs filesystem inside is **crash-consistent**
 — restoring it is equivalent to recovering from a power cut, which btrfs handles. It is not a clean
@@ -446,14 +458,36 @@ if the installed system still boots:
 
 ```bash
 ./bin/remote-kexec.sh                                            # if uCore still boots
-zstd -dc "$MEDIA_STACK_DISK_IMAGE" | ssh home-live 'sudo dd of=/dev/nvme0n1 bs=4M'
+```
+
+**The image is on `/mnt/media`, which is on `sda` — a disk this migration never touches.** So the
+restore is a local read and a local write, needing no network at all:
+
+```bash
+ssh home-live 'sudo vgchange -ay && sudo mkdir -p /var/tmp/media &&
+               sudo mount -o ro /dev/mapper/vg_xfs_media-xfs_db /var/tmp/media &&
+               sudo systemd-run --unit=restore --collect /bin/sh -c \
+                 "zstd -dc /var/tmp/media/nvme0n1.img.zst | dd of=/dev/nvme0n1 bs=4M"'
+ssh home-live 'journalctl -u restore -f'                         # 250059350016 bytes, then exit 0
 ssh home-live 'sudo systemctl reboot'
 ```
 
-This one *is* a long pipe from the laptop, and unlike the imaging it cannot be moved server-side —
-the image lives here and the target disk is there. Do not let the machine sleep partway through, or
-you will have half-written a disk. If it does break, redo it from the start: `dd` from byte zero is
-idempotent.
+At disk speed rather than network speed, and `systemd-run` means a dropped SSH session no longer
+costs the run — the same reason the imaging was done that way.
+
+**Leave that copy where it is.** Pulling one to the workstation and deleting the original trades a
+fast local restore for a 73 GB push back over the network, to a machine with no console. There is
+6.9 TB free on that disk; space was never the constraint.
+
+A workstation copy is still worth keeping as a *second* one, since it is the only answer if `sda`
+itself fails or the install went to the wrong device:
+
+```bash
+zstd -dc "$MEDIA_STACK_DISK_IMAGE" | ssh home-live 'sudo dd of=/dev/nvme0n1 bs=4M'
+```
+
+That one *is* a long pipe from the laptop and cannot be moved server-side. Do not let the machine
+sleep partway through. If it breaks, redo it from the start: `dd` from byte zero is idempotent.
 
 **If the installed system does not boot at all, this needs the console path** — the live ISO on a
 USB stick, then the same `dd`. That is the case remote installation cannot rescue, and it is why the

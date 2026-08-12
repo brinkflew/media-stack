@@ -73,17 +73,24 @@ print(int(age.total_seconds() // 60))" 2>/dev/null) || last=""
   fi
 fi
 
-# The image is 73GB and usually lives on external media rather than this laptop.
-# Point MEDIA_STACK_DISK_IMAGE at it, and have the drive plugged in before the
-# real run - a rollback you have to go and find is not a rollback.
+# Where the rollback is matters as much as whether it exists. The copy on
+# /mnt/media is the good one: sda survives the install, so it restores from the
+# live session at disk speed. A copy on this laptop is the fallback for sda
+# failing, and costs a 73GB upload. Check for both; the old system is still up
+# at this point, so the on-box one is a plain ssh away.
 IMAGE="${MEDIA_STACK_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
-EXPECT_BYTES=250059350016      # the full size of nvme0n1, from the dd that made it
 
-if [ -f "$IMAGE" ]; then
-  echo "  disk image: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
+onbox=$(ssh -o BatchMode=yes "$HOST" 'stat -c %s /mnt/media/nvme0n1.img.zst 2>/dev/null || echo 0' 2>/dev/null || echo 0)
+if [ "${onbox:-0}" -gt 1000000000 ]; then
+  echo "  disk image on the media disk: $((onbox / 1000000000)) GB - restorable without a network"
 else
+  echo "  NOTE: no image at /mnt/media/nvme0n1.img.zst on the server"
+fi
+if [ -f "$IMAGE" ]; then
+  echo "  second copy on this workstation: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
+elif [ "${onbox:-0}" -le 1000000000 ]; then
   cat <<EOF
-  NOTE: no disk image at
+  NOTE: no disk image on the media disk, and none at
           $IMAGE
         Fine for a rehearsal, which cannot damage anything. NOT fine for the
         real run: it is the only rollback and, with no console on this machine,

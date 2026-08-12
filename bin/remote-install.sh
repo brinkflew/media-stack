@@ -9,9 +9,12 @@
 # boundary between "recoverable by pressing the power button" and "recoverable
 # only from a disk image" deserves to be a separate act, typed deliberately.
 #
-# After this runs, the old system exists only in the disk image - wherever
-# MEDIA_STACK_DISK_IMAGE points. It is 73GB and usually on external media, so
-# have that drive plugged in before you start.
+# After this runs, the old system exists only in the disk image. The primary
+# copy is /mnt/media/nvme0n1.img.zst on sda - a different physical device this
+# install does not touch - which makes it restorable from the live session with
+# no network and no workstation. MEDIA_STACK_DISK_IMAGE names a second copy, if
+# one was taken. This script reports which of them it can actually see, at the
+# moment that matters, rather than naming a path and hoping.
 # ==============================================================================
 
 set -euo pipefail
@@ -88,11 +91,36 @@ echo "  $(wc -c < "$WORK/ucore.ign") bytes"
 # Report the rollback's actual state in the confirmation banner rather than
 # naming a path and hoping. This is the last moment at which "the image is on a
 # drive in a drawer" is cheap to discover.
+#
+# Look on the media disk FIRST and from in here, because that is the copy that
+# matters: sda survives this install, so an image sitting on it can be written
+# straight back to nvme0n1 from this same live session. A copy on the
+# workstation is a fallback, not the plan - it means pushing 73GB back over the
+# network to a machine with no console.
+say "locating the rollback image"
+live 'sudo vgchange -ay >/dev/null 2>&1 || true
+      sudo mkdir -p /var/tmp/media
+      findmnt -rn /var/tmp/media >/dev/null 2>&1 ||
+        sudo mount -o ro /dev/mapper/vg_xfs_media-xfs_db /var/tmp/media 2>/dev/null || true' || true
+onbox=$(live 'stat -c %s /var/tmp/media/nvme0n1.img.zst 2>/dev/null || echo 0' || echo 0)
+
 IMAGE="${MEDIA_STACK_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
-if [ -f "$IMAGE" ] && [ "$(stat -c %s "$IMAGE")" -gt 1000000000 ]; then
-  IMAGE_STATUS="present: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
+offbox=0
+[ -f "$IMAGE" ] && offbox=$(stat -c %s "$IMAGE")
+
+if [ "${onbox:-0}" -gt 1000000000 ]; then
+  echo "  on the media disk: $onbox bytes, mounted read-only here"
+  IMAGE_STATUS="on sda, restorable from this session without a network:
+                  /mnt/media/nvme0n1.img.zst  ($((onbox / 1000000000)) GB)"
+  [ "$offbox" -gt 1000000000 ] && IMAGE_STATUS="$IMAGE_STATUS
+                  second copy on the workstation: $IMAGE"
+elif [ "$offbox" -gt 1000000000 ]; then
+  echo "  NOT on the media disk - only on the workstation"
+  IMAGE_STATUS="workstation only: $IMAGE ($((offbox / 1000000000)) GB).
+                  Restoring means pushing it back over the network."
 else
-  IMAGE_STATUS="*** NOT FOUND at $IMAGE - you have no rollback ***"
+  echo "  WARNING: no image on the media disk, and none at $IMAGE"
+  IMAGE_STATUS="*** NONE FOUND - you have no rollback ***"
 fi
 
 cat <<EOF
