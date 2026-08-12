@@ -34,7 +34,7 @@ Environment=NVIDIA_DRIVER_CAPABILITIES=all
 
 # A process check, not an HTTP one - see tdarr-node-01.container.
 HealthCmd=pgrep -f Tdarr_Node >/dev/null || exit 1
-HealthInterval=60s
+HealthInterval=120s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3

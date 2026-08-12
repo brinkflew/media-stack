@@ -36,7 +36,7 @@ Environment=internalNode=false
 Environment=nodeID=TdarrServer
 
 HealthCmd=curl -fsS http://localhost:8266/api/v2/status || exit 1
-HealthInterval=30s
+HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3

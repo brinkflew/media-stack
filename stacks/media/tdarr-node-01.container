@@ -52,7 +52,7 @@ Environment=NVIDIA_DRIVER_CAPABILITIES=all
 # it dials out to tdarr-server. Verified by reading /proc/net/tcp inside it.
 # This unit reached restart 126 unnoticed, so the check earns its place.
 HealthCmd=pgrep -f Tdarr_Node >/dev/null || exit 1
-HealthInterval=60s
+HealthInterval=120s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3

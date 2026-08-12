@@ -30,7 +30,7 @@ Environment=TZ=${TIMEZONE}
 
 # wget, not curl - this image ships no curl.
 HealthCmd=wget -qO- http://localhost:5055/api/v1/status || exit 1
-HealthInterval=30s
+HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=60s
 HealthRetries=3

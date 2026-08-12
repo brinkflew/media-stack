@@ -44,7 +44,7 @@ Environment=TRUST_PROXY=${NET_SUBNET_INGRESS}
 Environment=ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY}
 
 HealthCmd=curl -fsS http://localhost:1411/healthz || exit 1
-HealthInterval=30s
+HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=30s
 HealthRetries=3

@@ -42,7 +42,7 @@ Environment=TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME}
 # healthy-looking 302 from the proxy. localhost here is the POD namespace,
 # shared with gluetun and joal.
 HealthCmd=curl -fsS http://localhost:${PORT_QBITTORRENT_WEB}/api/v2/app/version || exit 1
-HealthInterval=30s
+HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=60s
 HealthRetries=3

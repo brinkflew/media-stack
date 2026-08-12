@@ -40,7 +40,7 @@ Exec=--joal-conf=/config --spring.main.web-environment=true --server.port=${PORT
 # status check would fail on a perfectly healthy process. Any HTTP response at
 # all proves the listener is up, which is what this is for.
 HealthCmd=curl -s -o /dev/null --max-time 5 http://localhost:${PORT_JOAL_WEB}/ || exit 1
-HealthInterval=30s
+HealthInterval=60s
 HealthTimeout=10s
 HealthStartPeriod=60s
 HealthRetries=3

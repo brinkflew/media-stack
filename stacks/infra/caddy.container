@@ -55,7 +55,7 @@ Environment=PORT_JOAL_WEB=${PORT_JOAL_WEB}
 # The admin API on 2019 is bound inside the container only, and answering on it
 # proves the config loaded - which a TCP check on 443 does not.
 HealthCmd=curl -fsS http://localhost:2019/config/ || exit 1
-HealthInterval=30s
+HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=30s
 HealthRetries=3

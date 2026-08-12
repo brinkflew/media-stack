@@ -37,7 +37,7 @@ Environment=CAPTCHA_SOLVER=none
 Environment=TZ=${TIMEZONE}
 
 HealthCmd=curl -fsS http://localhost:8191/health || exit 1
-HealthInterval=30s
+HealthInterval=60s
 HealthTimeout=10s
 HealthStartPeriod=60s
 HealthRetries=3
