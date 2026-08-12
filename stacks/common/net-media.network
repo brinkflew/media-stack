@@ -12,6 +12,18 @@
 [Network]
 NetworkName=net-media
 Subnet=${NET_SUBNET_MEDIA}
+# Isolation is NOT free under Podman. Docker put every bridge in
+# DOCKER-ISOLATION-STAGE-2 and dropped traffic between them, which is what made
+# "no shared network means no route" true. Netavark does no such thing: with
+# these networks created plain, a container on net-solver reached sonarr on
+# net-arr by IP, and so did net-media, net-egress and net-transcode. The
+# topology looked segmented and was flat.
+#
+# --opt isolate=true restores it. Verified on this host before adopting: with it
+# set, same-network traffic still passes and every other bridge is dropped.
+# It does not constrain a container that JOINS several networks - caddy still
+# reaches each segment it is a member of.
+Options=isolate=true
 
 # Quadlet passes [Service] through to the generated unit, and without this the
 # Subnet= above expands to an EMPTY STRING rather than failing: systemd logs
