@@ -32,6 +32,15 @@
 #      the consistent snapshot that overwrites it, and restoring a stale -wal
 #      next to a newer .db is worse than having neither.
 #
+#   4. Lock files are excluded, for the same reason and with a nastier symptom.
+#      This backup is taken with the stack RUNNING, so it captures live locks.
+#      qBittorrent's Qt lockfile records the pid, the hostname and a machine id;
+#      restored onto a machine where the hostname does not match, Qt cannot tell
+#      whether the owning process is alive and conservatively assumes the lock is
+#      held. qBittorrent then exits one second after starting, logging only
+#      "termination initiated" - no error, no warning, nothing naming the lock.
+#      It cost an hour after the migration.
+#
 # Usage:  bin/backup-config.sh [--dry-run]
 # ==============================================================================
 
@@ -66,6 +75,7 @@ rsync -a --delete --delete-excluded --info=stats1 \
   --exclude='tdarr/logs/' --exclude='tdarr/server/Tdarr/Backups/' \
   --exclude='*/logs/' \
   --exclude='caddy/' \
+  --exclude='lockfile' --exclude='*.lock' --exclude='*.pid' \
   "$REMOTE:$REMOTE_CONFIG/" "$STAGING/config/"
 # caddy/ is excluded rather than merely tolerated. Its subdirectories are
 # root-owned and unreadable to this user, so rsync would exit 23 on every run -

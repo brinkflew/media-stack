@@ -341,6 +341,27 @@ Conclusions from auditing the running host. Do not rediscover these:
   mount unit whose path is not canonical, so the unit is `var-mnt-media.mount` with
   `Where=/var/mnt/media`. Consumers can still say `/mnt/media`. It fails on a completely healthy
   disk, with `vgs`, `lvs` and `/dev/disk/by-uuid` all looking correct.
+- **Quadlet's `Environment=` splits on whitespace.** Compose took a value with spaces as one string;
+  quadlet reads the line as space-separated `KEY=VALUE` pairs and **silently truncates at the first
+  space**. Three settings were cut on migration — the OIDC scope list, a display name, and gluetun's
+  port-forward command. Any literal containing a space must be quoted:
+  `Environment="KEY=a b c"`. `${VAR}` references are safe; systemd substitutes those into
+  `ExecStart` as single arguments. Audit with: every `^Environment=` line whose value contains a
+  space and does not start with a quote.
+- **A 302 from an admin route proves the proxy and sign-on, not the service.** An unauthenticated
+  request never reaches the backend, so the whole route battery passes with a backend that is down.
+  qBittorrent was crash-looping while `torrent` returned a healthy-looking 302. Check backends by
+  connecting to them from their own network.
+- **Restoring a config taken from a running stack can carry live lock files.** qBittorrent's Qt
+  lockfile stores the pid, hostname and machine id; on a host where the hostname does not match, Qt
+  assumes the lock is held and qBittorrent **exits one second after starting, logging only
+  "termination initiated"** — no error, nothing naming the lock. `bin/backup-config.sh` now excludes
+  them.
+- **`WebUI\LocalHostAuth` must be `false` for the port-forward push to work**, and it was `true`
+  — so `VPN_PORT_FORWARDING_UP_COMMAND` had been getting a 403 and the forwarded port never reached
+  qBittorrent. This predates the migration; it came in with the restored config. "Localhost" here is
+  inside gluetun's namespace, which only gluetun, qBittorrent and JOAL share, so this is not the
+  same as exposing the API.
 - **The host is uCore `stable-nvidia`, immutable and rpm-ostree managed.** `/usr` is read-only, so
   host-level tools go in `~/.local/bin` (which is where `sops` and `age` live). Host configuration
   belongs in `host/butane/ucore.bu` — anything applied only over SSH is undocumented state that the
