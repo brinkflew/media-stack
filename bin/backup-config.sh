@@ -19,11 +19,13 @@
 # THREE THINGS THIS DOES THAT A PLAIN rsync DOES NOT, each of which otherwise
 # produces a backup that looks complete and is not:
 #
-#   1. Caddy's /data is root-owned INSIDE its container and unreadable to the
-#      ssh user. rsync skips it with a permission error that is easy to miss in
-#      the noise. It is 192KB and contains every TLS private key and the ACME
-#      account key - without it a restore silently re-issues certificates, or
-#      hits Let's Encrypt rate limits and does not.
+#   1. Caddy's certificates are asserted present, not assumed. Under Docker its
+#      /data was root-owned inside the container and rsync skipped it with a
+#      permission error easy to miss in the noise; rootless Podman maps container
+#      root to the service user, so it copies normally now. The count is still
+#      checked every run, because it is 192KB containing every TLS private key
+#      and the ACME account key - without it a restore silently re-issues
+#      certificates, or hits Let's Encrypt rate limits and does not.
 #
 #   2. Live SQLite databases are snapshotted through SQLite's backup API rather
 #      than copied. See bin/snapshot-databases.sh.
@@ -48,7 +50,10 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
 
-REMOTE="${MEDIA_STACK_HOST:-home}"
+# home.local, not home: `home` resolves to the WAN address and hairpins back
+# through the router, which is both slower for a 5GB mirror and a dependency
+# this script does not need. The LAN route is direct.
+REMOTE="${MEDIA_STACK_HOST:-home.local}"
 REMOTE_CONFIG="/var/media-stack/config"
 REPO="${RESTIC_REPOSITORY:-$HOME/backups/media-stack}"
 PWFILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/media-stack.pw}"
@@ -74,25 +79,20 @@ rsync -a --delete --delete-excluded --info=stats1 \
   --exclude='jellyfin/cache/' --exclude='jellyfin/log/' --exclude='jellyfin/transcodes/' \
   --exclude='tdarr/logs/' --exclude='tdarr/server/Tdarr/Backups/' \
   --exclude='*/logs/' \
-  --exclude='caddy/' \
   --exclude='lockfile' --exclude='*.lock' --exclude='*.pid' \
   "$REMOTE:$REMOTE_CONFIG/" "$STAGING/config/"
-# caddy/ is excluded rather than merely tolerated. Its subdirectories are
-# root-owned and unreadable to this user, so rsync would exit 23 on every run -
-# a real error, permanently expected, which is the fastest way to teach yourself
-# to ignore this script's exit code. Step 2 repopulates it in full.
+# caddy/ used to be excluded here and re-extracted with `docker exec caddy tar`,
+# because under Docker its subdirectories were root-owned and unreadable to this
+# user - rsync exited 23 on every run. Rootless Podman maps container root to the
+# service user, so /data is now plainly owned by `core` and rsync just copies it.
+# The special case is gone; the assertion below is not.
 
 # ------------------------------------------------------------------------------
-# 2. Caddy, out of the container
+# 2. Verify Caddy's state came through
 # ------------------------------------------------------------------------------
-# `docker exec` runs as root inside the namespace, which is the only way to read
-# this without a sudo password on the server.
-echo "==> extracting Caddy state from the container"
-for d in data config; do
-  mkdir -p "$STAGING/config/caddy/$d"
-  ssh "$REMOTE" "docker exec caddy tar -C /$d -cf - ." \
-    | tar -xf - -C "$STAGING/config/caddy/$d"
-done
+# This is the one part of config/ that cannot be regenerated without hitting
+# Let's Encrypt rate limits, and the one most likely to be silently skipped by a
+# permission change. Count it every run rather than assume the rsync covered it.
 certs=$(find "$STAGING/config/caddy" -name '*.crt' | wc -l)
 keys=$(find "$STAGING/config/caddy" -name '*.key' | wc -l)
 echo "    $certs certificates, $keys private keys"
@@ -113,8 +113,12 @@ rsync -a "$REMOTE:.cache/media-stack/db-snapshot/" "$STAGING/config/"
 restic snapshots >/dev/null 2>&1 || { echo "==> initialising repository at $REPO"; restic init; }
 
 echo "==> backing up"
+# A FIXED host tag, not $REMOTE. `restic forget` groups by host, so tagging
+# snapshots with whichever ssh alias was used splits one machine's history into
+# separate retention groups - each pruned independently, and neither holding the
+# full chain. The alias is a route; this is an identity.
 restic backup $DRY --tag media-stack --tag config \
-  --host "$REMOTE" "$STAGING/config"
+  --host media-stack "$STAGING/config"
 
 if [ -z "$DRY" ]; then
   # Keeps a year of history for a few GB. The daily tier matters most: the
