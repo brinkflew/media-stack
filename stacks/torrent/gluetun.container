@@ -61,7 +61,11 @@ Environment=PORT_FORWARD_ONLY=on
 # qBittorrent's listen port is static in its config. Left alone the two drift
 # apart and no incoming peer can reach the client. qBittorrent shares this
 # namespace, so 127.0.0.1 reaches it.
-Environment=VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'wget -qO- --retry-connrefused --post-data="json={\"listen_port\":{{PORTS}}}" http://127.0.0.1:${PORT_QBITTORRENT_WEB}/api/v2/app/setPreferences'
+# QUOTED, and it must stay that way - see the note in tinyauth.container.
+# Unquoted, quadlet passed gluetun a bare "/bin/sh" and dropped the rest, so
+# every reconnect forwarded a port that was never pushed to qBittorrent. The
+# VPN stays up and the client just goes unconnectable.
+Environment="VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'wget -qO- --retry-connrefused --post-data=\"json={\\\"listen_port\\\":{{PORTS}}}\" http://127.0.0.1:${PORT_QBITTORRENT_WEB}/api/v2/app/setPreferences'"
 
 Environment=SERVER_CITIES=${VPN_SERVER_CITIES}
 Environment=SERVER_COUNTRIES=${VPN_SERVER_COUNTRIES}

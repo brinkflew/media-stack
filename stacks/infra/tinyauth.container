@@ -37,14 +37,20 @@ Environment=TINYAUTH_AUTH_TRUSTEDPROXIES=${NET_SUBNET_INGRESS}
 Environment=TINYAUTH_AUTH_SECURECOOKIE=true
 # Skip Tinyauth's own login page and go straight to the passkey prompt.
 Environment=TINYAUTH_OAUTH_AUTOREDIRECT=pocketid
-Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID
+Environment="TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID"
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTID=${POCKETID_CLIENT_ID}
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRET=${POCKETID_CLIENT_SECRET}
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_AUTHURL=https://id.${DOMAIN}/authorize
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=http://pocket-id:1411/api/oidc/token
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=http://pocket-id:1411/api/oidc/userinfo
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL=https://auth.${DOMAIN}/api/oauth/callback/pocketid
-Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups
+# QUOTED, and it must stay that way. Quadlet parses Environment= as
+# space-separated KEY=VALUE pairs, so unquoted this set only "openid" and
+# discarded the rest in silence. Without the email scope Pocket ID returns no
+# email claim, Tinyauth logs "OAuth provider did not return an email" and
+# sends a successfully authenticated user to its error page - a passkey that
+# works followed by a failure that looks unrelated to it.
+Environment="TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups"
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_WHITELIST=${AUTH_WHITELIST}
 
 [Service]
