@@ -1,11 +1,33 @@
 # Stage 2 — migrating the host to uCore
 
-Follow this at the machine. It assumes nothing has been done in advance except reading it once.
+**This runs over the network. No monitor, no keyboard, no USB stick.** The machine has no BMC, so
+there is also no console to watch it on — which is why the procedure is shaped the way it is.
 
 **The install is irreversible.** `coreos-installer` rewrites `nvme0n1`'s partition table, and there
 is no undo beyond the disk image taken in step 2. Everything below is ordered so that each step's
 prerequisites are already true; the failure mode of improvising the order is discovering at step 12
 that something you needed was on the disk you wiped at step 6.
+
+## The shape of it
+
+The risk is split in two, at the point of no return:
+
+| | What it does | If it goes wrong |
+|---|---|---|
+| **`bin/remote-kexec.sh`** | boots a live Fedora CoreOS **into RAM**. The disk is never touched. | **press the power button.** Fedora 37 boots back from `nvme0n1` exactly as it was |
+| **`bin/remote-install.sh`** | writes uCore over `nvme0n1` | restore the disk image, which needs the live environment — so get there first |
+
+Because phase 1 cannot damage anything, **rehearse it** (step 5). That is the only step whose
+behaviour on this specific board is unknown, and rehearsing it costs one 15-minute window.
+
+Everything the live environment needs is baked into the initrd it boots from — the Ignition config
+travels as a `data:` URI and the root filesystem is concatenated onto the initramfs — so **nothing
+is fetched at boot**. A network that comes up late, or not at all, cannot strand the machine.
+
+**Use `home.local` throughout, never `home`.** `ssh home` goes out to the WAN and back in through the
+router's `9122 → 22` forward, which points at a fixed internal address. Pinning that address is
+step 0 of the Ignition config, but until the new system is up, the forward is exactly what a
+migration can break. `home.local` is a direct LAN route and does not care.
 
 ---
 
@@ -50,16 +72,31 @@ restic check                # no errors
 ### 2. Image the disk
 
 ```bash
-ssh home 'cd /var/media-stack && docker compose down && sync'
-ssh home 'sudo dd if=/dev/nvme0n1 bs=4M' | zstd -T0 > ~/backups/nvme0n1.img.zst
+ssh home.local 'cd /var/media-stack && docker compose down && sync'
+ssh home.local 'sudo dd if=/dev/nvme0n1 bs=4M' | zstd -T0 > ~/backups/nvme0n1.img.zst
+ssh home.local 'cd /var/media-stack && docker compose up -d'      # bring it back until the real run
 ```
 
 Taken with the stack stopped and after `sync`, so the btrfs filesystem inside is **crash-consistent**
 — restoring it is equivalent to recovering from a power cut, which btrfs handles. It is not a clean
 snapshot, and it does not need to be.
 
-Expect 20–40 minutes and roughly 20–35 GB. `dd` reads all 232 GB including free space; zstd
-collapses the empty part.
+**Budget 100 GB and an hour or more, not the 32 GB that is actually in use.** `dd` reads all 232 GB
+of the device, and free space on btrfs is *not* zeroed — it still holds whatever was written there
+before, which compresses no better than real data. Measured on this machine: past 43 GB while only
+a third of the way through. Check free space before starting.
+
+The stack is down for the whole run, and `dd` prints nothing when piped over ssh. Watch it from
+another terminal instead:
+
+```bash
+watch -n30 'ls -lh ~/backups/nvme0n1.img.zst'
+ssh home.local 'sudo kill -USR1 $(pgrep -f "^dd if=/dev/nvme0n1")'   # makes dd log its progress
+```
+
+**Do not start the stack until `dd` exits.** Writing to the disk mid-read produces an image that
+looks complete and restores to a corrupted filesystem — the worst possible failure for the one
+artifact that exists to rescue you.
 
 ### 3. Confirm you can still get in afterwards
 
@@ -72,65 +109,116 @@ most. Without the age key there is no `.env`, and without `.env` nothing starts.
 The workstation's own age key can decrypt the secrets too, so you are not locked out if the server's
 copy is lost — but restoring it is the documented path.
 
-### 4. Build the media
+### 4. Nothing to build
 
-- Fedora CoreOS **live ISO** on a USB stick.
-- Transpile the Ignition config and put it somewhere the live environment can read — a second USB
-  stick, or serve it over HTTP from the workstation:
+There is no USB stick. `bin/remote-kexec.sh` resolves the current Fedora CoreOS release from the
+stream metadata, downloads the kernel, initramfs and rootfs, **verifies their SHA-256**, embeds
+`host/butane/live.bu` into the initramfs and concatenates the rootfs onto it. All of that happens on
+the workstation and is checked before anything is sent.
+
+---
+
+## Rehearsal
+
+### 5. Boot the live environment, then power-cycle back
+
+The one step whose behaviour on this board is unknown, and the one that costs nothing to test.
 
 ```bash
-cd ~/repos/brinkflew/media-stack/host/butane
-podman run --rm -i quay.io/coreos/butane:release --pretty --strict < ucore.bu > ucore.ign
+./bin/remote-kexec.sh
 ```
+
+It stops the stack, loads the kernel, and `systemctl kexec`s into it — a clean shutdown first, so
+the filesystems are unmounted properly. Then it polls until the live environment answers.
+
+When it reports success:
+
+```bash
+ssh core@192.168.0.100 'cat /etc/os-release | head -2; ip -4 -o addr show scope global'
+ssh core@192.168.0.100 'lsblk -o NAME,SIZE,FSTYPE,LABEL -d'
+```
+
+Expect **Fedora CoreOS 44**, the address **192.168.0.100/24**, and both disks present with
+`nvme0n1` untouched.
+
+**Then power-cycle the machine.** Fedora 37 boots back from disk, because nothing wrote to it.
+Confirm:
+
+```bash
+ssh home.local 'uptime; cd /var/media-stack && docker compose ps -q | wc -l'   # 17
+```
+
+If it does **not** come back within five minutes, power-cycle anyway — that is the whole safety
+property. What you have then learned is that `kexec` or the NIC does not work here, at the cost of a
+reboot rather than a wiped disk, and the fallback below is the route.
 
 ---
 
 ## Install
 
-### 5. Boot the live ISO
-
-### 6. Verify the disks before touching anything
+### 6. Get into the live environment
 
 ```bash
-lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID
+./bin/backup-config.sh        # again — the rehearsal window may have changed things
+./bin/remote-kexec.sh
 ```
 
-Expect `nvme0n1` at 232.9 G with three partitions, and `sda` at 7.3 T carrying an
-`LVM2_member` partition. **If `sda` is anything other than the LVM member, stop.** Confirm the media
-volume's UUID is still `fce53d5f-0849-40dd-81aa-ba21819c7eeb`, because `mnt-media.mount` refers to
-it by UUID and a mismatch means the stack starts with an empty library.
-
-### 7. Install
+### 7. Check the disks from inside it
 
 ```bash
-sudo coreos-installer install /dev/nvme0n1 --ignition-file ucore.ign
+ssh core@192.168.0.100 'lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID'
 ```
 
-`/dev/nvme0n1`. **Not `sda`.**
+Expect `nvme0n1` at 232.9 G and `sda` at 7.3 T carrying an `LVM2_member` partition. **If `sda` is
+anything other than the LVM member, stop.** `bin/remote-install.sh` re-checks both of these and
+refuses to run otherwise, but look yourself — it is the one error with no recovery.
 
-### 8. Reboot, then rebase to uCore
+### 8. Install
 
 ```bash
-sudo rpm-ostree rebase ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia
-sudo systemctl reboot
+./bin/remote-install.sh
 ```
 
-**`nvidia-cdi.service` fails on this first boot and that is expected** — plain FCOS has no
+It confirms it is talking to a live boot (not an installed system), verifies `sda`, checks the media
+volume's UUID against `mnt-media.mount`, ships `ucore.ign`, and requires you to type
+`install uCore`. Then `coreos-installer install /dev/nvme0n1` and a reboot.
+
+### 9. Rebase and reconnect
+
+The host key has changed:
+
+```bash
+ssh-keygen -R 192.168.0.100 && ssh-keygen -R home.avanserv.com
+ssh avanserv@192.168.0.100 'sudo rpm-ostree rebase \
+  ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia && sudo systemctl reboot'
+```
+
+**`nvidia-cdi.service` fails on the first boot and that is expected** — plain FCOS has no
 `nvidia-ctk`. It succeeds after the rebase. Do not chase it.
 
-### 9. Reconnect
+---
 
-The host key has changed, so clear the old one:
+## Fallback: the console path
 
-```bash
-ssh-keygen -R home && ssh-keygen -R home.avanserv.com && ssh home 'rpm-ostree status'
-```
+Use this if the rehearsal shows `kexec` does not work here, or if phase 2 fails and leaves the
+machine unbootable. It needs a monitor, a keyboard and two USB sticks.
+
+1. Write the **Fedora CoreOS live ISO** to a USB stick.
+2. `podman run --rm -i quay.io/coreos/butane:release --pretty --strict < host/butane/ucore.bu > ucore.ign`
+   and put it on a second stick.
+3. Boot the ISO, `lsblk` and confirm the disks as in step 7.
+4. `sudo coreos-installer install /dev/nvme0n1 --ignition-file ucore.ign` — **not `sda`**.
+5. Rebase as in step 9.
+
+Everything from *Restore* onwards is identical either way.
 
 ---
 
 ## Restore
 
-Strict order. Each step depends on the one before it.
+Strict order. Each step depends on the one before it. Steps 10–13 run **on the server**, reached as
+`ssh avanserv@192.168.0.100` — the address is now pinned statically by the Ignition config, so it is
+the same one as before.
 
 ### 10. The repository
 
@@ -187,8 +275,8 @@ restic restore latest --target /tmp/restore
 # restic recreates the full original path, so config/ lands several levels down
 # under the staging directory it was backed up from - find it rather than guess.
 SRC=$(find /tmp/restore -type d -name config -print -quit)
-rsync -a "$SRC/" home:/var/media-stack/config/
-ssh home 'du -sh /var/media-stack/config && ls /var/media-stack/config'
+rsync -a "$SRC/" avanserv@192.168.0.100:/var/media-stack/config/
+ssh avanserv@192.168.0.100 'du -sh /var/media-stack/config && ls /var/media-stack/config'
 ```
 
 Caddy's certificates were captured from inside its container as root, but restore as `avanserv`
@@ -198,7 +286,7 @@ its own keys back.
 ### 15. Start it
 
 ```bash
-ssh home
+ssh avanserv@192.168.0.100
 systemctl --user daemon-reload
 
 # The VPN first. Starting gluetun pulls in torrent-pod, and its Notify=healthy
@@ -231,6 +319,11 @@ systemctl --user list-units 'net-*' --no-legend  # seven networks, all active
 Run the same battery this stack was signed off with. Anything less and you are guessing.
 
 ```bash
+# the address held, which is what the router's port forward depends on.
+# check this FIRST - if it moved, fix it before you lose the session you are in.
+ip -4 -o addr show | grep 192.168.0.100
+nmcli -f GENERAL.STATE,IP4.ADDRESS connection show lan
+
 # the media disk mounted with the right SELinux label - not just mounted
 findmnt /mnt/media -o SOURCE,FSTYPE,OPTIONS      # xfs, context=...container_file_t
 ls /mnt/media/library | head
@@ -265,12 +358,20 @@ Then, in a browser: a passkey login, and Jellyfin playing something that transco
 
 ## Rollback
 
-If uCore does not work out, put the old system back from the live ISO:
+Putting the old system back means writing to `nvme0n1`, so it has to be done from something that is
+not running off it — the live environment. **Get there first**, which is the same `kexec` as before
+if the installed system still boots:
 
 ```bash
-zstd -dc ~/backups/nvme0n1.img.zst | ssh home 'sudo dd of=/dev/nvme0n1 bs=4M'
+./bin/remote-kexec.sh                                            # if uCore still boots
+zstd -dc ~/backups/nvme0n1.img.zst | ssh core@192.168.0.100 'sudo dd of=/dev/nvme0n1 bs=4M'
+ssh core@192.168.0.100 'sudo systemctl reboot'
 ```
 
-You are not dependent on this. `config/` is backed up and verified, and the whole stack is in git,
-so the fallback of last resort is a fresh Fedora install and `docker compose up -d`. The image
-exists so that a bad evening does not have to become a long one.
+**If the installed system does not boot at all, this needs the console path** — the live ISO on a
+USB stick, then the same `dd`. That is the case remote installation cannot rescue, and it is why the
+image is taken before anything else.
+
+You are not dependent on the image regardless. `config/` is backed up and verified, and the whole
+stack is in git, so the fallback of last resort is a fresh Fedora install and `docker compose up -d`.
+The image exists so a bad evening does not have to become a long one.

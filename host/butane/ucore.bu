@@ -55,6 +55,40 @@ storage:
   # benefit, since the mount unit below is what actually mounts it.
   files:
     # ------------------------------------------------------------------------
+    # A static address, because losing it means losing the machine
+    # ------------------------------------------------------------------------
+    # The old host took 192.168.0.100 by DHCP, and the router forwards its
+    # external SSH port to that fixed address. A new OS presents a new DHCP
+    # identity and can be handed a different lease - at which point the forward
+    # points at nothing and the machine is unreachable from outside DESPITE the
+    # install having succeeded. There is no console here to notice with.
+    #
+    # A DHCP reservation would also work, but it lives in a router this
+    # repository cannot see, cannot verify and cannot restore. This can.
+    #
+    # Matched on MAC rather than interface name: the hardware address survives
+    # the OS change, whereas predictable interface naming is a convention.
+    - path: /etc/NetworkManager/system-connections/lan.nmconnection
+      mode: 0600
+      contents:
+        inline: |
+          [connection]
+          id=lan
+          type=ethernet
+          autoconnect=true
+
+          [ethernet]
+          mac-address=4C:ED:FB:3F:97:11
+
+          [ipv4]
+          method=manual
+          address1=192.168.0.100/24,192.168.0.1
+          dns=192.168.0.1;
+
+          [ipv6]
+          method=auto
+
+    # ------------------------------------------------------------------------
     # Rootless Podman needs to bind 80 and 443
     # ------------------------------------------------------------------------
     # Caddy runs as the service user, and unprivileged processes cannot bind

@@ -16,7 +16,7 @@ device you already carry.
 | `host/RUNBOOK.md` | the migration procedure, start to finish |
 | `ingress/` | the Caddyfile and the Caddy build with the Gandi DNS module |
 | `secrets/` | every credential, encrypted with sops+age |
-| `bin/` | `render-env.sh`, which turns `secrets/` into a usable `.env` |
+| `bin/` | deploy and migration scripts — env rendering, backups, the remote install |
 
 ## Shape of it
 

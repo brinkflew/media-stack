@@ -28,3 +28,13 @@ and each fails in a way that does not obviously point at its cause:
 
 `ucore.bu` is written but **not yet applied** — it describes the machine the migration will create,
 not the one running today.
+
+## `live.bu`
+
+A second, much smaller config for the **live** environment that `bin/remote-kexec.sh` boots into.
+It authorises SSH and nothing else; the live system exists only to be logged into so that
+`coreos-installer` can be run from something that is not the disk being written.
+
+Its networking deliberately does **not** live here — it comes from kernel arguments, so dracut
+applies it in the initramfs rather than NetworkManager applying it after switch-root. On a machine
+with no console, an ordering bug there is indistinguishable from one that never booted.

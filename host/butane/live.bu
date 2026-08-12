@@ -1,0 +1,57 @@
+variant: fcos
+version: 1.5.0
+
+# ==============================================================================
+# The live environment - phase 1 of a console-less migration
+# ------------------------------------------------------------------------------
+# This machine has no BMC, so there is no out-of-band console and no way to
+# watch an install fail. The migration is therefore split at the point of no
+# return:
+#
+#   phase 1  kexec into a live FCOS running entirely from RAM. THE DISK IS
+#            NEVER TOUCHED. If this does not come back, press the power button
+#            and Fedora 37 boots from disk exactly as it was.
+#   phase 2  from inside that live session, run coreos-installer. By then you
+#            are logged into the thing doing the destroying.
+#
+# This config is phase 1, and it does exactly one thing: authorise SSH. The live
+# system exists only to be logged into.
+#
+# NETWORKING IS NOT HERE. It comes from kernel arguments instead - see
+# bin/remote-kexec.sh - so dracut configures the interface in the initramfs.
+# Doing it here would leave it to NetworkManager after switch-root, and an
+# ordering problem there is indistinguishable from a machine that never booted.
+#
+# Build:  butane --strict < live.bu > live.ign
+# Embed:  coreos-installer pxe customize --live-ignition live.ign \
+#           -o custom-initramfs.img live-initramfs.img
+# ==============================================================================
+
+passwd:
+  users:
+    - name: core
+      # Both keys from the server's authorized_keys, so whichever you normally
+      # reach it with keeps working. `core` is the live image's built-in user;
+      # `avanserv` does not exist here and does not need to.
+      ssh_authorized_keys:
+        - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKmkRPuqZlSFi00vRwgPjEm69RiUQMcMALjFx08yGT56 avs@fedora
+        - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYqV/NrZ1e25EMY5xrL3VWDGiGcwVTYdaFo67hfA4QO avanserv@home.avanserv.com
+
+storage:
+  files:
+    # A breadcrumb, so that an `ssh core@192.168.0.100` landing somewhere
+    # unexpected is immediately identifiable as the live environment rather
+    # than a half-installed system.
+    - path: /etc/motd.d/live.motd
+      mode: 0644
+      contents:
+        inline: |
+
+          FEDORA COREOS LIVE - running from RAM, nothing has been written to disk.
+
+            Rehearsal?   Just power-cycle. Fedora 37 boots back from nvme0n1.
+            Installing?  Run bin/remote-install.sh from the workstation.
+
+          Confirm the disks look right before installing anything:
+            lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID
+            nvme0n1  232.9G  (target)      sda  7.3T  LVM2_member  (MUST SURVIVE)
