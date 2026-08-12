@@ -165,6 +165,7 @@ systemctl --user status <service>
 journalctl --user -u <service> -f
 podman ps                                     # STATUS shows healthy/unhealthy
 systemctl --user list-units --failed          # the fastest health check
+podman ps --filter health=unhealthy           # the one that catches a live-but-broken service
 
 systemctl --user start caddy-build            # after editing ingress/Dockerfile (~75s)
 podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change, no downtime
@@ -289,10 +290,22 @@ nothing listens on.
 `unpackerr` needs `net-arr` despite touching only the filesystem — it discovers what to extract
 by polling the Sonarr and Radarr queue APIs.
 
-**One media mount, not several.** Every media-touching service mounts `${DOCKER_VOLUME_MEDIA}`
+**One media mount, not several.** Every service that has to move files mounts `${DOCKER_VOLUME_MEDIA}`
 (`/mnt/media`) as a single `/data`, so `downloads/` and `library/` are on one filesystem and the
 \*arr apps can hardlink/atomic-move instead of copying. Mounting subdirectories separately would
-break that and silently double disk usage.
+break that and silently double disk usage. Verified working: an imported film is `links=2` with its
+seeding download, and the two paths share their bytes.
+
+**Jellyfin is the deliberate exception** — it mounts only `library/` at `/data/media`, because it
+never moves a file and has no business seeing `downloads/`. Do not "fix" it to match the others.
+
+**The library is a pipeline, not a folder.** `library/queued/<type>` is where the \*arr apps import
+to, Tdarr transcodes into `library/transcoded/<type>`, and Jellyfin serves *only* the transcoded
+side. `<type>` is one of `anime`, `documentaries`, `movies`, `series`, and `review/` is the manual
+siding. A root folder that omits the `queued/` or `transcoded/` level exists nowhere on disk —
+which is how Jellyseerr came to file every request into three paths that did not exist, so nothing
+requested through it could import at all. **Check a new root folder against the disk, not against
+what looks plausible.**
 
 ## Ingress and access control
 
@@ -334,9 +347,10 @@ Two things about this that are easy to get wrong, both learned the hard way:
 and their clients have no browser in which to complete a passkey prompt.
 
 **Almost nothing publishes a host port.** Caddy reaches each service by name over its network, so
-admin ports were a second path in that sign-on did not cover. Three publishes remain, each for
-something that must be spoken to without the proxy: Caddy's 80/443, Jellyfin for LAN clients, and
-Gluetun's LAN proxies. **Do not add a `ports:` entry for a service Caddy can reach by name.**
+admin ports were a second path in that sign-on did not cover. **Two publishes remain**, each for
+something that must be spoken to without the proxy: Caddy's 80/443, and Jellyfin for LAN clients.
+Gluetun's used to be a third and is gone with its proxies. **Do not add a `ports:` entry for a
+service Caddy can reach by name.**
 
 ## The `config/` gitignore inversion
 
@@ -437,21 +451,37 @@ Conclusions from auditing the running host. Do not rediscover these:
 - **The remaining internal exposure is Prowlarr.** It is the only service on `net-solver`, so it is
   the single hop between a compromised FlareSolverr and everything else. That is the reason its own
   login matters more than the others', not less.
-- **Gluetun's HTTP and Shadowsocks proxies are unauthenticated** (`HTTPPROXY_USER`,
-  `HTTPPROXY_PASSWORD` and `SHADOWSOCKS_PASSWORD` are all empty) and bound to `BIND_LAN`. They are
-  not reachable from the internet — the router does not forward 8888/8388, verified — but any LAN
-  device can use them as an open proxy into the VPN. Set credentials or turn them off if unused.
+- **Gluetun's HTTP and Shadowsocks proxies are off** (`HTTPPROXY=off`, `SHADOWSOCKS=off`) and the
+  container publishes no host port at all. They were unauthenticated and bound to `BIND_LAN`, which
+  made them an open proxy into the VPN for any LAN device. Turning them off was cheaper than
+  giving them credentials nothing used.
 - **Services must address each other over their shared network, never a public hostname.** Flood was
   configured with `https://torrent.avanserv.com`, so its polling left the network and came back
   through the proxy — and stopped working entirely once that route required a session. A container
   reaching another container through the front door is always a mistake; it is slower, it depends
   on DNS and NAT hairpinning, and it breaks the moment authentication is added.
-- **Tinyauth still breaks that rule and has not been fixed.** Its `TOKENURL` and `USERINFOURL` are
-  `https://id.${DOMAIN}/...`, so every sign-on's token exchange leaves the network and hairpins
-  back through the router. It works, but it makes login depend on NAT hairpinning — the one thing
-  that must not break. `AUTHURL` genuinely has to stay public, since the browser follows it; the
-  other two could be `http://pocket-id:1411/...`. Untested: Pocket ID may issue an `iss` claim
-  Tinyauth rejects, and the symptom would be sign-on failing at the callback.
+- **Tinyauth now obeys that rule.** Its `TOKENURL` and `USERINFOURL` are `http://pocket-id:1411/...`
+  on `net-ingress`; only `AUTHURL` and `REDIRECTURL` stay public, and they have to, because the
+  browser is what follows them. Sign-on no longer depends on NAT hairpinning. The feared `iss`-claim
+  mismatch did not materialise.
+- **A container's stdout is journal priority 6; its stderr is priority 3.** That is podman's
+  journald driver, and it means an application that logs to stderr has every line — access logs,
+  successful 200s, cheerful startup banners — recorded as a journal **error**. Caddy and Tinyauth
+  both did, at ~1950 lines a day, which is enough to make `journalctl -p err` worthless and any
+  alerting built on it worse than nothing. Caddy is now pointed at stdout in *both* the global block
+  and the `(base)` snippet; Tinyauth's duplicate HTTP stream is off and its audit stream is on.
+  **Check where a new service logs before trusting a priority filter.**
+- **Podman emits a `health_status` event per check, carrying the image's whole label set** — the
+  Jellyfin one is ~1.5 KB. Sixteen containers at 30s tripled journal volume, so the interval is 60s
+  (120s for the Tdarr nodes, 5s for gluetun, which is the kill-switch). Worth knowing before adding
+  a seventeenth.
+- **The ISP resolver returns a blocking page for several indexer domains.** All three distinct
+  1337x hostnames resolved to one address, `193.191.210.104`, and four indexers failed as "DNS/SSL
+  issues" while every container looked healthy. `prowlarr` and `flaresolverr` therefore carry
+  `DNS=9.9.9.9` / `DNS=1.1.1.1`. Measured from a throwaway container: the request that dies at the
+  sinkhole reaches the real Cloudflare-fronted host and returns a 403 challenge, which is exactly
+  what FlareSolverr is on `net-solver` to solve. **A DNS failure here looks like an application
+  fault, so compare a suspect hostname against a public resolver before believing the site is down.**
 
 ## Target architecture
 
@@ -468,11 +498,17 @@ unnecessary. What carried over was the *design*, and the fact that it had been p
 FlareSolverr could reach Sonarr on the new host, the question was "why is this different here",
 not "was this ever right".
 
+**Step 3 is done.** `bin/backup-offsite.sh` copies the repository to Scaleway Object Storage with
+its own password, and both age keys and both restic passwords are in the password manager — which
+was the actual gap, since the alternative was an off-site backup nobody could decrypt.
+
 Remaining, in order:
 
-3. **A cloud backup target** — `restic copy` to a second repository. The repository, the age keys
-   and the restic password are still all on the one workstation, which is the outstanding gap.
 4. **Monitoring**, so a failed unit surfaces without someone running `systemctl --user --failed`.
+   Two prerequisites are now in place and both were load-bearing: journal priorities mean something
+   (Caddy and Tinyauth were emitting ~1950 false errors a day), and 16 of 18 containers report real
+   health. `duckdns` and `unpackerr` never will — neither serves HTTP — so a check that assumes
+   every container has a health status will report them broken for ever.
 5. **`podman-auto-update`** — the units are digest-pinned, which is the prerequisite; auto-update is
    the thing that makes pinning maintainable rather than a slow drift into staleness.
 
