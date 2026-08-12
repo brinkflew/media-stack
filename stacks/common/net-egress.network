@@ -1,0 +1,14 @@
+# ==============================================================================
+# net-egress
+# ------------------------------------------------------------------------------
+# Services that talk only to the internet, such as DuckDNS. A container still needs a network for NAT egress; this one deliberately has no peers.
+#
+# Transcribed from the Compose topology this replaces, which is running and
+# verified - not a fresh design. Podman creates the network with --ignore, so
+# starting an already-created network is a no-op, but CHANGING a subnet is not:
+# the network has to be removed while nothing is attached to it.
+# ==============================================================================
+
+[Network]
+NetworkName=net-egress
+Subnet=${NET_SUBNET_EGRESS}

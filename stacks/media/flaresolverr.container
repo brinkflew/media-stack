@@ -1,0 +1,40 @@
+# ==============================================================================
+# FlareSolverr: Cloudflare / DDoS-GUARD bypass
+# ------------------------------------------------------------------------------
+# Renders indexer pages in a real headless Chrome, which makes this the most
+# likely container in the stack to be compromised: its entire input is
+# attacker-controlled HTML and JavaScript from sites nobody vets.
+#
+# It is therefore alone on net-solver with Prowlarr. It still reaches the
+# internet - every bridge NATs out - but from inside it, nothing else in the
+# stack resolves or answers. Verified by TCP connect, not only by name
+# resolution: a container has one address per network it joins, so proving the
+# name does not resolve proves less than it appears to.
+#
+# DO NOT add another network here, and do not give Caddy a leg into net-solver.
+# There is no UI worth exposing.
+#
+# Image:  https://hub.docker.com/r/flaresolverr/flaresolverr
+# See:    https://github.com/FlareSolverr/FlareSolverr
+# ==============================================================================
+
+[Unit]
+Description=FlareSolverr
+
+[Container]
+Image=ghcr.io/flaresolverr/flaresolverr@sha256:7962759d99d7e125e108e0f5e7f3cdbcd36161776d058d1d9b7153b92ef1af9e
+ContainerName=flaresolverr
+Network=net-solver.network
+
+Environment=LOG_LEVEL=info
+Environment=LOG_HTML=false
+Environment=CAPTCHA_SOLVER=none
+Environment=TZ=${TIMEZONE}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

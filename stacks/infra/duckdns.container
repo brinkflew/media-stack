@@ -1,0 +1,38 @@
+# ==============================================================================
+# DuckDNS: dynamic DNS updater
+# ------------------------------------------------------------------------------
+# Keeps avanserv.duckdns.org pointed at the current WAN address; every service
+# hostname is a CNAME to it, so this is what makes the whole stack reachable
+# after the ISP changes the address.
+#
+# It talks to DuckDNS and nothing else, so it sits on net-egress - a bridge with
+# no peers, which exists only because a container still needs one for NAT
+# egress. Nothing in the stack can reach it and it can reach nothing.
+#
+# Image:  https://docs.linuxserver.io/images/docker-duckdns
+# ==============================================================================
+
+[Unit]
+Description=DuckDNS updater
+
+[Container]
+Image=lscr.io/linuxserver/duckdns@sha256:71737cabc025d139822146c66529705608155b7e1d13c8b3c6d7948e68400306
+ContainerName=duckdns
+Network=net-egress.network
+
+Volume=${DOCKER_VOLUME_CONFIG}/duckdns:/config:Z
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=TZ=${TIMEZONE}
+Environment=SUBDOMAINS=${DDNS_SUBDOMAINS}
+Environment=TOKEN=${DDNS_TOKEN}
+Environment=LOG_FILE=true
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

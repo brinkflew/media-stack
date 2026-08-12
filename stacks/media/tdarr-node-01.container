@@ -1,0 +1,57 @@
+# ==============================================================================
+# Tdarr node 01
+# ------------------------------------------------------------------------------
+# `runtime: nvidia` with NVIDIA_VISIBLE_DEVICES became a CDI device reference,
+# which is how Podman does GPU passthrough and which works rootless. The device
+# list is generated on the host with:
+#
+#   nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#
+# uCore's -nvidia variant pre-bakes the driver and nvidia-container-toolkit, so
+# that is the only step. Each node is pinned to one of the two RTX 3060 Ti to
+# keep the workload evenly split.
+#
+# nv-patch.sh is NOT ported forward: it lifted the NVENC concurrent-session
+# limit, which NVIDIA raised to 8 for consumer cards in Jan 2024, and two nodes
+# cannot reach that ceiling. Patching a driver library in /usr would also fight
+# OSTree on every update.
+#
+# Image:  https://github.com/HaveAGitGat/Tdarr
+# ==============================================================================
+
+[Unit]
+Description=Tdarr node 01
+After=tdarr-server.service
+
+[Container]
+Image=ghcr.io/haveagitgat/tdarr_node@sha256:fab0c179faac72727f5ca98ff33104596099feaef1faf72410159a51077b520b
+ContainerName=tdarr-node-01
+Network=net-transcode.network
+
+AddDevice=/dev/dri
+AddDevice=nvidia.com/gpu=0
+
+Volume=${DOCKER_VOLUME_CONFIG}/tdarr/configs:/app/configs:z
+Volume=${DOCKER_VOLUME_CONFIG}/tdarr/logs:/app/logs:z
+Volume=${DOCKER_VOLUME_CACHE}/tdarr:/temp:z
+Volume=${DOCKER_VOLUME_MEDIA}:/media
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+Environment=nodeID=TdarrNode01
+Environment=serverIP=tdarr-server
+Environment=serverPort=${PORT_TDARR_SERVER}
+# Kept for the container's own logic. The CDI reference above is what actually
+# grants the device; this no longer selects it.
+Environment=NVIDIA_VISIBLE_DEVICES=0
+Environment=NVIDIA_DRIVER_CAPABILITIES=all
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

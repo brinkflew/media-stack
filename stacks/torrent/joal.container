@@ -1,0 +1,45 @@
+# ==============================================================================
+# JOAL: torrent fake-upload client
+# ------------------------------------------------------------------------------
+# In the VPN namespace for the same reason qBittorrent is: it announces to
+# trackers, and on the shared bridge those announces carried the host's own IP
+# while qBittorrent's went through ProtonVPN.
+#
+# Like qBittorrent it has no name of its own, so Caddy reaches its UI at
+# gluetun:${PORT_JOAL_WEB}. Forgetting that is what broke the fakerr route when
+# it first moved into the namespace.
+#
+# Image:  https://hub.docker.com/r/anthonyraymond/joal
+# See:    https://github.com/anthonyraymond/joal
+# ==============================================================================
+
+[Unit]
+Description=JOAL
+Requires=gluetun.service
+After=gluetun.service
+
+[Container]
+Image=docker.io/anthonyraymond/joal@sha256:fc942567c5649b29377e50aa0ca934e4750534d02b4ecf5a0eda3984630f35d7
+ContainerName=joal
+Pod=torrent.pod
+
+Volume=${DOCKER_VOLUME_CONFIG}/joal:/config:Z
+Volume=${DOCKER_VOLUME_MEDIA}/downloads/faking:/config/torrents
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+
+# Exec= is the container's command, the equivalent of Compose's `command:`.
+# The UI is served under a secret path prefix with a token behind it; both come
+# from the environment so neither ends up in this public repository.
+Exec=--joal-conf=/config --spring.main.web-environment=true --server.port=${PORT_JOAL_WEB} --joal.ui.path.prefix=${JOAL_OBFUSCATION_PATH} --joal.ui.secret-token=${JOAL_SECRET_TOKEN}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

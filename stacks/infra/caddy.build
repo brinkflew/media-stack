@@ -1,0 +1,24 @@
+# ==============================================================================
+# Build: Caddy with the Gandi DNS provider
+# ------------------------------------------------------------------------------
+# The only image here that is not pulled. The official Caddy image ships no DNS
+# provider modules, and certificates are issued over DNS-01 against Gandi, so
+# the binary has to be rebuilt with the provider compiled in.
+#
+# A .build unit makes that part of the dependency graph rather than a step
+# someone has to remember: caddy.container references this image, so systemd
+# builds it before starting the proxy.
+#
+# NOT digest-pinned, unlike everything else here, because ingress/Dockerfile
+# builds FROM the moving tags caddy:2-builder and caddy:2. Pinning those would
+# make the ingress reproducible too, at the cost of two more digests to bump by
+# hand. Worth doing; not done.
+# ==============================================================================
+
+[Unit]
+Description=Build Caddy with caddy-dns/gandi
+
+[Build]
+ImageTag=localhost/media-stack/caddy:latest
+File=/var/media-stack/ingress/Dockerfile
+SetWorkingDirectory=/var/media-stack/ingress

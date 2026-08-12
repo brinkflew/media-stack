@@ -1,0 +1,99 @@
+# ==============================================================================
+# Gluetun: VPN client and egress chokepoint
+# ------------------------------------------------------------------------------
+# Holds the network namespace that qBittorrent and JOAL live in. Everything they
+# send leaves through the tunnel or not at all.
+#
+# Notify=healthy is what makes this safe. Podman withholds systemd's READY
+# signal until the container's healthcheck passes, so the members that
+# Requires= this unit cannot start into a namespace whose only route is the
+# bare bridge. Compose expressed the same thing as
+# `depends_on: gluetun: condition: service_healthy`.
+#
+# ROOTLESS NOTES, both untestable on the current host and to be verified on
+# first boot after the migration:
+#   - /dev/net/tun must be readable by the running user. CoreOS ships it 0600
+#     root:root, so host/butane/ carries a udev rule.
+#   - NET_ADMIN inside a user namespace is enough for gluetun to configure
+#     WireGuard and its firewall; it does not need real root on the host.
+#
+# Image:  https://github.com/qdm12/gluetun/pkgs/container/gluetun
+# See:    https://github.com/qdm12/gluetun/wiki
+# ==============================================================================
+
+[Unit]
+Description=Gluetun VPN client
+After=network-online.target
+
+[Container]
+Image=docker.io/qmcgaw/gluetun@sha256:f9cd584c6bb8c89e7e4c6d799c7547f600bc86842fd5636307543c001d929bbb
+ContainerName=gluetun
+Pod=torrent.pod
+
+AddCapability=NET_ADMIN
+AddDevice=/dev/net/tun
+
+Volume=${DOCKER_VOLUME_CONFIG}/gluetun:/gluetun:Z
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=TZ=${TIMEZONE}
+Environment=FIREWALL_OUTBOUND_SUBNETS=${NET_LOCAL_SUBNET}
+
+# Off. Both ran without credentials, which made them an open proxy into the VPN
+# for anything on the LAN. If you want them back, set credentials at the same
+# time.
+Environment=HTTPPROXY=off
+Environment=SHADOWSOCKS=off
+
+# ProtonVPN over WireGuard. Gluetun ships every Proton server's public key,
+# endpoint and tunnel address, so the private key is the only credential needed.
+Environment=VPN_SERVICE_PROVIDER=${VPN_PROVIDER}
+Environment=VPN_TYPE=${VPN_TYPE}
+Environment=WIREGUARD_PRIVATE_KEY=${VPN_WG_PRIVATE_KEY}
+
+# Port forwarding needs NAT-PMP ticked when the WireGuard config was generated;
+# PORT_FORWARD_ONLY restricts server selection to nodes that support it.
+Environment=VPN_PORT_FORWARDING=on
+Environment=PORT_FORWARD_ONLY=on
+
+# ProtonVPN hands out a different forwarded port on every reconnect while
+# qBittorrent's listen port is static in its config. Left alone the two drift
+# apart and no incoming peer can reach the client. qBittorrent shares this
+# namespace, so 127.0.0.1 reaches it.
+Environment=VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c 'wget -qO- --retry-connrefused --post-data="json={\"listen_port\":{{PORTS}}}" http://127.0.0.1:${PORT_QBITTORRENT_WEB}/api/v2/app/setPreferences'
+
+Environment=SERVER_CITIES=${VPN_SERVER_CITIES}
+Environment=SERVER_COUNTRIES=${VPN_SERVER_COUNTRIES}
+Environment=SERVER_HOSTNAMES=${VPN_SERVER_HOSTS}
+Environment=SERVER_REGIONS=${VPN_SERVER_REGION}
+
+# Optional overrides, all empty in practice. Carried over from the Compose file
+# rather than dropped, so that pinning a specific server or falling back to
+# OpenVPN stays a change to .env rather than a change to this unit.
+Environment=VPN_ENDPOINT_IP=${VPN_WG_ENDPOINT_ADDR}
+Environment=VPN_ENDPOINT_PORT=${VPN_WG_ENDPOINT_PORT}
+Environment=WIREGUARD_ADDRESSES=${VPN_WG_ADDRESSES}
+Environment=WIREGUARD_PRESHARED_KEY=${VPN_WG_PRESHARED_KEY}
+Environment=WIREGUARD_PUBLIC_KEY=${VPN_WG_PUBLIC_KEY}
+Environment=OPENVPN_CUSTOM_CONFIG=${VPN_OPENVPN_CONFIG}
+Environment=OPENVPN_USER=${VPN_USERNAME}
+Environment=OPENVPN_PASSWORD=${VPN_PASSWORD}
+
+HealthCmd=/gluetun-entrypoint healthcheck
+HealthInterval=5s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+# The tunnel handshake plus the first healthcheck can outlast the default 90s
+# on a cold start, and a timeout here cascades into both downloaders.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,52 @@
+# ==============================================================================
+# Pocket ID: passkey-only OpenID Connect provider
+# ------------------------------------------------------------------------------
+# There are no passwords to phish, leak or rotate - authentication is a WebAuthn
+# signature from a device the user already carries.
+#
+# It is only a provider: it has no forward-auth endpoint, which is what Tinyauth
+# is for. Applications that speak OIDC natively can point straight here.
+#
+# Alone with Caddy and Tinyauth on net-ingress, and publishes no port. It is
+# reached only through Caddy, which is also what gives it the HTTPS that
+# WebAuthn refuses to work without.
+#
+# APP_URL must match the browser's origin EXACTLY, port included. WebAuthn
+# strips the port when deriving the relying-party ID, but the server validates
+# the full origin string separately, and a mismatch fails registration at the
+# last step with an unhelpful "couldn't process the response from your passkey".
+#
+# ENCRYPTION_KEY protects the passkey and OIDC client material at rest. Losing
+# it makes every registered credential unreadable, which is the single strongest
+# argument for the sops+age work - it used to exist only on one unbacked-up SSD.
+#
+# Image:  https://github.com/pocket-id/pocket-id/pkgs/container/pocket-id
+# See:    https://pocket-id.org/docs/configuration/environment-variables
+# ==============================================================================
+
+[Unit]
+Description=Pocket ID
+
+[Container]
+Image=ghcr.io/pocket-id/pocket-id@sha256:c9c1d7b70006968d673a1073df048a3fdec73ccb54e182320b56bb911340f6f1
+ContainerName=pocket-id
+Network=net-ingress.network
+
+Volume=${DOCKER_VOLUME_CONFIG}/pocket-id:/app/data:Z
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=TZ=${TIMEZONE}
+Environment=APP_URL=${POCKETID_APP_URL}
+# The subnet Caddy actually addresses it on. Wrong value here and every request
+# is attributed to the proxy instead of the client.
+Environment=TRUST_PROXY=${NET_SUBNET_INGRESS}
+Environment=ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

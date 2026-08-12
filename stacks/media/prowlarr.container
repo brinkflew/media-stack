@@ -1,0 +1,41 @@
+# ==============================================================================
+# Prowlarr: indexer manager and proxy
+# ------------------------------------------------------------------------------
+# The only service in three segments, and the reason each one is needed:
+#   net-arr       syncs indexer definitions into Sonarr and Radarr, and proxies
+#                 their Torznab queries back out
+#   net-download  tests and pushes to qBittorrent at gluetun:8200
+#   net-solver    the sole consumer of FlareSolverr
+#
+# That makes it the single hop between a compromised FlareSolverr and everything
+# else, which is why its own login matters MORE than the others', not less. Do
+# not set AuthenticationMethod=External here.
+#
+# Image:  https://docs.linuxserver.io/images/docker-prowlarr
+# ==============================================================================
+
+[Unit]
+Description=Prowlarr
+
+[Container]
+Image=lscr.io/linuxserver/prowlarr@sha256:1776ab8b030fdb198e7e2dae407a01b06c14360e9fb95f459c7e38914026da79
+ContainerName=prowlarr
+Network=net-arr.network
+Network=net-download.network
+Network=net-solver.network
+
+Volume=${DOCKER_VOLUME_CONFIG}/prowlarr:/config:Z
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=TZ=${TIMEZONE}
+Environment=DOCKER_MODS=ghcr.io/gilbn/theme.park:prowlarr
+Environment=TP_THEME=${TP_THEME}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

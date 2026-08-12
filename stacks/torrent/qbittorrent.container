@@ -1,0 +1,46 @@
+# ==============================================================================
+# qBittorrent: torrent download client
+# ------------------------------------------------------------------------------
+# Lives in gluetun's network namespace and has no address of its own. Anything
+# addressing it - Caddy, the *arr apps' download client settings - must use
+# gluetun:${PORT_QBITTORRENT_WEB}. `qbittorrent:8200` does not resolve.
+#
+# Requires= rather than only After=: gluetun's Notify=healthy means systemd
+# holds this unit until the tunnel is actually up, not merely until the gluetun
+# container has been created.
+#
+# Image:  https://docs.linuxserver.io/images/docker-qbittorrent
+# ==============================================================================
+
+[Unit]
+Description=qBittorrent
+Requires=gluetun.service
+After=gluetun.service
+
+[Container]
+Image=lscr.io/linuxserver/qbittorrent@sha256:b645fa7cbd7023321848d25545f0e3b54ad401e4f0eaffdcf8787fcb6dc749ce
+ContainerName=qbittorrent
+Pod=torrent.pod
+
+Volume=${DOCKER_VOLUME_CONFIG}/qbittorrent:/config:Z
+# No :z on the media mount - it is 7TB and relabelling it recursively on every
+# start would be ruinous. Its context is set once at mount time; see host/butane.
+Volume=${DOCKER_VOLUME_MEDIA}:/data
+
+# 0/0, not 1000/1000: rootless Podman maps container root to the invoking user,
+# which is what owns the media disk. See stacks/README.md.
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+Environment=WEBUI_PORT=${PORT_QBITTORRENT_WEB}
+Environment=DOCKER_MODS=ghcr.io/gilbn/theme.park:qbittorrent
+Environment=TP_THEME=${TP_THEME}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,33 @@
+# ==============================================================================
+# Pod: torrent
+# ------------------------------------------------------------------------------
+# The Podman equivalent of Compose's `network_mode: "service:gluetun"`. gluetun,
+# qBittorrent and JOAL share one network namespace, so if the VPN drops they
+# lose connectivity entirely - a kill-switch by construction rather than by a
+# firewall rule someone has to remember.
+#
+# THE POD OWNS THE NETWORK. Its members inherit it and must not declare a
+# Network= of their own; doing so would give a downloader a route outside the
+# tunnel, which is the one failure this whole arrangement exists to prevent.
+#
+# The pod's infra container holds the namespace, and that namespace has a
+# working default route out through the bridge from the moment it is created -
+# before gluetun has built the tunnel. That window is why the members are
+# health-gated on gluetun rather than merely ordered after it.
+#
+# No port is published. qBittorrent's and JOAL's web UIs are reached through
+# Caddy, which addresses them as gluetun:<port> because neither has a name of
+# its own. Incoming peers arrive through the tunnel on the port ProtonVPN
+# forwards, landing directly in this namespace, so publishing 6881 on the host
+# would only forward to a port nothing listens on.
+# ==============================================================================
+
+[Unit]
+Description=Torrent pod (VPN namespace shared by gluetun, qBittorrent and JOAL)
+
+[Pod]
+PodName=torrent
+Network=net-download.network
+
+[Install]
+WantedBy=default.target

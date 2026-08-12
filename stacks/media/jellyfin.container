@@ -1,0 +1,50 @@
+# ==============================================================================
+# Jellyfin: media server
+# ------------------------------------------------------------------------------
+# The most exposed service here - reachable from the LAN directly and from the
+# internet through Caddy - and yet it initiates no internal connections at all.
+# That asymmetry is what lets net-media be this small: only Jellyseerr reads
+# from it, and it reads from nothing.
+#
+# The published port is one of only two in the stack. LAN clients (TVs, the
+# Jellyfin apps) connect straight to it rather than through the proxy, and it is
+# deliberately NOT behind single sign-on because those clients have no browser
+# in which to complete a passkey prompt. Jellyfin authenticates its own users.
+#
+# GPU: `deploy.resources.reservations` with count:1 became an explicit CDI
+# reference. count:1 meant "the first device", which is GPU 0 - the same one
+# tdarr-node-01 uses. Two RTX 3060 Ti, and NVIDIA's consumer NVENC limit has
+# been 8 concurrent sessions since Jan 2024, so sharing is not a constraint.
+#
+# Image:  https://docs.linuxserver.io/images/docker-jellyfin
+# See:    https://jellyfin.org/docs/general/administration/hardware-acceleration/
+# ==============================================================================
+
+[Unit]
+Description=Jellyfin
+
+[Container]
+Image=lscr.io/linuxserver/jellyfin@sha256:0c7af94c048cd17f7438cd22c4d9c78d4c9c381d565352846aac847dd3cd74f4
+ContainerName=jellyfin
+Network=net-media.network
+
+AddDevice=/dev/dri
+AddDevice=nvidia.com/gpu=0
+
+Volume=${DOCKER_VOLUME_CONFIG}/jellyfin:/config:Z
+Volume=${DOCKER_VOLUME_MEDIA}/library:/data/media
+
+PublishPort=${BIND_LAN}:${PORT_JELLYFIN_WEB}:8096
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

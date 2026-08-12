@@ -1,0 +1,44 @@
+# ==============================================================================
+# Tdarr server: transcode orchestrator
+# ------------------------------------------------------------------------------
+# Hands work to the two nodes, which connect out to it. It initiates nothing
+# towards them, so net-transcode holds only these three and Caddy.
+#
+# The scratch mount is DELIBERATELY not under the media disk. Both nodes
+# otherwise read source media and write transcode output to the same spindle
+# and spend their time fighting each other for head seeks. Keep it on the SSD.
+#
+# Image:  https://github.com/users/haveagitgat/packages/container/package/tdarr
+# See:    https://docs.tdarr.io/docs/installation/docker/run-compose
+# ==============================================================================
+
+[Unit]
+Description=Tdarr server
+
+[Container]
+Image=ghcr.io/haveagitgat/tdarr@sha256:e66fd4083cd6024bc3e2d66cc1f07f84eeb1a66f57e75ca9354015a4b776413a
+ContainerName=tdarr-server
+Network=net-transcode.network
+
+Volume=${DOCKER_VOLUME_CONFIG}/tdarr/server:/app/server:Z
+# configs/ and logs/ are shared with both nodes, so :z (shared) not :Z (private).
+# A private label here would make them unreadable to the nodes.
+Volume=${DOCKER_VOLUME_CONFIG}/tdarr/configs:/app/configs:z
+Volume=${DOCKER_VOLUME_CONFIG}/tdarr/logs:/app/logs:z
+Volume=${DOCKER_VOLUME_CACHE}/tdarr:/temp:z
+Volume=${DOCKER_VOLUME_MEDIA}:/media
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+Environment=internalNode=false
+Environment=nodeID=TdarrServer
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

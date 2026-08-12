@@ -1,0 +1,59 @@
+# ==============================================================================
+# Tinyauth: forward authentication bridge
+# ------------------------------------------------------------------------------
+# Sits between Caddy and the applications that have no SSO of their own. Caddy
+# asks it whether a request is authorised; if not, it runs the OIDC flow against
+# Pocket ID and the passkey prompt happens there.
+#
+# The whitelist matters: without it, any account Pocket ID knows about can sign
+# in to everything.
+#
+# KNOWN WART, carried over unchanged so that the migration changes one thing at
+# a time: TOKENURL and USERINFOURL address Pocket ID through its PUBLIC
+# hostname, so the token exchange leaves the network and hairpins back through
+# the router. AUTHURL genuinely has to stay public - the browser follows it -
+# but the other two could be http://pocket-id:1411/... Untested, because Pocket
+# ID may issue an `iss` claim Tinyauth then rejects; the symptom would be
+# sign-on failing at the callback.
+#
+# Image:  https://github.com/tinyauthapp/tinyauth/pkgs/container/tinyauth
+# See:    https://tinyauth.app/docs/guides/pocket-id
+# ==============================================================================
+
+[Unit]
+Description=Tinyauth
+After=pocket-id.service
+
+[Container]
+Image=ghcr.io/tinyauthapp/tinyauth@sha256:a1bde189951900f84a60f133c26a1ec7a3264073ec7875b548f4fbadb7f5f735
+ContainerName=tinyauth
+Network=net-ingress.network
+
+Volume=${DOCKER_VOLUME_CONFIG}/tinyauth:/data:Z
+
+Environment=TZ=${TIMEZONE}
+Environment=TINYAUTH_APPURL=https://auth.${DOMAIN}
+Environment=TINYAUTH_DATABASE_PATH=/data/tinyauth.db
+# Everything reaches Tinyauth through Caddy, so without this it would see
+# Caddy's address as the client and every IP-based rule would be wrong.
+Environment=TINYAUTH_AUTH_TRUSTEDPROXIES=${NET_SUBNET_INGRESS}
+Environment=TINYAUTH_AUTH_SECURECOOKIE=true
+# Skip Tinyauth's own login page and go straight to the passkey prompt.
+Environment=TINYAUTH_OAUTH_AUTOREDIRECT=pocketid
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTID=${POCKETID_CLIENT_ID}
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRET=${POCKETID_CLIENT_SECRET}
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_AUTHURL=https://id.${DOMAIN}/authorize
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=https://id.${DOMAIN}/api/oidc/token
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=https://id.${DOMAIN}/api/oidc/userinfo
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL=https://auth.${DOMAIN}/api/oauth/callback/pocketid
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_WHITELIST=${AUTH_WHITELIST}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

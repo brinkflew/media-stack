@@ -1,0 +1,37 @@
+# ==============================================================================
+# Jellyseerr: media request manager
+# ------------------------------------------------------------------------------
+# The one service that legitimately spans two segments: it reads the library
+# from Jellyfin on net-media and files requests into Sonarr and Radarr on
+# net-arr. Its stored settings address all three by container name.
+#
+# Public, like Jellyfin, and for the same reason: it authenticates its own users
+# and its callers have no browser for a passkey prompt.
+#
+# Image:  https://hub.docker.com/r/fallenbagel/jellyseerr
+# ==============================================================================
+
+[Unit]
+Description=Jellyseerr
+After=jellyfin.service radarr.service sonarr.service
+
+[Container]
+Image=docker.io/fallenbagel/jellyseerr@sha256:4538137bc5af902dece165f2bf73776d9cf4eafb6dd714670724af8f3eb77764
+ContainerName=jellyseerr
+Network=net-arr.network
+Network=net-media.network
+
+Volume=${DOCKER_VOLUME_CONFIG}/jellyseerr:/app/config:Z
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

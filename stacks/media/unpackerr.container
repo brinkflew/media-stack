@@ -1,0 +1,69 @@
+# ==============================================================================
+# Unpackerr: archive extraction
+# ------------------------------------------------------------------------------
+# Extracts completed downloads so the *arr apps can import them.
+#
+# It needs net-arr despite touching only the filesystem, because it discovers
+# what to extract by polling the Sonarr and Radarr queue APIs. It previously ran
+# with no network at all, which left it logging "network is unreachable" every
+# two minutes since at least Feb 2025 without ever extracting anything.
+#
+# It does NOT need net-download - it never speaks to the torrent client.
+#
+# Image:  https://github.com/Unpackerr/unpackerr
+# ==============================================================================
+
+[Unit]
+Description=Unpackerr
+After=sonarr.service radarr.service
+
+[Container]
+Image=ghcr.io/hotio/unpackerr@sha256:5d5e36d98630f891ba16649dee59bc9b4ca76d1e4d80e1ffb4fb62bb9f657d34
+ContainerName=unpackerr
+Network=net-arr.network
+
+SecurityLabelNested=false
+NoNewPrivileges=true
+
+Volume=${DOCKER_VOLUME_CONFIG}/unpackerr:/config:Z
+Volume=${DOCKER_VOLUME_MEDIA}:/data
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+Environment=UN_DEBUG=false
+Environment=UN_LOG_FILE=/config/unpackerr.log
+Environment=UN_LOG_FILES=10
+Environment=UN_LOG_FILE_MB=10
+Environment=UN_INTERVAL=2m
+Environment=UN_START_DELAY=1m
+Environment=UN_RETRY_DELAY=5m
+Environment=UN_MAX_RETRIES=3
+Environment=UN_PARALLEL=1
+Environment=UN_FILE_MODE=0664
+Environment=UN_DIR_MODE=0775
+
+Environment=UN_SONARR_0_URL=http://sonarr:8989
+Environment=UN_SONARR_0_API_KEY=${SONARR_API_KEY}
+Environment=UN_SONARR_0_PATHS_0=/data/downloads/sonarr
+Environment=UN_SONARR_0_PROTOCOLS=torrent,usenet
+Environment=UN_SONARR_0_TIMEOUT=10s
+Environment=UN_SONARR_0_DELETE_ORIG=false
+Environment=UN_SONARR_0_DELETE_DELAY=5m
+
+Environment=UN_RADARR_0_URL=http://radarr:7878
+Environment=UN_RADARR_0_API_KEY=${RADARR_API_KEY}
+Environment=UN_RADARR_0_PATHS_0=/data/downloads/radarr
+Environment=UN_RADARR_0_PROTOCOLS=torrent,usenet
+Environment=UN_RADARR_0_TIMEOUT=10s
+Environment=UN_RADARR_0_DELETE_ORIG=false
+Environment=UN_RADARR_0_DELETE_DELAY=5m
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

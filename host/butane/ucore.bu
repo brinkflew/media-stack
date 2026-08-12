@@ -1,0 +1,190 @@
+variant: fcos
+version: 1.5.0
+
+# ==============================================================================
+# uCore host definition
+# ------------------------------------------------------------------------------
+# Transpile with butane, then install with:
+#
+#   coreos-installer install /dev/nvme0n1 --ignition-file ucore.ign \
+#     --image-url <ucore stable-nvidia oci>
+#
+# THE TARGET IS nvme0n1. /dev/sda carries the 8TB media library as an XFS
+# filesystem on LVM (vg_xfs_media/xfs_db) and must not be touched.
+#
+# READ THIS BEFORE INSTALLING. /var/media-stack/config lives on nvme0n1p3, so
+# the install DESTROYS it: ~6.3GB of Jellyfin metadata, the *arr databases,
+# Caddy's certificates and ACME account, and Pocket ID's passkey records. None
+# of it is in git and none of it is regenerable. The Stage 0 backup predates
+# Caddy, Pocket ID and Tinyauth entirely, so it is not sufficient.
+#
+#   Back up config/ and verify the restore BEFORE booting the installer.
+#
+# The media disk survives because it is a different physical device, not
+# because anything here protects it.
+#
+# Everything below is either a rootless-Podman prerequisite or a mount. There is
+# deliberately no application configuration here: that lives in stacks/.
+# ==============================================================================
+
+passwd:
+  users:
+    - name: avanserv
+      # uid 1000 is not cosmetic. Rootless Podman maps container UID 0 to the
+      # invoking user, and every file on the media disk and under config/ is
+      # owned by 1000:1000. A different uid means an 8TB chown.
+      uid: 1000
+      groups:
+        - wheel
+      ssh_authorized_keys:
+        - ssh-ed25519 AAAA_REPLACE_WITH_THE_PUBLIC_KEY_FROM_YOUR_WORKSTATION
+
+storage:
+  # There is deliberately NO `filesystems:` section. That section exists to
+  # create filesystems, and the only one that matters here already exists and
+  # holds 391GB of library. Declaring it - even with wipe_filesystem: false -
+  # would put a formatting code path within one typo of the media disk for no
+  # benefit, since the mount unit below is what actually mounts it.
+  files:
+    # ------------------------------------------------------------------------
+    # Rootless Podman needs to bind 80 and 443
+    # ------------------------------------------------------------------------
+    # Caddy runs as the service user, and unprivileged processes cannot bind
+    # below 1024 by default. Without this the ingress fails to start with a bare
+    # "permission denied" and every hostname stops resolving to anything.
+    - path: /etc/sysctl.d/80-rootless-ports.conf
+      mode: 0644
+      contents:
+        inline: |
+          net.ipv4.ip_unprivileged_port_start=80
+
+    # ------------------------------------------------------------------------
+    # gluetun needs /dev/net/tun
+    # ------------------------------------------------------------------------
+    # CoreOS ships it 0600 root:root, which a rootless container cannot open.
+    # The failure looks like a VPN that never connects rather than a permission
+    # error, and it takes both downloaders with it.
+    - path: /etc/udev/rules.d/99-tun.rules
+      mode: 0644
+      contents:
+        inline: |
+          KERNEL=="tun", GROUP="avanserv", MODE="0660", OPTIONS+="static_node=net/tun"
+
+    # ------------------------------------------------------------------------
+    # Subuid/subgid range for the service user
+    # ------------------------------------------------------------------------
+    # Rootless Podman needs a mapped range for every UID inside a container
+    # other than 0. The images here use 65536 of them.
+    - path: /etc/subuid
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: |
+          avanserv:100000:65536
+    - path: /etc/subgid
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: |
+          avanserv:100000:65536
+
+  links:
+    # Quadlet reads from ~/.config/containers/systemd. Symlinking the repo
+    # directories in means `git pull` + `systemctl --user daemon-reload` is the
+    # whole deploy, with no copy step to forget.
+    - path: /var/home/avanserv/.config/containers/systemd/common
+      target: /var/media-stack/stacks/common
+      user: { name: avanserv }
+      group: { name: avanserv }
+    - path: /var/home/avanserv/.config/containers/systemd/torrent
+      target: /var/media-stack/stacks/torrent
+      user: { name: avanserv }
+      group: { name: avanserv }
+    - path: /var/home/avanserv/.config/containers/systemd/media
+      target: /var/media-stack/stacks/media
+      user: { name: avanserv }
+      group: { name: avanserv }
+    - path: /var/home/avanserv/.config/containers/systemd/infra
+      target: /var/media-stack/stacks/infra
+      user: { name: avanserv }
+      group: { name: avanserv }
+
+systemd:
+  units:
+    # ------------------------------------------------------------------------
+    # /mnt/media, with its SELinux label set once
+    # ------------------------------------------------------------------------
+    # This is the reason none of the media Volume= lines carry :z. SELinux is
+    # enforcing on CoreOS, so the containers cannot read the disk without a
+    # container_file_t label - but letting Podman apply it with :z would
+    # recursively relabel 7.3TB on every single container start.
+    #
+    # `context=` sets one label for the entire mount at mount time, instantly.
+    # XFS does support native SELinux xattrs - the current host mounts it with
+    # `seclabel` - so this deliberately overrides per-file labels rather than
+    # working around their absence. That is the intent: every file on this disk
+    # is container content and there is nothing to distinguish.
+    #
+    # Identified by UUID. The volume has no label, and the device-mapper name
+    # depends on the VG being activated first.
+    - name: mnt-media.mount
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Media library (XFS on vg_xfs_media/xfs_db)
+        Before=local-fs.target
+        # LVM must be assembled before this device node exists.
+        Requires=lvm2-monitor.service
+        After=lvm2-monitor.service
+
+        [Mount]
+        What=/dev/disk/by-uuid/fce53d5f-0849-40dd-81aa-ba21819c7eeb
+        Where=/mnt/media
+        Type=xfs
+        Options=rw,relatime,noquota,context=system_u:object_r:container_file_t:s0
+
+        [Install]
+        WantedBy=local-fs.target
+
+    # ------------------------------------------------------------------------
+    # Start the stack at boot, without anyone logging in
+    # ------------------------------------------------------------------------
+    # User units only run while the user has a session. Without lingering, the
+    # entire stack starts when someone SSHes in and stops when they leave.
+    - name: enable-linger.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Enable lingering for the service user
+        ConditionPathExists=!/var/lib/systemd/linger/avanserv
+        After=systemd-user-sessions.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/loginctl enable-linger avanserv
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # ------------------------------------------------------------------------
+    # CDI device definitions for the two GPUs
+    # ------------------------------------------------------------------------
+    # `runtime: nvidia` has no equivalent in Podman; devices are referenced as
+    # nvidia.com/gpu=N and that mapping has to be generated once per boot,
+    # because it embeds driver library paths that change across updates.
+    - name: nvidia-cdi.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Generate CDI specification for NVIDIA devices
+        After=local-fs.target
+        Before=multi-user.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+
+        [Install]
+        WantedBy=multi-user.target
