@@ -26,10 +26,21 @@ Image=ghcr.io/flaresolverr/flaresolverr@sha256:7962759d99d7e125e108e0f5e7f3cdbcd
 ContainerName=flaresolverr
 Network=net-solver.network
 
+# Same reason as prowlarr.container: this fetches the indexer pages itself, so
+# resolving them through the ISP would land it on the same blocking page.
+DNS=9.9.9.9
+DNS=1.1.1.1
+
 Environment=LOG_LEVEL=info
 Environment=LOG_HTML=false
 Environment=CAPTCHA_SOLVER=none
 Environment=TZ=${TIMEZONE}
+
+HealthCmd=curl -fsS http://localhost:8191/health || exit 1
+HealthInterval=30s
+HealthTimeout=10s
+HealthStartPeriod=60s
+HealthRetries=3
 
 [Service]
 EnvironmentFile=/var/media-stack/.env

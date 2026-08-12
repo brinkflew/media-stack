@@ -3,8 +3,9 @@
 # ------------------------------------------------------------------------------
 # On net-arr to be reached by Caddy and to be polled by Unpackerr and
 # Jellyseerr, and on net-download to push releases to qBittorrent - which it
-# addresses as gluetun:${PORT_QBITTORRENT_WEB}, since the downloader has no name
-# of its own.
+# addresses as torrent:${PORT_QBITTORRENT_WEB}. The pod's infra container holds
+# the network and answers to the POD name; neither "gluetun" nor "qbittorrent"
+# resolves. That setting lives in Sonarr's database, not here.
 #
 # It reaches its indexers through Prowlarr on net-arr; the 30-odd Torznab
 # entries in its database all point at http://prowlarr:9696/<id>/.
@@ -32,6 +33,14 @@ Environment=TZ=${TIMEZONE}
 Environment=DOCKER_MODS=ghcr.io/gilbn/theme.park:sonarr
 Environment=TP_THEME=${TP_THEME}
 Environment=TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME}
+
+# Without this `podman ps` reports no health at all and a dead backend looks
+# identical to a live one - which is how qBittorrent stayed down for hours.
+HealthCmd=curl -fsS http://localhost:8989/ping || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=60s
+HealthRetries=3
 
 [Service]
 EnvironmentFile=/var/media-stack/.env

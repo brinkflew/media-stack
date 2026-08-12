@@ -32,6 +32,13 @@ Environment=serverPort=${PORT_TDARR_SERVER}
 Environment=NVIDIA_VISIBLE_DEVICES=1
 Environment=NVIDIA_DRIVER_CAPABILITIES=all
 
+# A process check, not an HTTP one - see tdarr-node-01.container.
+HealthCmd=pgrep -f Tdarr_Node >/dev/null || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=90s
+HealthRetries=3
+
 [Service]
 EnvironmentFile=/var/media-stack/.env
 # Podman does not create a missing bind-mount source directory; Docker did.

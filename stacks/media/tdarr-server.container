@@ -35,6 +35,12 @@ Environment=TZ=${TIMEZONE}
 Environment=internalNode=false
 Environment=nodeID=TdarrServer
 
+HealthCmd=curl -fsS http://localhost:8266/api/v2/status || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=90s
+HealthRetries=3
+
 [Service]
 EnvironmentFile=/var/media-stack/.env
 # Podman does not create a missing bind-mount source directory; Docker did.

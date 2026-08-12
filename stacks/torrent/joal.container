@@ -36,6 +36,15 @@ Environment=TZ=${TIMEZONE}
 # from the environment so neither ends up in this public repository.
 Exec=--joal-conf=/config --spring.main.web-environment=true --server.port=${PORT_JOAL_WEB} --joal.ui.path.prefix=${JOAL_OBFUSCATION_PATH} --joal.ui.secret-token=${JOAL_SECRET_TOKEN}
 
+# No -f: JOAL serves its UI under a secret path and answers 404 on /, so a
+# status check would fail on a perfectly healthy process. Any HTTP response at
+# all proves the listener is up, which is what this is for.
+HealthCmd=curl -s -o /dev/null --max-time 5 http://localhost:${PORT_JOAL_WEB}/ || exit 1
+HealthInterval=30s
+HealthTimeout=10s
+HealthStartPeriod=60s
+HealthRetries=3
+
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always

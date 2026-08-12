@@ -26,6 +26,12 @@ Environment=DOCKER_MODS=ghcr.io/gilbn/theme.park:radarr
 Environment=TP_THEME=${TP_THEME}
 Environment=TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME}
 
+HealthCmd=curl -fsS http://localhost:7878/ping || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=60s
+HealthRetries=3
+
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always

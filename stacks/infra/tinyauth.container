@@ -52,6 +52,22 @@ Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL=https://auth.${DOMAIN}
 # works followed by a failure that looks unrelated to it.
 Environment="TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups"
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_WHITELIST=${AUTH_WHITELIST}
+# Tinyauth logs to stderr, which podman's journald driver records as priority 3
+# - so its per-request HTTP log was 466 journal ERRORS a day, 365 of them
+# successful 200s. Caddy already keeps an access log of exactly the same
+# requests, so this stream is pure duplication and it goes.
+#
+# The audit stream is off by default and is the one an auth service should
+# actually keep: who signed in, when, and whether it worked.
+Environment=TINYAUTH_LOG_STREAMS_HTTP_ENABLED=false
+Environment=TINYAUTH_LOG_STREAMS_AUDIT_ENABLED=true
+
+# wget, not curl - this image ships no curl.
+HealthCmd=wget -qO- http://localhost:3000/healthz || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
 
 [Service]
 EnvironmentFile=/var/media-stack/.env

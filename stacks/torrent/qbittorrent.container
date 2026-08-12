@@ -38,6 +38,15 @@ Environment=DOCKER_MODS=ghcr.io/gilbn/theme.park:qbittorrent
 Environment=TP_THEME=${TP_THEME}
 Environment=TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME}
 
+# This is the check whose absence let qBittorrent sit dead for hours behind a
+# healthy-looking 302 from the proxy. localhost here is the POD namespace,
+# shared with gluetun and joal.
+HealthCmd=curl -fsS http://localhost:${PORT_QBITTORRENT_WEB}/api/v2/app/version || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=60s
+HealthRetries=3
+
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always

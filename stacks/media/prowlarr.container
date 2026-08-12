@@ -24,6 +24,17 @@ Network=net-arr.network
 Network=net-download.network
 Network=net-solver.network
 
+# NOT THE ISP'S RESOLVER. Several indexer domains are DNS-blocked upstream: all
+# three distinct 1337x hostnames resolved to one address, 193.191.210.104, which
+# is a blocking page rather than the site. Four indexers failed as "DNS/SSL
+# issues" and the containers looked perfectly healthy throughout.
+#
+# Measured, not assumed: the same request that dies at the sinkhole reaches the
+# real Cloudflare-fronted host and returns a 403 challenge when resolved here -
+# and a challenge is what FlareSolverr on net-solver exists to solve.
+DNS=9.9.9.9
+DNS=1.1.1.1
+
 Volume=${DOCKER_VOLUME_CONFIG}/prowlarr:/config:Z
 
 Environment=PUID=0
@@ -32,6 +43,12 @@ Environment=TZ=${TIMEZONE}
 Environment=DOCKER_MODS=ghcr.io/gilbn/theme.park:prowlarr
 Environment=TP_THEME=${TP_THEME}
 Environment=TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME}
+
+HealthCmd=curl -fsS http://localhost:9696/ping || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=60s
+HealthRetries=3
 
 [Service]
 EnvironmentFile=/var/media-stack/.env

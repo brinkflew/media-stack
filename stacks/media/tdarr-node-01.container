@@ -48,6 +48,15 @@ Environment=serverPort=${PORT_TDARR_SERVER}
 Environment=NVIDIA_VISIBLE_DEVICES=0
 Environment=NVIDIA_DRIVER_CAPABILITIES=all
 
+# A process check, not an HTTP one: a node opens no listening socket at all -
+# it dials out to tdarr-server. Verified by reading /proc/net/tcp inside it.
+# This unit reached restart 126 unnoticed, so the check earns its place.
+HealthCmd=pgrep -f Tdarr_Node >/dev/null || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=90s
+HealthRetries=3
+
 [Service]
 EnvironmentFile=/var/media-stack/.env
 # Podman does not create a missing bind-mount source directory; Docker did.

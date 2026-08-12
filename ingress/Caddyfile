@@ -1,8 +1,9 @@
 # ==============================================================================
 # Caddy: reverse proxy and TLS terminator
 # ------------------------------------------------------------------------------
-# Replaces SWAG. One site block per hostname, proxying to a container by name on
-# media-network.
+# One site block per hostname, proxying to a container by name. Caddy joins each
+# of the five segments it needs individually, so a name only resolves where the
+# two of them share a network.
 #
 # Adding a service is two steps: a CNAME to the dynamic-DNS name, and a block
 # below. There is no certificate list to maintain - Caddy issues and renews a
@@ -16,9 +17,18 @@
 # ==============================================================================
 {
 	# Certificates are issued over DNS-01 against Gandi, using a Personal Access
-	# Token. DNS-01 needs no inbound port 80, which is what lets this run
-	# alongside SWAG on a spare port until the cutover.
+	# Token. DNS-01 needs no inbound port 80, so nothing here depends on the
+	# router forwarding it.
 	acme_dns gandi {env.GANDI_BEARER_TOKEN}
+
+	# STDOUT, NOT THE DEFAULT STDERR. Podman's journald log driver maps a
+	# container's stdout to journal priority 6 and its stderr to priority 3, and
+	# Caddy logs to stderr by default - so every "level":"info" line was being
+	# recorded as a journal ERROR. That was 1485 false errors a day, enough to
+	# make `journalctl -p err` useless and any alerting built on it worthless.
+	log {
+		output stdout
+	}
 }
 
 # ------------------------------------------------------------------------------
@@ -26,10 +36,15 @@
 # ------------------------------------------------------------------------------
 
 # Caddy emits no access log unless asked, and journald is a better home for it
-# than the rotated files SWAG kept. Worth having: it was the access log that
-# showed internet scanners walking the *arr APIs in the first place.
+# than a rotated file. Worth having: it was the access log that showed internet
+# scanners walking the *arr APIs in the first place.
+#
+# `output stdout` for the same reason as the global block above - a bare `log`
+# here inherits stderr, which podman records as priority 3.
 (base) {
-	log
+	log {
+		output stdout
+	}
 }
 
 # Put a service behind single sign-on. Caddy asks Tinyauth whether the request

@@ -41,6 +41,12 @@ Environment=PGID=0
 Environment=UMASK=${UMASK}
 Environment=TZ=${TIMEZONE}
 
+HealthCmd=curl -fsS http://localhost:8096/health || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=90s
+HealthRetries=3
+
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always
