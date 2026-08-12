@@ -103,10 +103,12 @@ route to it — compromising the server does not get you the backups. The restic
 **Three things it does that a plain `rsync` does not**, each of which otherwise produces a backup
 that looks complete and is not:
 
-- **Caddy's `/data` is root-owned inside its container** and unreadable to the ssh user, so rsync
-  skips it with a permission error among thousands of lines of output. It is only 192 KB, and it is
-  every TLS private key plus the ACME account key. It is pulled with `docker exec caddy tar`
-  instead, and the script **fails** if it captures no certificates.
+- **Caddy's certificates are asserted present, never assumed.** Under Docker its `/data` was
+  root-owned inside the container and rsync silently skipped it, so the script pulled it with
+  `docker exec caddy tar`. Rootless Podman maps container root to `core`, so it copies normally now
+  and that workaround is gone — but the script still **fails** if it captures no certificates. It is
+  192 KB holding every TLS private key and the ACME account key, and it is exactly the kind of thing
+  a permission change removes without anyone noticing.
 - **Live SQLite databases are snapshotted through SQLite's backup API**, not copied. The apps run
   with WAL, so a file copy can be missing commits that live in the `-wal`.
   `bin/snapshot-databases.sh` finds them by magic bytes rather than extension — Tdarr and Jellyfin
@@ -114,13 +116,33 @@ that looks complete and is not:
 - **`-wal`/`-shm` are excluded.** Restoring a stale `-wal` next to a newer `.db` is worse than
   having neither.
 
-`caddy/` is excluded from the rsync entirely rather than tolerated: a permanently-expected error 23
-on every run is the fastest way to train yourself to ignore this script's exit code.
+- **Lock files are excluded.** The backup runs with the stack live, so it captures live locks.
+  qBittorrent's Qt lockfile records a pid, hostname and machine id; restored where the hostname
+  differs, Qt assumes the lock is held and qBittorrent exits one second after starting, logging
+  only `termination initiated`.
 
-**What this does not protect against.** The repository, the age keys and the restic password all
-live on the same workstation. It covers the server's disk dying and the reinstall; it does not
-cover losing the workstation. A cloud target is a later phase — `restic copy` to a second
-repository, which is why restic was used from the start rather than tar.
+**Off-site**, to Scaleway Object Storage:
+
+```bash
+./bin/backup-offsite.sh            # after backup-config.sh; --check to verify the destination
+```
+
+It **copies the repository** rather than backing up again, so the server is untouched and both
+copies hold identical, verifiable snapshots. Three deliberate choices:
+
+- **The destination has its own password**, because `restic copy` re-encrypts blob by blob. One
+  compromised credential loses one copy. The cost is that the two repositories do not deduplicate
+  against each other, which is nothing at 1.4 GiB.
+- **The Scaleway credentials are not in sops and must never be.** The server has no route to the
+  backups and no credentials for them — the same reason `backup-config.sh` pulls rather than pushes.
+  Putting them in `secrets/` would hand them to the machine they exist to protect against.
+- **Retention is applied at the destination too.** `copy` does not replicate deletions, so without
+  its own `forget --prune` the off-site repository grows for ever.
+
+**What this protects against that the local repository does not:** losing the workstation. The
+local repository, both age private keys and both restic passwords all live on it. Which means the
+one thing that must be true is that **the age keys and both restic passwords are in the password
+manager** — off-site backups you cannot decrypt are not backups.
 
 ## Commands
 
