@@ -24,8 +24,12 @@
 # are the one thing here that cannot be regenerated.
 # ==============================================================================
 
+# The rule is matched against the file sops is READING, not the one it writes,
+# so `sops -e .env > secrets/env.sops.env` is matched as `.env`. Covering both
+# names is what makes that work; without the second alternative sops fails with
+# "no matching creation rules found" and it is not obvious why.
 creation_rules:
-  - path_regex: secrets/.*\.env$
+  - path_regex: (secrets/.*\.env|(^|/)\.env)$
     key_groups:
       - age:
           # workstation
