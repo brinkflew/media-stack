@@ -120,21 +120,28 @@ tdarr.{$DOMAIN} {
 	reverse_proxy tdarr-server:{$PORT_TDARR_WEB}
 }
 
-# qBittorrent and JOAL have no address of their own: both run inside gluetun's
-# network namespace so that neither can reach the internet outside the VPN.
-# gluetun is what holds their ports, so gluetun is what Caddy talks to.
+# qBittorrent and JOAL have no address of their own: both run inside the VPN
+# network namespace so that neither can reach the internet outside it.
+#
+# THE NAME IS `torrent`, THE POD - not `gluetun`, and not either downloader.
+# Under Compose these shared gluetun's netns via network_mode: service:gluetun,
+# so gluetun was the container attached to net-download and gluetun:8200 was
+# the address. Under Podman the pod's INFRA container holds the network, and it
+# answers to the pod name. `gluetun:8200` does not resolve here at all - which
+# is invisible from outside, because these routes are behind sign-on and an
+# unauthenticated request is redirected before Caddy ever dials the backend.
 #
 # nginx needed seven location blocks each to cover the API, websocket and
 # long-poll paths. reverse_proxy handles all of it, websockets included.
 
 torrent.{$DOMAIN} {
 	import protected
-	reverse_proxy gluetun:{$PORT_QBITTORRENT_WEB}
+	reverse_proxy torrent:{$PORT_QBITTORRENT_WEB}
 }
 
 fakerr.{$DOMAIN} {
 	import protected
-	reverse_proxy gluetun:{$PORT_JOAL_WEB}
+	reverse_proxy torrent:{$PORT_JOAL_WEB}
 }
 
 # ------------------------------------------------------------------------------
