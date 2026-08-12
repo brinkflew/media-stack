@@ -97,9 +97,31 @@ When the unit has exited, pull it down and free the space. `rsync -P` resumes, s
 costs seconds rather than the whole run:
 
 ```bash
-rsync -P home.local:/mnt/media/nvme0n1.img.zst ~/backups/
+rsync -P home.local:/mnt/media/nvme0n1.img.zst "$DEST"            # see below on where DEST is
 ssh home.local 'sudo rm /mnt/media/nvme0n1.img.zst'
 ssh home.local 'cd /var/media-stack && docker compose up -d'      # bring it back until the real run
+```
+
+**73 GB probably does not fit on the workstation, and `df` will lie to you about it.** Under WSL,
+`df` inside Linux reports the ext4 disk's own free space, but that disk is a file on the Windows
+volume — so it can show hundreds of gigabytes free while the Windows drive underneath has none, and
+the copy fails partway. Check the Windows volume, not the Linux one.
+
+External media is the normal answer. Tell the tooling where it went:
+
+```bash
+export MEDIA_STACK_DISK_IMAGE=/mnt/e/nvme0n1.img.zst    # wherever it actually is
+```
+
+`bin/remote-kexec.sh` checks for it there. **Have the drive plugged in before the real run** — a
+rollback you have to go and find is not a rollback.
+
+Verify the copy rather than assuming it, because a transfer that runs out of space truncates
+quietly and the result still looks like a file:
+
+```bash
+stat -c %s "$MEDIA_STACK_DISK_IMAGE"                    # 73579900029
+zstd -dc "$MEDIA_STACK_DISK_IMAGE" | wc -c              # 250059350016 - the whole device
 ```
 
 Taken with the stack stopped and after `sync`, so the btrfs filesystem inside is **crash-consistent**
@@ -404,9 +426,14 @@ if the installed system still boots:
 
 ```bash
 ./bin/remote-kexec.sh                                            # if uCore still boots
-zstd -dc ~/backups/nvme0n1.img.zst | ssh core@192.168.0.100 'sudo dd of=/dev/nvme0n1 bs=4M'
+zstd -dc "$MEDIA_STACK_DISK_IMAGE" | ssh core@192.168.0.100 'sudo dd of=/dev/nvme0n1 bs=4M'
 ssh core@192.168.0.100 'sudo systemctl reboot'
 ```
+
+This one *is* a long pipe from the laptop, and unlike the imaging it cannot be moved server-side —
+the image lives here and the target disk is there. Do not let the machine sleep partway through, or
+you will have half-written a disk. If it does break, redo it from the start: `dd` from byte zero is
+idempotent.
 
 **If the installed system does not boot at all, this needs the console path** — the live ISO on a
 USB stick, then the same `dd`. That is the case remote installation cannot rescue, and it is why the

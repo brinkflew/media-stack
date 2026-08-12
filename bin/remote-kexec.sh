@@ -73,10 +73,23 @@ print(int(age.total_seconds() // 60))" 2>/dev/null) || last=""
   fi
 fi
 
-[ -f "$HOME/backups/nvme0n1.img.zst" ] \
-  && echo "  disk image present ($(du -h "$HOME/backups/nvme0n1.img.zst" | cut -f1))" \
-  || echo "  NOTE: no disk image at ~/backups/nvme0n1.img.zst (fine for a rehearsal,
-        not for the real run - it is the only rollback and the only diagnosis)"
+# The image is 73GB and usually lives on external media rather than this laptop.
+# Point MEDIA_STACK_DISK_IMAGE at it, and have the drive plugged in before the
+# real run - a rollback you have to go and find is not a rollback.
+IMAGE="${MEDIA_STACK_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
+EXPECT_BYTES=250059350016      # the full size of nvme0n1, from the dd that made it
+
+if [ -f "$IMAGE" ]; then
+  echo "  disk image: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
+else
+  cat <<EOF
+  NOTE: no disk image at
+          $IMAGE
+        Fine for a rehearsal, which cannot damage anything. NOT fine for the
+        real run: it is the only rollback and, with no console on this machine,
+        the only diagnosis. Set MEDIA_STACK_DISK_IMAGE if it lives elsewhere.
+EOF
+fi
 
 # ------------------------------------------------------------------------------
 # Artifacts
