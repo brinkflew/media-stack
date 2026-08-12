@@ -37,6 +37,11 @@ hairpinning and on the forward still pointing at the right address.
 `~/.config/containers/systemd/{common,torrent,media,infra}` are symlinks into `stacks/`, so
 `git pull && systemctl --user daemon-reload` is the entire deploy — there is no copy step.
 
+**`~/.config/systemd/user/` is a second symlink root**, pointing at `host/systemd/`. It holds plain
+systemd units rather than quadlets — things that run *on the host* rather than in a container, which
+is how they reach services that are deliberately unable to reach each other. It does not exist on a
+fresh host and is not created by Ignition; see `host/systemd/README.md` for the one-time setup.
+
 **Containers run `PUID=0`/`PGID=0`, which is not a privilege escalation.** Rootless Podman maps
 container UID 0 to the invoking user, `core` (uid 1000), which is what owns `/mnt/media` and
 `config/`. A container "running as root" is uid 1000 on the host. Anything *other* than 0 maps into
@@ -300,12 +305,30 @@ seeding download, and the two paths share their bytes.
 never moves a file and has no business seeing `downloads/`. Do not "fix" it to match the others.
 
 **The library is a pipeline, not a folder.** `library/queued/<type>` is where the \*arr apps import
-to, Tdarr transcodes into `library/transcoded/<type>`, and Jellyfin serves *only* the transcoded
-side. `<type>` is one of `anime`, `documentaries`, `movies`, `series`, and `review/` is the manual
-siding. A root folder that omits the `queued/` or `transcoded/` level exists nowhere on disk —
-which is how Jellyseerr came to file every request into three paths that did not exist, so nothing
-requested through it could import at all. **Check a new root folder against the disk, not against
-what looks plausible.**
+to, Tdarr transcodes, and Jellyfin serves *only* `library/transcoded/<type>`. `<type>` is one of
+`anime`, `documentaries`, `movies`, `series`; `review/` is the manual siding and `.recycle` is the
+\*arr recycle bin, deliberately outside every Jellyfin library path. A root folder that omits the
+`queued/` or `transcoded/` level exists nowhere on disk — which is how Jellyseerr came to file every
+request into three paths that did not exist, so nothing requested through it could import at all.
+**Check a new root folder against the disk, not against what looks plausible.**
+
+**Nothing in Tdarr promotes a file between the two.** Tdarr transcodes *in place* and leaves the file
+in `queued/`, so for a long time the pipeline had no middle: correctly downloaded, correctly
+imported, correctly transcoded films were invisible in Jellyfin for ever, with Radarr reporting them
+present and neither application wrong. `bin/promote-transcoded.py` is the missing step, run every 10
+minutes by `media-stack-promote.timer`.
+
+It runs **on the host, not in a container**, and that is the design rather than an accident:
+`net-transcode` is `isolate=true` and holds only Caddy and the three Tdarr containers, so Tdarr
+cannot reach Radarr, Sonarr or Jellyfin and should not be able to. `podman exec` works regardless of
+network topology, so the reconciler grants no container any reachability it did not have.
+
+**It never touches a media file.** It asks Tdarr which files passed *both* transcode and health
+check, then calls the \*arr editor endpoints with `moveFiles: true` so the applications move their
+own files and update their own databases in one operation. Anything that moves a file behind an
+\*arr's back orphans it — which is exactly what left *Flow* and *The Hobbit* sitting in `transcoded/`
+while Radarr reported `hasFile=false` and stood ready to download them again. **Do not add a step
+that moves media directly.**
 
 ## Ingress and access control
 
@@ -475,6 +498,29 @@ Conclusions from auditing the running host. Do not rediscover these:
   Jellyfin one is ~1.5 KB. Sixteen containers at 30s tripled journal volume, so the interval is 60s
   (120s for the Tdarr nodes, 5s for gluetun, which is the kill-switch). Worth knowing before adding
   a seventeenth.
+- **A Tdarr health check is a full-file decode, not a metadata read**, and queueing 470 of them took
+  the whole host down. Moving 470 episodes into a watched folder was enough: that is the entire
+  library read end to end off one 7200rpm spindle. **The kernel stayed healthy throughout** — it
+  answered ICMP and completed TCP handshakes on 22, 80, 443 and 8096 the entire time — while no
+  userspace process could be scheduled. sshd never got far enough to send a banner; Caddy and
+  Jellyfin accepted connections and answered nothing. With no console, it took a power cycle.
+  **A wedged box and a healthy one are indistinguishable from a ping.**
+- **`io` is NOT delegated to the user manager by default; `cpu memory pids` are.** An undelegated
+  controller is accepted silently and does nothing, so every `IOWeight=` and `IOReadBandwidthMax=`
+  in `stacks/` was inert — the control aimed squarely at the cause above was the one not working.
+  `host/butane/ucore.bu` now ships `/etc/systemd/system/user@.service.d/10-delegate-io.conf`. It
+  takes effect on `daemon-reload` with no session restart. `sda` runs BFQ, which is what makes
+  `io.weight` meaningful rather than advisory. **Verify rather than assume — the failure is silence:**
+  `systemctl show user@1000.service -p DelegateControllers`.
+- **Every service quadlet carries `MemoryHigh`/`MemoryMax`**, and the Tdarr units additionally carry
+  `CPUWeight`, `IOWeight` and `IOReadBandwidthMax`. These are systemd cgroup directives in
+  `[Service]`, not podman flags, because a quadlet *is* a systemd unit and that is the layer that
+  can starve it. Ceilings are sized to catch a runaway, not to tune anything.
+- **Tdarr is deliberately out of `default.target`.** All three units have `WantedBy=` commented out
+  and are stopped, pending its own throttles — scanner threads, worker counts, and whether a
+  470-file health-check sweep should ever be queued in one go. **A `Wants=` on a disabled unit
+  silently re-enables it in practice**: `media-stack-promote.service` had one and started Tdarr every
+  10 minutes. `After=` for ordering, never `Wants=`.
 - **The ISP resolver returns a blocking page for several indexer domains.** All three distinct
   1337x hostnames resolved to one address, `193.191.210.104`, and four indexers failed as "DNS/SSL
   issues" while every container looked healthy. `prowlarr` and `flaresolverr` therefore carry
