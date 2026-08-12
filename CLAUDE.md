@@ -25,18 +25,46 @@ ssh home 'cd /var/media-stack && git status --short'   # ALWAYS do this before e
 
 **Change files here, commit, then `git pull` on the server — never edit them over SSH.** Editing
 the checkout directly recreates the drift, and the next `git pull` refuses to apply with "local
-changes would be overwritten". The only things that legitimately change on the server are `.env`
-and the runtime state under `config/`.
+changes would be overwritten". The only thing that legitimately differs on the server is the
+runtime state under `config/`.
 
-`.env` lives only on the server and is intentionally untracked. `.env.sample` is the tracked
-documentation of every variable; **update it whenever you add a variable**, or the next person
-gets `variable is not set` errors from `${VAR:?err}`.
+## Secrets
+
+**`.env` is generated, not edited.** It is rendered from `secrets/env.sops.env` — every value
+encrypted with sops+age, committed to this public repo, which is what finally puts the credentials
+under version control and into a backup. Editing `.env` in place works right up until the next
+render silently discards it.
+
+```bash
+sops secrets/env.sops.env      # decrypts into $EDITOR, re-encrypts on save
+git commit && git push          # then on the server:
+ssh home 'cd /var/media-stack && git pull && ./bin/render-env.sh && docker compose up -d'
+```
+
+- **Two age recipients**, workstation and server, so losing either machine does not lock you out.
+  Their private keys are at `~/.config/sops/age/keys.txt` and belong in a password manager — they
+  are the one thing here that cannot be regenerated. Adding a third recipient means editing
+  `.sops.yaml` *and* running `sops updatekeys secrets/env.sops.env`; existing files are not
+  re-encrypted for you.
+- **The creation rule is matched against the file sops reads, not the one it writes.** Seeding
+  `secrets/env.sops.env` from `.env` therefore matches as `.env`, which is why `.sops.yaml` covers
+  both names. Without that it fails with an unhelpful "no matching creation rules found".
+- **Variable names stay legible and empty values stay unencrypted.** That is deliberate: a diff
+  should still show which credential changed. It does mean the file publishes the shape of the
+  stack, which `docker-compose.yaml` already does.
+- **sops' dotenv format does not preserve every comment**, so a rendered `.env` is barer than a
+  hand-written one. `.env.sample` is the documentation; **update it whenever you add a variable**,
+  or the next person gets `variable is not set` from `${VAR:?err}`.
+- `sops` and `age` are static binaries in `~/.local/bin` on both machines, not system packages —
+  `/usr/local` needs a sudo password on the server and this does not. That directory is absent from
+  a non-interactive ssh `PATH`, which is why `render-env.sh` sets it itself.
 
 ## Commands
 
 All of these run on the server, from `/var/media-stack`:
 
 ```bash
+./bin/render-env.sh                      # regenerate .env after pulling a secrets change
 docker compose config                    # validate YAML + .env interpolation — do this first
 docker compose up -d                     # apply changes (only recreates what changed)
 docker compose up -d --force-recreate <service>
@@ -241,14 +269,14 @@ The stack is migrating off Docker Compose on a mutable host. Direction, in order
 2. **Runtime → rootless Podman quadlets.** Each service becomes a `.container` systemd unit.
    `network_mode: service:gluetun` becomes a Podman pod; `runtime: nvidia` becomes a CDI device ref.
    Note that **SELinux is enforcing on CoreOS**, so every bind mount needs `:z`/`:Z` — the current
-   compose file has none.
-3. **Secrets → sops+age** in-repo, replacing the untracked, unbacked-up `.env`.
+   compose file has none. `podman secret` replaces `render-env.sh` as the consumer of the same
+   encrypted file.
 
-**Ingress and segmentation are already done** on the Compose stack, both deliberately ahead of the
-host migration and for the same reason: their configuration carries over to quadlets unchanged, so
-the reinstall changes only the OS and the runtime rather than testing every new component at once
-during the least recoverable step. The seven `.network` units are a transcription of a topology
-already proven to work, not a design exercise.
+**Ingress, segmentation and secrets are already done** on the Compose stack, all three deliberately
+ahead of the host migration and for the same reason: their configuration carries over to quadlets
+unchanged, so the reinstall changes only the OS and the runtime rather than testing every new
+component at once during the least recoverable step. The seven `.network` units are a transcription
+of a topology already proven to work, not a design exercise.
 
 **The applications keep their own logins.** Segmentation narrowed who can reach them; it did not
 reduce `net-arr` to a single caller, so `AuthenticationMethod=External` would still trust five
