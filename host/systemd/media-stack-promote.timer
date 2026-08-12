@@ -1,0 +1,20 @@
+# ==============================================================================
+# Run the promotion pass every 10 minutes
+# ------------------------------------------------------------------------------
+# 10 minutes is chosen against how long a transcode takes, not against how fast
+# anyone needs the film: a REMUX is tens of minutes of GPU time, so polling
+# faster only means more passes that find nothing. Persistent=true so a pass
+# missed while the machine was off runs once at boot rather than being skipped.
+# ==============================================================================
+
+[Unit]
+Description=Promote transcoded media into the Jellyfin library, periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

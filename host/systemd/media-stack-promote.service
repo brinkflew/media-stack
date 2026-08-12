@@ -1,0 +1,25 @@
+# ==============================================================================
+# Promote transcoded, health-checked media into the folder Jellyfin reads
+# ------------------------------------------------------------------------------
+# A plain systemd user unit rather than a quadlet, because it runs ON the host:
+# it uses `podman exec` to reach Tdarr, Radarr, Sonarr and Jellyfin, which works
+# regardless of the container network topology. That is the whole point - the
+# alternative was putting a notifier inside Tdarr, which would mean opening
+# net-transcode's Options=isolate=true to the *arr apps.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Promote transcoded media into the Jellyfin library
+Documentation=file:/var/media-stack/bin/promote-transcoded.py
+# Nothing to promote if Tdarr never rendered a verdict, and no way to ask it.
+After=tdarr-server.service
+Wants=tdarr-server.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/media-stack/bin/promote-transcoded.py
+# It only ever calls the *arr editor endpoints, so a failure moves nothing and
+# the next tick retries. No point restarting a oneshot on a transient API blip.
+SuccessExitStatus=0
