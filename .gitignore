@@ -20,9 +20,20 @@ config/sonarr/*
 # .env.bak, .env.orig or .env.20260811 next to it, and a bare `.env` rule does
 # not match any of those. This repository is public, so an unignored copy is a
 # credential leak waiting for one `git add -A`.
+#
+# .env is generated from secrets/env.sops.env by bin/render-env.sh, so the
+# encrypted original IS tracked - its basename does not begin with .env, which
+# is why the rules below do not catch it. Check with `git check-ignore -v`
+# before assuming, and never rename it to something like secrets/.env.sops.
 .env
 .env.*
 !.env.sample
+
+# age private keys. These live at ~/.config/sops/age/keys.txt and have no
+# business in a working tree, but a stray copy here would decrypt every secret
+# in the repository it sits in.
+*.agekey
+keys.txt
 
 # Transcode scratch (DOCKER_VOLUME_CACHE), regenerable and large.
 cache/

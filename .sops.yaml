@@ -1,0 +1,34 @@
+# ==============================================================================
+# sops: which keys encrypt what
+# ------------------------------------------------------------------------------
+# Everything sensitive in this stack lived in an untracked .env on a single
+# unbacked-up SSD: the Gandi token that issues every certificate, the WireGuard
+# private key, four API keys, and - worst of the set - Pocket ID's encryption
+# key, without which every registered passkey becomes unreadable.
+#
+# Encrypting it here puts it under version control and into whatever backs this
+# repository up, without putting a single plaintext secret in a public repo:
+# sops encrypts the values and leaves the keys legible, so a diff still shows
+# which variable changed.
+#
+# TWO recipients on purpose. Either machine can decrypt on its own, so losing
+# one does not lock you out - which matters because the whole point is that the
+# server's disk is not to be trusted with the only copy. Adding a third (a new
+# machine, a colleague) means appending its public key here and running
+# `sops updatekeys secrets/env.sops.env`; existing files are NOT re-encrypted
+# automatically.
+#
+# Public keys are safe to commit. The matching private keys live at
+# ~/.config/sops/age/keys.txt on each machine - sops' default lookup path, so
+# nothing needs SOPS_AGE_KEY_FILE set - and belong in a password manager. They
+# are the one thing here that cannot be regenerated.
+# ==============================================================================
+
+creation_rules:
+  - path_regex: secrets/.*\.env$
+    key_groups:
+      - age:
+          # workstation
+          - age1zy7wm74pz0v93c9dp84maeefmlh5uwmn0hhw5l4xc0kvy7m30prq7ve9vr
+          # server (home)
+          - age1e4kgu6r95tk068wv9lpurcs7y0txjztzlpt5j9p8qlws2u0lufmqqh0w26
