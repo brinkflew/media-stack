@@ -69,21 +69,47 @@ settings are all variables. Required ones use `${VAR:?err}` so compose fails lou
 silently substituting empty strings. Follow that convention: `:?err` for required, bare `${VAR}`
 for optional.
 
-**Two networks, and the split is the security model:**
+**One network per trust boundary, and the split is the security model.** Services address each
+other by container name (`http://sonarr:8989`), but only where they share a network:
 
-- `media-network` — a bridge with a pinned subnet (`NET_DOCKER_SUBNET`) that most services share
-  and address each other on by container name (`http://sonarr:8989`).
-- **`gluetun` is the egress chokepoint.** qBittorrent and JOAL both use
-  `network_mode: "service:gluetun"`, meaning neither has a network stack of its own: they live
-  inside the VPN container's namespace. If the VPN drops they lose connectivity entirely, which
-  is a kill-switch by construction. **Never give a downloader its own `networks:` entry** — it
-  would leak traffic outside the VPN.
+| Network | Members |
+|---|---|
+| `net-ingress` | caddy, tinyauth, pocket-id |
+| `net-arr` | caddy, sonarr, radarr, prowlarr, jellyseerr, unpackerr |
+| `net-solver` | prowlarr, flaresolverr |
+| `net-download` | caddy, gluetun, sonarr, radarr, prowlarr |
+| `net-media` | caddy, jellyfin, jellyseerr |
+| `net-transcode` | caddy, tdarr-server, tdarr-node-01, tdarr-node-02 |
+| `net-egress` | duckdns |
+
+Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individually** — a shared
+"proxy" network holding everything with a UI would re-flatten the topology and buy nothing. It is
+deliberately absent from `net-solver`.
+
+Docker blocks traffic between bridges in `DOCKER-ISOLATION-STAGE-2`, so **no shared network means
+no route, not merely no DNS name** — but verify a forbidden edge by IP anyway, because a container
+has one address per network it joins and resolving a name only proves one of them.
+
+`net-solver` and `net-media` carry most of the value. FlareSolverr exists to run headless Chrome
+against attacker-controlled indexer pages, so it is the likeliest thing here to be compromised;
+Prowlarr is now all it can see. Jellyfin is the inverse — the most exposed service, LAN and public
+— yet it initiates no internal connections at all, so it reaches nothing.
+
+**`gluetun` is the egress chokepoint.** qBittorrent and JOAL both use
+`network_mode: "service:gluetun"`, meaning neither has a network stack of its own: they live inside
+the VPN container's namespace. If the VPN drops they lose connectivity entirely, which is a
+kill-switch by construction. **Never give a downloader its own `networks:` entry** — it would leak
+traffic outside the VPN. gluetun's own `networks:` entry is what puts all three on `net-download`.
 
 JOAL is in there because it announces to trackers, and would otherwise do so from the host's own
-IP while qBittorrent used the VPN. **Neither has a name of its own on `media-network`**, so
-anything addressing them — Caddy, and the \*arr apps' download client settings — must use
-`gluetun:<port>`. Using `qbittorrent:8200` fails to resolve; that is what broke the JOAL route
-when it moved into the namespace.
+IP while qBittorrent used the VPN. **Neither has a name of its own**, so anything addressing them —
+Caddy, and the \*arr apps' download client settings — must use `gluetun:<port>`. Using
+`qbittorrent:8200` fails to resolve; that is what broke the JOAL route when it moved into the
+namespace.
+
+**Changing a subnet is not a live edit.** Docker refuses to create a network whose pool overlaps an
+existing one, and it will not delete a network that still has containers attached, so `up -d` fails
+half-applied. It takes `docker compose down`, `docker network rm <old>`, then `up -d`.
 
 **No peer port is published on the host.** With `VPN_PORT_FORWARDING=on`, incoming peers arrive
 through the tunnel on the port ProtonVPN forwards, landing straight in gluetun's namespace.
@@ -92,7 +118,7 @@ qBittorrent over its API each time the tunnel comes up; without that the two sil
 and the client goes unconnectable. Publishing 6881 on the host would only forward to a port
 nothing listens on.
 
-`unpackerr` needs the bridge despite touching only the filesystem — it discovers what to extract
+`unpackerr` needs `net-arr` despite touching only the filesystem — it discovers what to extract
 by polling the Sonarr and Radarr queue APIs.
 
 **One media mount, not several.** Every media-touching service mounts `${DOCKER_VOLUME_MEDIA}`
@@ -139,7 +165,7 @@ Two things about this that are easy to get wrong, both learned the hard way:
 `watch` and `request` are the only routes not behind sign-on: both authenticate their own users,
 and their clients have no browser in which to complete a passkey prompt.
 
-**Almost nothing publishes a host port.** Caddy reaches each service by name over the bridge, so
+**Almost nothing publishes a host port.** Caddy reaches each service by name over its network, so
 admin ports were a second path in that sign-on did not cover. Three publishes remain, each for
 something that must be spoken to without the proxy: Caddy's 80/443, Jellyfin for LAN clients, and
 Gluetun's LAN proxies. **Do not add a `ports:` entry for a service Caddy can reach by name.**
@@ -180,22 +206,30 @@ Conclusions from auditing the running host. Do not rediscover these:
 - **`nv-patch.sh` is obsolete.** It lifted the NVENC concurrent-session limit, which NVIDIA raised
   to 8 for consumer GPUs in Jan 2024. Two Tdarr nodes cannot reach that ceiling. Do not port it
   forward — on an immutable host, patching a driver library in `/usr` fights OSTree every update.
-- **The bridge is flat, and that is the remaining hole.** Every container can reach every other
-  directly by name, bypassing Caddy and therefore sign-on entirely — confirmed by running a
-  throwaway container on `media-network` and getting a response from `sonarr:8989`. The
-  applications' own logins are what stand in the way, which is why **they must stay enabled**
-  until the network is segmented. The sharp edge is **FlareSolverr**: its whole purpose is running
-  headless Chrome against attacker-controlled indexer pages, and it currently shares a network
-  with everything. Segmentation is scoped as part of the quadlets migration.
+- **The bridge is no longer flat, and the forbidden edges are verified.** FlareSolverr cannot reach
+  Sonarr on either of its addresses, nor the torrent namespace, tested by IP from inside the
+  container rather than by name resolution alone. Jellyfin, the Tdarr nodes and DuckDNS are
+  likewise sealed off. **The applications' own logins must still stay enabled**: segmentation is
+  defence in depth, and `net-arr` remains flat *within itself* — anything on it reaches every other
+  member. See Target architecture for when `AuthenticationMethod=External` becomes defensible.
+- **The remaining internal exposure is Prowlarr.** It is the only service on `net-solver`, so it is
+  the single hop between a compromised FlareSolverr and everything else. That is the reason its own
+  login matters more than the others', not less.
 - **Gluetun's HTTP and Shadowsocks proxies are unauthenticated** (`HTTPPROXY_USER`,
   `HTTPPROXY_PASSWORD` and `SHADOWSOCKS_PASSWORD` are all empty) and bound to `BIND_LAN`. They are
   not reachable from the internet — the router does not forward 8888/8388, verified — but any LAN
   device can use them as an open proxy into the VPN. Set credentials or turn them off if unused.
-- **Services must address each other over the bridge, never through a public hostname.** Flood was
+- **Services must address each other over their shared network, never a public hostname.** Flood was
   configured with `https://torrent.avanserv.com`, so its polling left the network and came back
   through the proxy — and stopped working entirely once that route required a session. A container
   reaching another container through the front door is always a mistake; it is slower, it depends
   on DNS and NAT hairpinning, and it breaks the moment authentication is added.
+- **Tinyauth still breaks that rule and has not been fixed.** Its `TOKENURL` and `USERINFOURL` are
+  `https://id.${DOMAIN}/...`, so every sign-on's token exchange leaves the network and hairpins
+  back through the router. It works, but it makes login depend on NAT hairpinning — the one thing
+  that must not break. `AUTHURL` genuinely has to stay public, since the browser follows it; the
+  other two could be `http://pocket-id:1411/...`. Untested: Pocket ID may issue an `iss` claim
+  Tinyauth rejects, and the symptom would be sign-on failing at the callback.
 
 ## Target architecture
 
@@ -208,22 +242,20 @@ The stack is migrating off Docker Compose on a mutable host. Direction, in order
    `network_mode: service:gluetun` becomes a Podman pod; `runtime: nvidia` becomes a CDI device ref.
    Note that **SELinux is enforcing on CoreOS**, so every bind mount needs `:z`/`:Z` — the current
    compose file has none.
-3. **Network segmentation.** One network per trust boundary instead of today's flat bridge, so
-   Caddy becomes the only path to an application. FlareSolverr gets a network shared with Prowlarr
-   and nothing else; Jellyfin and the Tdarr nodes, which initiate no internal connections at all,
-   stop being able to reach the \*arr apps. Caddy joins each segment individually — a shared
-   "proxy" network containing everything with a UI would just re-flatten it.
-4. **Secrets → sops+age** in-repo, replacing the untracked, unbacked-up `.env`.
+3. **Secrets → sops+age** in-repo, replacing the untracked, unbacked-up `.env`.
 
-**Ingress is already done** — Caddy, Pocket ID and Tinyauth replaced SWAG and Authelia on the
-Compose stack ahead of the host migration, deliberately, so that the reinstall changes only the OS
-and the runtime rather than testing every new component at once during the least recoverable step.
-Their configuration carries over to quadlets unchanged.
+**Ingress and segmentation are already done** on the Compose stack, both deliberately ahead of the
+host migration and for the same reason: their configuration carries over to quadlets unchanged, so
+the reinstall changes only the OS and the runtime rather than testing every new component at once
+during the least recoverable step. The seven `.network` units are a transcription of a topology
+already proven to work, not a design exercise.
 
-Only after step 3 is it reasonable to drop the applications' own logins in favour of
-`AuthenticationMethod=External`. Note their *"Disabled for Local Addresses"* option is never the
-right tool here: Caddy and FlareSolverr are both RFC1918 addresses on the same bridge, so it
-disables authentication for precisely the attacker path.
+**The applications keep their own logins.** Segmentation narrowed who can reach them; it did not
+reduce `net-arr` to a single caller, so `AuthenticationMethod=External` would still trust five
+containers rather than just Caddy. Revisit it only if those segments are split further, and note
+that their *"Disabled for Local Addresses"* option is never the right tool here: Caddy and every
+other container are RFC1918 addresses, so it disables authentication for precisely the attacker
+path.
 
 Until step 1 lands, work on the Compose stack as it exists — but avoid adding anything that will
 be expensive to unwind, especially new `docker.sock` mounts or host-level package dependencies.
