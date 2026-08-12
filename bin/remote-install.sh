@@ -37,13 +37,18 @@ live() { ssh "${SSHOPTS[@]}" "core@$TARGET_IP" "$@"; }
 say "confirming the target"
 live true 2>/dev/null || die "cannot reach core@$TARGET_IP - run bin/remote-kexec.sh first"
 
-os=$(live 'grep -m1 ^ID= /etc/os-release | cut -d= -f2')
-[ "$os" = "fedora-coreos" ] || die "core@$TARGET_IP is running '$os', not fedora-coreos.
-  Refusing to install onto something that is not the live environment."
+# Match on VARIANT_ID, not ID. Fedora CoreOS reports ID=fedora with
+# VARIANT_ID=coreos; there is no ID=fedora-coreos, which is what this checked
+# for until it refused to install from a perfectly good live environment. The
+# rehearsal could not have caught it, because the rehearsal stops one script
+# earlier - every check in this file is first exercised on the real run.
+variant=$(live 'grep -m1 ^VARIANT_ID= /etc/os-release | cut -d= -f2' || true)
+[ "$variant" = "coreos" ] || die "core@$TARGET_IP reports VARIANT_ID='$variant', not coreos.
+  Refusing to install onto something that is not a Fedora CoreOS live environment."
 live 'test -f /run/ostree-live' \
   || die "this does not look like a LIVE boot - refusing.
   Installing from an installed system would overwrite the disk it is running from."
-echo "  live Fedora CoreOS confirmed"
+echo "  live Fedora CoreOS confirmed (VARIANT_ID=$variant, /run/ostree-live present)"
 
 # ------------------------------------------------------------------------------
 # Confirm the disks, because the wrong device here is unrecoverable
