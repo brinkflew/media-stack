@@ -283,9 +283,28 @@ The host key has changed:
 
 ```bash
 ssh-keygen -R 192.168.0.100 && ssh-keygen -R home.avanserv.com
-ssh core@192.168.0.100 'sudo rpm-ostree rebase \
-  ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia && sudo systemctl reboot'
 ```
+
+**Turn Zincati off before rebasing, and pass `--bypass-driver`.** Stock FCOS delegates all updates
+to Zincati, and `rpm-ostree` refuses to act while a driver owns them:
+
+```
+error: Updates and deployments are driven by Zincati (zincati.service)
+```
+
+Zincati also tracks the *FCOS* stream, so leaving it enabled points an auto-updater at the image you
+are deliberately rebasing away from. uCore brings its own update mechanism.
+
+```bash
+ssh core@192.168.0.100 'sudo systemctl disable --now zincati.service'
+ssh core@192.168.0.100 'sudo systemd-run --unit=ucore-rebase --collect \
+  rpm-ostree rebase --bypass-driver ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia'
+ssh core@192.168.0.100 'journalctl -u ucore-rebase -f'     # ~1.3 GB to pull
+ssh core@192.168.0.100 'sudo systemctl reboot'
+```
+
+`systemd-run` rather than a foreground command for the same reason the disk image used it: it
+outlives the SSH session, so a dropped laptop does not abort a multi-gigabyte pull.
 
 **`nvidia-cdi.service` fails on the first boot and that is expected** — plain FCOS has no
 `nvidia-ctk`. It succeeds after the rebase. Do not chase it.

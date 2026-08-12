@@ -133,6 +133,24 @@ storage:
           KERNEL=="tun", GROUP="core", MODE="0660", OPTIONS+="static_node=net/tun"
 
     # ------------------------------------------------------------------------
+    # Pin the interface name to the MAC
+    # ------------------------------------------------------------------------
+    # Not required for the address to work - lan.nmconnection matches on MAC and
+    # has no interface-name, verified by rebooting onto a kernel with no naming
+    # kargs at all. This exists so the machine matches this file.
+    #
+    # dracut's `ifname=` karg writes exactly this rule into the real root, so a
+    # host recovered by typing that karg at GRUB ends up with a `nic0` that a
+    # host installed straight from this config would not have. Declaring it
+    # removes the divergence, and keeps `ifname=nic0:...` in bin/remote-kexec.sh
+    # naming the same interface the installed system uses.
+    - path: /etc/udev/rules.d/80-ifname.rules
+      mode: 0644
+      contents:
+        inline: |
+          SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="4c:ed:fb:3f:97:11", ATTR{type}=="1", NAME="nic0"
+
+    # ------------------------------------------------------------------------
     # Subuid/subgid range for the service user
     # ------------------------------------------------------------------------
     # Rootless Podman needs a mapped range for every UID inside a container
@@ -189,7 +207,19 @@ systemd:
     #
     # Identified by UUID. The volume has no label, and the device-mapper name
     # depends on the VG being activated first.
-    - name: mnt-media.mount
+    # The unit is var-mnt-media.mount, NOT mnt-media.mount, because on CoreOS
+    # /mnt is a symlink to /var/mnt - the same ostree layout that makes /home a
+    # symlink to /var/home. systemd derives a mount unit's name from its path
+    # and refuses one that is not canonical:
+    #
+    #   mnt-media.mount: Mount path /mnt/media is not canonical
+    #   (contains a symlink).  Failed with result 'resources'.
+    #
+    # Naming it mnt-media.mount fails on a healthy disk, which is a slow thing
+    # to diagnose: vgs, lvs and the by-uuid link all look perfect. Everything
+    # else can still say /mnt/media - the symlink resolves for consumers. It is
+    # only the unit name and Where= that must be the real path.
+    - name: var-mnt-media.mount
       enabled: true
       contents: |
         [Unit]
@@ -201,7 +231,7 @@ systemd:
 
         [Mount]
         What=/dev/disk/by-uuid/fce53d5f-0849-40dd-81aa-ba21819c7eeb
-        Where=/mnt/media
+        Where=/var/mnt/media
         Type=xfs
         Options=rw,relatime,noquota,context=system_u:object_r:container_file_t:s0
 

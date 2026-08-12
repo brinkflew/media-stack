@@ -40,6 +40,14 @@
         "mode": 420
       },
       {
+        "path": "/etc/udev/rules.d/80-ifname.rules",
+        "contents": {
+          "compression": "",
+          "source": "data:;base64,U1VCU1lTVEVNPT0ibmV0IiwgQUNUSU9OPT0iYWRkIiwgRFJJVkVSUz09Ij8qIiwgQVRUUnthZGRyZXNzfT09IjRjOmVkOmZiOjNmOjk3OjExIiwgQVRUUnt0eXBlfT09IjEiLCBOQU1FPSJuaWMwIgo="
+        },
+        "mode": 420
+      },
+      {
         "overwrite": true,
         "path": "/etc/subuid",
         "contents": {
@@ -104,9 +112,9 @@
   "systemd": {
     "units": [
       {
-        "contents": "[Unit]\nDescription=Media library (XFS on vg_xfs_media/xfs_db)\nBefore=local-fs.target\n# LVM must be assembled before this device node exists.\nRequires=lvm2-monitor.service\nAfter=lvm2-monitor.service\n\n[Mount]\nWhat=/dev/disk/by-uuid/fce53d5f-0849-40dd-81aa-ba21819c7eeb\nWhere=/mnt/media\nType=xfs\nOptions=rw,relatime,noquota,context=system_u:object_r:container_file_t:s0\n\n[Install]\nWantedBy=local-fs.target\n",
+        "contents": "[Unit]\nDescription=Media library (XFS on vg_xfs_media/xfs_db)\nBefore=local-fs.target\n# LVM must be assembled before this device node exists.\nRequires=lvm2-monitor.service\nAfter=lvm2-monitor.service\n\n[Mount]\nWhat=/dev/disk/by-uuid/fce53d5f-0849-40dd-81aa-ba21819c7eeb\nWhere=/var/mnt/media\nType=xfs\nOptions=rw,relatime,noquota,context=system_u:object_r:container_file_t:s0\n\n[Install]\nWantedBy=local-fs.target\n",
         "enabled": true,
-        "name": "mnt-media.mount"
+        "name": "var-mnt-media.mount"
       },
       {
         "contents": "[Unit]\nDescription=Enable lingering for the service user\nAfter=systemd-user-sessions.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/loginctl enable-linger core\n# Ignition creates the parent directories for the symlinks above. It\n# applies the declared ownership to them, but this costs nothing and\n# runs in a fully booted system where /var/home/core certainly exists -\n# whereas a root-owned ~/.config breaks `systemctl --user` with a\n# permission error that reads as a Podman problem. Leading `-`: a\n# failure here must never propagate, because it is insurance, not a\n# dependency.\nExecStart=-/usr/bin/chown -R core:core /var/home/core/.config\n\n[Install]\nWantedBy=multi-user.target\n",
