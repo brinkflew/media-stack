@@ -224,10 +224,23 @@ kill-switch by construction. **Never give a downloader its own `networks:` entry
 traffic outside the VPN. gluetun's own `networks:` entry is what puts all three on `net-download`.
 
 JOAL is in there because it announces to trackers, and would otherwise do so from the host's own
-IP while qBittorrent used the VPN. **Neither has a name of its own**, so anything addressing them —
-Caddy, and the \*arr apps' download client settings — must use `gluetun:<port>`. Using
-`qbittorrent:8200` fails to resolve; that is what broke the JOAL route when it moved into the
-namespace.
+IP while qBittorrent used the VPN.
+
+**Neither has a name of its own. The address is `torrent:<port>` — the pod.** Under Compose it was
+`gluetun:<port>`, because `network_mode: service:gluetun` made gluetun the container attached to
+`net-download`. Under Podman the pod's **infra** container holds the network and answers to the
+*pod* name, so `gluetun:8200` does not resolve at all — and neither does `qbittorrent:8200`.
+
+Everything addressing them needs that name: the Caddyfile, and the \*arr apps' download client
+settings, **which live in their databases and not in this repository** — so a `git grep` does not
+find them and a restore brings the old value back. Check them through the API:
+
+```bash
+curl -H "X-Api-Key: $KEY" http://sonarr:8989/api/v3/downloadclient   # host must be "torrent"
+```
+
+This is invisible until something actually downloads, because those routes sit behind sign-on and
+an unauthenticated request never reaches the backend.
 
 **Changing a network is not a live edit**, and that covers its options as much as its subnet. Podman
 will not modify a network in place, will not create one whose pool overlaps an existing one, and
