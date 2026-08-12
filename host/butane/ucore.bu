@@ -29,13 +29,33 @@ version: 1.5.0
 
 passwd:
   users:
-    - name: avanserv
-      # uid 1000 is not cosmetic. Rootless Podman maps container UID 0 to the
-      # invoking user, and every file on the media disk and under config/ is
-      # owned by 1000:1000. A different uid means an 8TB chown.
-      uid: 1000
-      groups:
-        - wheel
+    # The service user is `core`, the one Fedora CoreOS already ships.
+    #
+    # uid 1000 is not cosmetic: rootless Podman maps container UID 0 to the
+    # invoking user, and every file on the media disk and under config/ is
+    # owned by 1000:1000. A different uid means a 7.3TB chown.
+    #
+    # But FCOS ALREADY has a user at 1000 - `core` - so asking Ignition to
+    # create `avanserv` there is not a typo to fix, it is a collision that can
+    # never succeed. It failed exactly that way on the first install:
+    #
+    #   files: ensureUsers: op(2): [failed] creating or modifying user
+    #   "avanserv": useradd: UID 1000 is not unique
+    #
+    # Ignition aborts the whole stage on that, so NOTHING below ran - including
+    # the network keyfile. The machine came up with no address at all and, with
+    # no console, looked indistinguishable from a machine that never booted.
+    #
+    # So take the uid that is already there rather than fighting for the name.
+    # The filesystem stores uids, not names; `core` owning /mnt/media and
+    # `avanserv` owning it are the same bytes on disk. Displacing `core` to
+    # another uid would preserve the name, but it depends on Ignition applying
+    # usermod in list order, and a wrong guess here costs a trip to the machine.
+    #
+    # No `groups:` either. `core` is already in wheel and sudo on FCOS -
+    # verified by running passwordless sudo as it in the live environment - and
+    # every directive omitted is one that cannot fail on a disk with no console.
+    - name: core
       # BOTH keys currently in the server's authorized_keys, copied verbatim.
       # Preserving access exactly is worth more than tidying the list: a typo
       # or an omission here produces a machine that needs a keyboard and a
@@ -110,7 +130,7 @@ storage:
       mode: 0644
       contents:
         inline: |
-          KERNEL=="tun", GROUP="avanserv", MODE="0660", OPTIONS+="static_node=net/tun"
+          KERNEL=="tun", GROUP="core", MODE="0660", OPTIONS+="static_node=net/tun"
 
     # ------------------------------------------------------------------------
     # Subuid/subgid range for the service user
@@ -122,34 +142,34 @@ storage:
       overwrite: true
       contents:
         inline: |
-          avanserv:100000:65536
+          core:100000:65536
     - path: /etc/subgid
       mode: 0644
       overwrite: true
       contents:
         inline: |
-          avanserv:100000:65536
+          core:100000:65536
 
   links:
     # Quadlet reads from ~/.config/containers/systemd. Symlinking the repo
     # directories in means `git pull` + `systemctl --user daemon-reload` is the
     # whole deploy, with no copy step to forget.
-    - path: /var/home/avanserv/.config/containers/systemd/common
+    - path: /var/home/core/.config/containers/systemd/common
       target: /var/media-stack/stacks/common
-      user: { name: avanserv }
-      group: { name: avanserv }
-    - path: /var/home/avanserv/.config/containers/systemd/torrent
+      user: { name: core }
+      group: { name: core }
+    - path: /var/home/core/.config/containers/systemd/torrent
       target: /var/media-stack/stacks/torrent
-      user: { name: avanserv }
-      group: { name: avanserv }
-    - path: /var/home/avanserv/.config/containers/systemd/media
+      user: { name: core }
+      group: { name: core }
+    - path: /var/home/core/.config/containers/systemd/media
       target: /var/media-stack/stacks/media
-      user: { name: avanserv }
-      group: { name: avanserv }
-    - path: /var/home/avanserv/.config/containers/systemd/infra
+      user: { name: core }
+      group: { name: core }
+    - path: /var/home/core/.config/containers/systemd/infra
       target: /var/media-stack/stacks/infra
-      user: { name: avanserv }
-      group: { name: avanserv }
+      user: { name: core }
+      group: { name: core }
 
 systemd:
   units:
@@ -198,13 +218,20 @@ systemd:
       contents: |
         [Unit]
         Description=Enable lingering for the service user
-        ConditionPathExists=!/var/lib/systemd/linger/avanserv
         After=systemd-user-sessions.service
 
         [Service]
         Type=oneshot
         RemainAfterExit=yes
-        ExecStart=/usr/bin/loginctl enable-linger avanserv
+        ExecStart=/usr/bin/loginctl enable-linger core
+        # Ignition creates the parent directories for the symlinks above. It
+        # applies the declared ownership to them, but this costs nothing and
+        # runs in a fully booted system where /var/home/core certainly exists -
+        # whereas a root-owned ~/.config breaks `systemctl --user` with a
+        # permission error that reads as a Podman problem. Leading `-`: a
+        # failure here must never propagate, because it is insurance, not a
+        # dependency.
+        ExecStart=-/usr/bin/chown -R core:core /var/home/core/.config
 
         [Install]
         WantedBy=multi-user.target

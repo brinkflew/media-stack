@@ -167,7 +167,7 @@ cat <<EOF
       ssh-keygen -R $TARGET_IP && ssh-keygen -R home.avanserv.com
 
   Then, still Fedora CoreOS rather than uCore - the rebase is next:
-      ssh avanserv@$TARGET_IP 'sudo rpm-ostree rebase \\
+      ssh core@$TARGET_IP 'sudo rpm-ostree rebase \\
         ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia && sudo systemctl reboot'
 
   nvidia-cdi.service FAILS on this first boot and that is expected - plain FCOS

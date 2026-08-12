@@ -283,7 +283,7 @@ The host key has changed:
 
 ```bash
 ssh-keygen -R 192.168.0.100 && ssh-keygen -R home.avanserv.com
-ssh avanserv@192.168.0.100 'sudo rpm-ostree rebase \
+ssh core@192.168.0.100 'sudo rpm-ostree rebase \
   ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia && sudo systemctl reboot'
 ```
 
@@ -311,13 +311,13 @@ Everything from *Restore* onwards is identical either way.
 ## Restore
 
 Strict order. Each step depends on the one before it. Steps 10–13 run **on the server**, reached as
-`ssh avanserv@192.168.0.100` — the address is now pinned statically by the Ignition config, so it is
+`ssh core@192.168.0.100` — the address is now pinned statically by the Ignition config, so it is
 the same one as before.
 
 ### 10. The repository
 
 ```bash
-sudo mkdir -p /var/media-stack && sudo chown avanserv:avanserv /var/media-stack
+sudo mkdir -p /var/media-stack && sudo chown core:core /var/media-stack
 git clone https://github.com/brinkflew/media-stack /var/media-stack
 ```
 
@@ -357,7 +357,7 @@ cd /var/media-stack && ./bin/render-env.sh      # expect "wrote /var/media-stack
 
 ### 14. Restore `config/`
 
-**As `avanserv`, not with sudo.** restic recreates files owned by the user running it, and uid 1000
+**As `core`, not with sudo.** restic recreates files owned by the user running it, and uid 1000
 is precisely what rootless Podman maps container root to — which is what makes `PUID=0` in the
 quadlets correct. Restoring as root produces a config tree no container can write.
 
@@ -369,18 +369,18 @@ restic restore latest --target /tmp/restore
 # restic recreates the full original path, so config/ lands several levels down
 # under the staging directory it was backed up from - find it rather than guess.
 SRC=$(find /tmp/restore -type d -name config -print -quit)
-rsync -a "$SRC/" avanserv@192.168.0.100:/var/media-stack/config/
-ssh avanserv@192.168.0.100 'du -sh /var/media-stack/config && ls /var/media-stack/config'
+rsync -a "$SRC/" core@192.168.0.100:/var/media-stack/config/
+ssh core@192.168.0.100 'du -sh /var/media-stack/config && ls /var/media-stack/config'
 ```
 
-Caddy's certificates were captured from inside its container as root, but restore as `avanserv`
+Caddy's certificates were captured from inside its container as root, but restore as `core`
 (uid 1000) is still correct: rootless Podman maps container root to that user, so the proxy can read
 its own keys back.
 
 ### 15. Start it
 
 ```bash
-ssh avanserv@192.168.0.100
+ssh core@192.168.0.100
 systemctl --user daemon-reload
 
 # The VPN first. Starting gluetun pulls in torrent-pod, and its Notify=healthy
@@ -402,7 +402,7 @@ On later boots none of this is needed: every unit is `WantedBy=default.target` a
 lingering, so the stack starts without anyone logging in. Confirm that once:
 
 ```bash
-loginctl show-user avanserv | grep Linger        # Linger=yes
+loginctl show-user core | grep Linger        # Linger=yes
 systemctl --user list-units 'net-*' --no-legend  # seven networks, all active
 ```
 

@@ -1,0 +1,123 @@
+{
+  "ignition": {
+    "version": "3.4.0"
+  },
+  "passwd": {
+    "users": [
+      {
+        "name": "core",
+        "sshAuthorizedKeys": [
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKmkRPuqZlSFi00vRwgPjEm69RiUQMcMALjFx08yGT56 avs@fedora",
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYqV/NrZ1e25EMY5xrL3VWDGiGcwVTYdaFo67hfA4QO avanserv@home.avanserv.com"
+        ]
+      }
+    ]
+  },
+  "storage": {
+    "files": [
+      {
+        "path": "/etc/NetworkManager/system-connections/lan.nmconnection",
+        "contents": {
+          "compression": "gzip",
+          "source": "data:;base64,H4sIAAAAAAAC/0zO3QqCQBDF8fvzLGWuieXG3vThS4gXgzugoLOis0FvH5GFtzM//py6DSLcah+kQe/dQAJ9TexYO56FFRQ1rMjpHBmof78GI7V78n7mZXH5zT7utrraY2XLkzUGqPvpmTcYWbvg3UgSacDqjTNllpjinKSJSdNDlu82B3hZtuDyjRX/2GcW3gEAAP//fyxN1r4AAAA="
+        },
+        "mode": 384
+      },
+      {
+        "path": "/etc/sysctl.d/80-rootless-ports.conf",
+        "contents": {
+          "compression": "",
+          "source": "data:,net.ipv4.ip_unprivileged_port_start%3D80%0A"
+        },
+        "mode": 420
+      },
+      {
+        "path": "/etc/udev/rules.d/99-tun.rules",
+        "contents": {
+          "compression": "",
+          "source": "data:;base64,S0VSTkVMPT0idHVuIiwgR1JPVVA9ImNvcmUiLCBNT0RFPSIwNjYwIiwgT1BUSU9OUys9InN0YXRpY19ub2RlPW5ldC90dW4iCg=="
+        },
+        "mode": 420
+      },
+      {
+        "overwrite": true,
+        "path": "/etc/subuid",
+        "contents": {
+          "compression": "",
+          "source": "data:,core%3A100000%3A65536%0A"
+        },
+        "mode": 420
+      },
+      {
+        "overwrite": true,
+        "path": "/etc/subgid",
+        "contents": {
+          "compression": "",
+          "source": "data:,core%3A100000%3A65536%0A"
+        },
+        "mode": 420
+      }
+    ],
+    "links": [
+      {
+        "group": {
+          "name": "core"
+        },
+        "path": "/var/home/core/.config/containers/systemd/common",
+        "user": {
+          "name": "core"
+        },
+        "target": "/var/media-stack/stacks/common"
+      },
+      {
+        "group": {
+          "name": "core"
+        },
+        "path": "/var/home/core/.config/containers/systemd/torrent",
+        "user": {
+          "name": "core"
+        },
+        "target": "/var/media-stack/stacks/torrent"
+      },
+      {
+        "group": {
+          "name": "core"
+        },
+        "path": "/var/home/core/.config/containers/systemd/media",
+        "user": {
+          "name": "core"
+        },
+        "target": "/var/media-stack/stacks/media"
+      },
+      {
+        "group": {
+          "name": "core"
+        },
+        "path": "/var/home/core/.config/containers/systemd/infra",
+        "user": {
+          "name": "core"
+        },
+        "target": "/var/media-stack/stacks/infra"
+      }
+    ]
+  },
+  "systemd": {
+    "units": [
+      {
+        "contents": "[Unit]\nDescription=Media library (XFS on vg_xfs_media/xfs_db)\nBefore=local-fs.target\n# LVM must be assembled before this device node exists.\nRequires=lvm2-monitor.service\nAfter=lvm2-monitor.service\n\n[Mount]\nWhat=/dev/disk/by-uuid/fce53d5f-0849-40dd-81aa-ba21819c7eeb\nWhere=/mnt/media\nType=xfs\nOptions=rw,relatime,noquota,context=system_u:object_r:container_file_t:s0\n\n[Install]\nWantedBy=local-fs.target\n",
+        "enabled": true,
+        "name": "mnt-media.mount"
+      },
+      {
+        "contents": "[Unit]\nDescription=Enable lingering for the service user\nAfter=systemd-user-sessions.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/loginctl enable-linger core\n# Ignition creates the parent directories for the symlinks above. It\n# applies the declared ownership to them, but this costs nothing and\n# runs in a fully booted system where /var/home/core certainly exists -\n# whereas a root-owned ~/.config breaks `systemctl --user` with a\n# permission error that reads as a Podman problem. Leading `-`: a\n# failure here must never propagate, because it is insurance, not a\n# dependency.\nExecStart=-/usr/bin/chown -R core:core /var/home/core/.config\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "enable-linger.service"
+      },
+      {
+        "contents": "[Unit]\nDescription=Generate CDI specification for NVIDIA devices\nAfter=local-fs.target\nBefore=multi-user.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "nvidia-cdi.service"
+      }
+    ]
+  }
+}
