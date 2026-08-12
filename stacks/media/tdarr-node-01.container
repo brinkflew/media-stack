@@ -50,6 +50,14 @@ Environment=NVIDIA_DRIVER_CAPABILITIES=all
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
+# Podman does not create a missing bind-mount source directory; Docker did.
+# The difference surfaces as
+#   Error: statfs /var/media-stack/config/tdarr/logs: no such file or directory
+# and with Restart=always it becomes a silent 5-second retry loop rather than a
+# visible failure - this unit reached restart 126 before anyone looked. These
+# are all scratch or log paths that no backup restores, so a fresh host has
+# none of them.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/configs ${DOCKER_VOLUME_CONFIG}/tdarr/logs ${DOCKER_VOLUME_CACHE}/tdarr
 Restart=always
 RestartSec=5
 
