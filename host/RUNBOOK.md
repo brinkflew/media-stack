@@ -106,13 +106,33 @@ Taken with the stack stopped and after `sync`, so the btrfs filesystem inside is
 — restoring it is equivalent to recovering from a power cut, which btrfs handles. It is not a clean
 snapshot, and it does not need to be.
 
-**Budget 100 GB and an hour or more, not the 32 GB that is actually in use.** `dd` reads all 232 GB
-of the device, and free space on btrfs is *not* zeroed — it still holds whatever was written there
-before, which compresses no better than real data. Measured on this machine: past 43 GB while only
-a third of the way through. Check free space before starting.
+**Budget 75 GB, not the 32 GB that is actually in use.** `dd` reads all 250 GB of the device, and
+free space on btrfs is *not* zeroed — it still holds whatever was written there before, which
+compresses no better than real data. Measured on this machine: 250,059,350,016 bytes in, 73.6 GB
+out.
+
+It takes about **seven minutes** at 590 MB/s, because it runs on the server against a local NVMe.
+Piped over SSH from a laptop the same job took over an hour and did not finish — the network, not
+the disk, was the whole cost.
 
 `dd` prints nothing until it finishes; `sudo kill -USR1 $(pgrep -f "^dd if=/dev/nvme0n1")` makes it
 log progress to the journal.
+
+`--collect` removes the unit as soon as it exits, so `systemctl status diskimage` reporting
+**"could not be found" means it finished, not that it failed.** The journal is where the answer is,
+and the line to look for is the byte count — it must equal the whole device:
+
+```bash
+ssh home.local 'journalctl -u diskimage --no-pager | tail -5'
+#   250059350016 bytes (250 GB, 233 GiB) copied ...   <- the full device
+#   diskimage.service: Deactivated successfully       <- exit 0
+```
+
+**Then verify the archive**, because a truncated zstd stream is not obvious from the file size:
+
+```bash
+ssh home.local 'zstd -dc /mnt/media/nvme0n1.img.zst | wc -c'    # must be 250059350016
+```
 
 **Do not start the stack until the unit exits.** Writing to the disk mid-read produces an image that
 looks complete and restores to a corrupted filesystem — the worst possible failure for the one
