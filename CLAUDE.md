@@ -474,6 +474,14 @@ Conclusions from auditing the running host. Do not rediscover these:
 - **The remaining internal exposure is Prowlarr.** It is the only service on `net-solver`, so it is
   the single hop between a compromised FlareSolverr and everything else. That is the reason its own
   login matters more than the others', not less.
+- **SMT is on, and that is a decision rather than a default.** FCOS ships
+  `mitigations=auto,nosmt`, which left 6 usable threads of 12 on the i7-8700K — silently, since
+  `lscpu` still reports 12 CPUs while `nproc` says 6 and cores 6–11 sit in the offline list.
+  `host/butane/ucore.bu` now removes it. **The mitigation it disables is not theoretical here**:
+  `nosmt` defends against cross-thread side-channel attacks, which need hostile code on a sibling
+  thread, and FlareSolverr runs attacker-controlled JavaScript in headless Chrome by design. The
+  judgement is that `net-solver` isolation is the barrier that matters and the threads are worth
+  more. If that stops looking right, the `kernel_arguments` block is the thing to revert.
 - **Gluetun's HTTP and Shadowsocks proxies are off** (`HTTPPROXY=off`, `SHADOWSOCKS=off`) and the
   container publishes no host port at all. They were unauthenticated and bound to `BIND_LAN`, which
   made them an open proxy into the VPN for any LAN device. Turning them off was cheaper than
