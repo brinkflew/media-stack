@@ -13,9 +13,11 @@
 [Unit]
 Description=Promote transcoded media into the Jellyfin library
 Documentation=file:/var/media-stack/bin/promote-transcoded.py
-# Nothing to promote if Tdarr never rendered a verdict, and no way to ask it.
+# After= only, NEVER Wants=. A Wants= here pulls tdarr-server up every time the
+# timer fires, which silently defeats having disabled it - and disabled is
+# exactly where it lives until its own throttles are configured. Ordering is
+# worth keeping; starting it is not this unit's business.
 After=tdarr-server.service
-Wants=tdarr-server.service
 
 [Service]
 Type=oneshot

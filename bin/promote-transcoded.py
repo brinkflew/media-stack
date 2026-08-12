@@ -128,7 +128,12 @@ def tdarr_files():
                     ["-X", "POST", "-H", "Content-Type: application/json",
                      "http://localhost:8266/api/v2/cruddb"], body)
     if out is None:
-        die("cannot reach tdarr-server - is the container running?")
+        # Not an error. Tdarr being stopped is a legitimate state - it is
+        # deliberately out of default.target - and failing every 10 minutes
+        # because of it would train everyone to ignore this unit, which is the
+        # opposite of what a promotion pass is for.
+        print("== tdarr-server is not running; nothing to promote")
+        sys.exit(0)
     try:
         data = json.loads(out)
     except json.JSONDecodeError:

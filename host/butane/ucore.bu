@@ -151,6 +151,29 @@ storage:
           SUBSYSTEM=="net", ACTION=="add", DRIVERS=="?*", ATTR{address}=="4c:ed:fb:3f:97:11", ATTR{type}=="1", NAME="nic0"
 
     # ------------------------------------------------------------------------
+    # Delegate the io controller to the user manager
+    # ------------------------------------------------------------------------
+    # systemd delegates `cpu memory pids` to a user session by default and NOT
+    # `io`, and an undelegated controller is accepted silently and does nothing.
+    # So every IOWeight= and IOReadBandwidthMax= in stacks/ was inert, which is
+    # not a theoretical gap: a Tdarr health-check sweep - a full-file decode of
+    # every file it is given - saturated the media spindle and wedged every
+    # userspace process on the box. The kernel kept answering ICMP and
+    # completing TCP handshakes while sshd could not get scheduled far enough to
+    # send a banner. There is no console here, so it took a power cycle.
+    #
+    # sda runs BFQ, which is what makes io.weight meaningful rather than
+    # advisory. Verify after any change - the failure mode is silence:
+    #   systemctl show user@1000.service -p DelegateControllers
+    #   cat /sys/fs/cgroup/user.slice/user-1000.slice/cgroup.subtree_control
+    - path: /etc/systemd/system/user@.service.d/10-delegate-io.conf
+      mode: 0644
+      contents:
+        inline: |
+          [Service]
+          Delegate=cpu cpuset io memory pids
+
+    # ------------------------------------------------------------------------
     # Subuid/subgid range for the service user
     # ------------------------------------------------------------------------
     # Rootless Podman needs a mapped range for every UID inside a container
