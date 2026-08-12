@@ -8,13 +8,14 @@
 #   nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 #
 # uCore's -nvidia variant pre-bakes the driver and nvidia-container-toolkit, so
-# that is the only step. Each node is pinned to one of the two RTX 3060 Ti to
-# keep the workload evenly split.
+# that is the only step. THE ONLY NODE, pinned to GPU 1; GPU 0 belongs to
+# Jellyfin. There were two nodes, one per card, until playback and transcoding
+# turned out to be sharing GPU 0.
 #
 # nv-patch.sh is NOT ported forward: it lifted the NVENC concurrent-session
-# limit, which NVIDIA raised to 8 for consumer cards in Jan 2024, and two nodes
-# cannot reach that ceiling. Patching a driver library in /usr would also fight
-# OSTree on every update.
+# limit, which NVIDIA raised to 8 for consumer cards in Jan 2024, and a single
+# node with 3 workers comes nowhere near that ceiling. Patching a driver library
+# in /usr would also fight OSTree on every update.
 #
 # Image:  https://github.com/HaveAGitGat/Tdarr
 # ==============================================================================
@@ -29,7 +30,16 @@ ContainerName=tdarr-node-01
 Network=net-transcode.network
 
 AddDevice=/dev/dri
-AddDevice=nvidia.com/gpu=0
+# GPU 1, NOT 0. Jellyfin holds GPU 0 exclusively, because NVENC has no priority
+# or QoS mechanism of any kind: sessions are first-come-first-served and no
+# cgroup weight reaches the GPU. Sharing a card with playback means the only
+# thing standing between a transcode queue and a stuttering stream is luck.
+# Two cards, one each, is the only guarantee available.
+#
+# This is also why there is one node and not two. A second node pinned to the
+# same card buys nothing that worker counts on this one do not - the node split
+# exists to map DISTINCT GPUs, and there is only one left to map.
+AddDevice=nvidia.com/gpu=1
 
 Volume=${DOCKER_VOLUME_CONFIG}/tdarr/configs:/app/configs:z
 Volume=${DOCKER_VOLUME_CONFIG}/tdarr/logs:/app/logs:z
@@ -45,7 +55,7 @@ Environment=serverIP=tdarr-server
 Environment=serverPort=${PORT_TDARR_SERVER}
 # Kept for the container's own logic. The CDI reference above is what actually
 # grants the device; this no longer selects it.
-Environment=NVIDIA_VISIBLE_DEVICES=0
+Environment=NVIDIA_VISIBLE_DEVICES=1
 Environment=NVIDIA_DRIVER_CAPABILITIES=all
 
 # A process check, not an HTTP one: a node opens no listening socket at all -

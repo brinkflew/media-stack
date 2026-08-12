@@ -411,7 +411,7 @@ systemctl --user start qbittorrent joal
 systemctl --user start pocket-id tinyauth caddy
 
 systemctl --user start sonarr radarr prowlarr flaresolverr jellyfin jellyseerr \
-                       tdarr-server tdarr-node-01 tdarr-node-02 unpackerr duckdns
+                       tdarr-server tdarr-node-01 unpackerr duckdns
 ```
 
 **Starting `torrent-pod.service` alone is not enough** — a pod is a namespace, not its contents. It
@@ -443,7 +443,7 @@ ls /mnt/media/library | head
 
 # GPUs visible through CDI
 nvidia-ctk cdi list | head
-podman exec tdarr-node-01 nvidia-smi -L          # two RTX 3060 Ti across the two nodes
+podman exec tdarr-node-01 nvidia-smi -L          # GPU 1 only - GPU 0 is Jellyfin's alone
 
 # segmentation, both directions - the forbidden ones are the point
 podman exec flaresolverr getent hosts sonarr  || echo "flaresolverr -> sonarr: blocked"

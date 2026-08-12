@@ -219,7 +219,7 @@ other by container name (`http://sonarr:8989`), but only where they share a netw
 | `net-solver` | prowlarr, flaresolverr |
 | `net-download` | caddy, gluetun, sonarr, radarr, prowlarr |
 | `net-media` | caddy, jellyfin, jellyseerr |
-| `net-transcode` | caddy, tdarr-server, tdarr-node-01, tdarr-node-02 |
+| `net-transcode` | caddy, tdarr-server, tdarr-node-01 |
 | `net-egress` | duckdns |
 
 Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individually** — a shared

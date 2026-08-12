@@ -29,6 +29,12 @@ ContainerName=jellyfin
 Network=net-media.network
 
 AddDevice=/dev/dri
+# GPU 0, AND NOTHING ELSE MAY HAVE IT. Playback is the one workload here with a
+# deadline: a transcode that runs slowly is invisible, a stream that runs slowly
+# is the whole point of the server failing. NVENC has no priority or QoS
+# mechanism - sessions are first-come-first-served, and no cgroup weight reaches
+# the GPU - so the only way to guarantee headroom is exclusivity. tdarr-node-01
+# is on GPU 1 for exactly this reason. **Do not point anything else at gpu=0.**
 AddDevice=nvidia.com/gpu=0
 
 Volume=${DOCKER_VOLUME_CONFIG}/jellyfin:/config:Z

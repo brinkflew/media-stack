@@ -1,12 +1,20 @@
 # ==============================================================================
 # Tdarr server: transcode orchestrator
 # ------------------------------------------------------------------------------
-# Hands work to the two nodes, which connect out to it. It initiates nothing
-# towards them, so net-transcode holds only these three and Caddy.
+# Hands work to the node, which connects out to it. It initiates nothing towards
+# anything, so net-transcode holds only these two and Caddy.
 #
-# The scratch mount is DELIBERATELY not under the media disk. Both nodes
-# otherwise read source media and write transcode output to the same spindle
-# and spend their time fighting each other for head seeks. Keep it on the SSD.
+# ORCHESTRATOR ONLY - internalNode=false, and it stays that way. Tdarr can run
+# an internal node and collapse to a single container, but separate containers
+# mean separate cgroups, and that separation is the only reason the throttling
+# works: the worker is the thing that must be starved, while this process serves
+# the API that bin/promote-transcoded.py depends on and owns the SQLite database
+# that an OOM kill must not land on mid-write.
+#
+# The scratch mount is DELIBERATELY not under the media disk, and that matters
+# more than it looks: sda is a Seagate ST8000DM004, a SHINGLED (SMR) drive whose
+# sustained writes stall for seconds at a time. Keeping the cache on the SSD
+# leaves only the final, sequential output write on the shingled disk.
 #
 # Image:  https://github.com/users/haveagitgat/packages/container/package/tdarr
 # See:    https://docs.tdarr.io/docs/installation/docker/run-compose
