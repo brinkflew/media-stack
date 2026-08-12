@@ -71,9 +71,34 @@ restic check                # no errors
 
 ### 2. Image the disk
 
+**Run it on the server, detached, writing to the media disk** — not as a pipe from a laptop. This
+takes an hour or more, and any pipe held open across it is a liability: a lid closing, a suspend, a
+Wi-Fi handover, and it dies at 40 GB with nothing resumable. `systemd-run` outlives the SSH session
+entirely, and the server does not go to sleep.
+
 ```bash
 ssh home.local 'cd /var/media-stack && docker compose down && sync'
-ssh home.local 'sudo dd if=/dev/nvme0n1 bs=4M' | zstd -T0 > ~/backups/nvme0n1.img.zst
+
+ssh -t home.local 'sudo systemd-run --unit=diskimage --collect \
+  /bin/sh -c "dd if=/dev/nvme0n1 bs=4M | zstd -T0 > /mnt/media/nvme0n1.img.zst"'
+```
+
+**The output goes to `/mnt/media` on purpose.** It is a different physical device. Writing the image
+onto `nvme0n1` would mean the disk changes while it is being read, and the image would contain a
+growing partial copy of itself — a backup that restores to nonsense.
+
+Watch it, disconnect freely, come back later:
+
+```bash
+ssh home.local 'systemctl status diskimage --no-pager | head -4; ls -lh /mnt/media/nvme0n1.img.zst'
+```
+
+When the unit has exited, pull it down and free the space. `rsync -P` resumes, so a dropped laptop
+costs seconds rather than the whole run:
+
+```bash
+rsync -P home.local:/mnt/media/nvme0n1.img.zst ~/backups/
+ssh home.local 'sudo rm /mnt/media/nvme0n1.img.zst'
 ssh home.local 'cd /var/media-stack && docker compose up -d'      # bring it back until the real run
 ```
 
@@ -86,15 +111,10 @@ of the device, and free space on btrfs is *not* zeroed — it still holds whatev
 before, which compresses no better than real data. Measured on this machine: past 43 GB while only
 a third of the way through. Check free space before starting.
 
-The stack is down for the whole run, and `dd` prints nothing when piped over ssh. Watch it from
-another terminal instead:
+`dd` prints nothing until it finishes; `sudo kill -USR1 $(pgrep -f "^dd if=/dev/nvme0n1")` makes it
+log progress to the journal.
 
-```bash
-watch -n30 'ls -lh ~/backups/nvme0n1.img.zst'
-ssh home.local 'sudo kill -USR1 $(pgrep -f "^dd if=/dev/nvme0n1")'   # makes dd log its progress
-```
-
-**Do not start the stack until `dd` exits.** Writing to the disk mid-read produces an image that
+**Do not start the stack until the unit exits.** Writing to the disk mid-read produces an image that
 looks complete and restores to a corrupted filesystem — the worst possible failure for the one
 artifact that exists to rescue you.
 
