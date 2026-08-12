@@ -4,6 +4,11 @@ Butane source for the uCore install (Stage 2). `ucore.bu` is transpiled to Ignit
 `coreos-installer`; the machine is then declaratively defined by this file rather than by whatever
 was typed into it over its lifetime.
 
+**Do not run the install from this file alone — follow [`../RUNBOOK.md`](../RUNBOOK.md).** Ignition
+provisions the host, but it cannot restore the age key, the secrets or `config/`, and the order in
+which those happen afterwards is what makes the difference between a working stack and a subtly
+broken one.
+
 ```bash
 podman run --rm -i quay.io/coreos/butane:release --pretty --strict < ucore.bu > ucore.ign
 ```

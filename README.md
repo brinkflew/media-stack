@@ -13,6 +13,7 @@ device you already carry.
 | `docker-compose.yaml` | the stack as it runs today |
 | `stacks/` | the Podman quadlet units that replace it — written, validated, not yet deployed |
 | `host/butane/` | the host itself, as an Ignition config |
+| `host/RUNBOOK.md` | the migration procedure, start to finish |
 | `ingress/` | the Caddyfile and the Caddy build with the Gandi DNS module |
 | `secrets/` | every credential, encrypted with sops+age |
 | `bin/` | `render-env.sh`, which turns `secrets/` into a usable `.env` |

@@ -36,8 +36,16 @@ passwd:
       uid: 1000
       groups:
         - wheel
+      # BOTH keys currently in the server's authorized_keys, copied verbatim.
+      # Preserving access exactly is worth more than tidying the list: a typo
+      # or an omission here produces a machine that needs a keyboard and a
+      # monitor to fix, and this config is applied to a disk that has just been
+      # wiped. Prune them later, from a machine you can already log in to.
+      #
+      # These are public keys, which is what makes them safe in a public repo.
       ssh_authorized_keys:
-        - ssh-ed25519 AAAA_REPLACE_WITH_THE_PUBLIC_KEY_FROM_YOUR_WORKSTATION
+        - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKmkRPuqZlSFi00vRwgPjEm69RiUQMcMALjFx08yGT56 avs@fedora
+        - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYqV/NrZ1e25EMY5xrL3VWDGiGcwVTYdaFo67hfA4QO avanserv@home.avanserv.com
 
 storage:
   # There is deliberately NO `filesystems:` section. That section exists to
