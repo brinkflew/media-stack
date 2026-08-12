@@ -29,6 +29,25 @@ router's `9122 → 22` forward, which points at a fixed internal address. Pinnin
 step 0 of the Ignition config, but until the new system is up, the forward is exactly what a
 migration can break. `home.local` is a direct LAN route and does not care.
 
+**Add a second alias for the live environment before you start.** The same address will present
+three different host keys during this — Fedora 37, then the live image, then uCore — and each swap
+trips `REMOTE HOST IDENTIFICATION HAS CHANGED`. Clearing `known_hosts` each time works, but doing it
+repeatedly is how you teach yourself to click through that warning, which is the one warning worth
+reading. Give the live environment an alias that never writes to `known_hosts` instead, and leave
+`home.local`'s entry alone:
+
+```
+Host home-live
+    HostName            192.168.0.100
+    User                core
+    StrictHostKeyChecking no
+    UserKnownHostsFile  /dev/null
+    LogLevel            ERROR
+```
+
+The tradeoff is real — that alias has no MITM protection — but it is scoped to one LAN address you
+are actively reinstalling, and the alternative desensitises you on every host.
+
 ---
 
 ## What the install destroys
@@ -71,10 +90,10 @@ restic check                # no errors
 
 ### 2. Image the disk
 
-**Run it on the server, detached, writing to the media disk** — not as a pipe from a laptop. This
-takes an hour or more, and any pipe held open across it is a liability: a lid closing, a suspend, a
-Wi-Fi handover, and it dies at 40 GB with nothing resumable. `systemd-run` outlives the SSH session
-entirely, and the server does not go to sleep.
+**Run it on the server, detached, writing to the media disk** — not as a pipe from a laptop. Done
+this way it takes about seven minutes; done as `ssh dd | zstd` it took over an hour and died at
+43 GB when a lid closed, with nothing resumable. The network was the entire cost. `systemd-run`
+outlives the SSH session, and the server does not go to sleep.
 
 ```bash
 ssh home.local 'cd /var/media-stack && docker compose down && sync'
@@ -97,7 +116,8 @@ When the unit has exited, pull it down and free the space. `rsync -P` resumes, s
 costs seconds rather than the whole run:
 
 ```bash
-rsync -P home.local:/mnt/media/nvme0n1.img.zst "$DEST"            # see below on where DEST is
+export MEDIA_STACK_DISK_IMAGE=/mnt/e/nvme0n1.img.zst              # external drive; see below
+rsync -P home.local:/mnt/media/nvme0n1.img.zst "$MEDIA_STACK_DISK_IMAGE"
 ssh home.local 'sudo rm /mnt/media/nvme0n1.img.zst'
 ssh home.local 'cd /var/media-stack && docker compose up -d'      # bring it back until the real run
 ```
@@ -196,8 +216,8 @@ the filesystems are unmounted properly. Then it polls until the live environment
 When it reports success:
 
 ```bash
-ssh core@192.168.0.100 'cat /etc/os-release | head -2; ip -4 -o addr show scope global'
-ssh core@192.168.0.100 'lsblk -o NAME,SIZE,FSTYPE,LABEL -d'
+ssh home-live 'cat /etc/os-release | head -2; ip -4 -o addr show scope global'
+ssh home-live 'lsblk -o NAME,SIZE,FSTYPE,LABEL -d'
 ```
 
 Expect **Fedora CoreOS 44**, the address **192.168.0.100/24**, and both disks present with
@@ -228,7 +248,7 @@ reboot rather than a wiped disk, and the fallback below is the route.
 ### 7. Check the disks from inside it
 
 ```bash
-ssh core@192.168.0.100 'lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID'
+ssh home-live 'lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID'
 ```
 
 Expect `nvme0n1` at 232.9 G and `sda` at 7.3 T carrying an `LVM2_member` partition. **If `sda` is
@@ -426,8 +446,8 @@ if the installed system still boots:
 
 ```bash
 ./bin/remote-kexec.sh                                            # if uCore still boots
-zstd -dc "$MEDIA_STACK_DISK_IMAGE" | ssh core@192.168.0.100 'sudo dd of=/dev/nvme0n1 bs=4M'
-ssh core@192.168.0.100 'sudo systemctl reboot'
+zstd -dc "$MEDIA_STACK_DISK_IMAGE" | ssh home-live 'sudo dd of=/dev/nvme0n1 bs=4M'
+ssh home-live 'sudo systemctl reboot'
 ```
 
 This one *is* a long pipe from the laptop, and unlike the imaging it cannot be moved server-side —
