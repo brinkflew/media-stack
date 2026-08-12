@@ -10,15 +10,19 @@ assume the stack is only Sonarr/Radarr/Jellyfin.
 
 | Path | What it is |
 |---|---|
-| `docker-compose.yaml` | **what is actually running.** Change this to change the server. |
-| `stacks/` | quadlet units replacing it after the host migration — validated, not deployed |
-| `host/butane/` | the Ignition config for that host — written, not applied |
+| `stacks/` | **what is actually running.** Rootless Podman quadlets. Change these to change the server. |
+| `host/butane/` | the Ignition config that defines the host itself — applied |
+| `docker-compose.yaml` | the previous runtime, kept for reference until the quadlets have run a while |
 | `ingress/` | `Caddyfile` and the Caddy build with the Gandi DNS module |
 | `secrets/` | every credential, sops+age encrypted; `.env` is rendered from it |
 
-**`stacks/` and `host/` are not live.** Changing a quadlet unit changes nothing about the running
-server, and a change made only there will be silently lost at the migration if it is not also made
-in `docker-compose.yaml`. Until Compose is deleted, both have to be edited together.
+**The migration happened on 2026-08-12.** The server runs uCore with rootless Podman quadlets;
+`docker-compose.yaml` is no longer deployed anywhere and editing it changes nothing. It is retained
+only because it documents a configuration that demonstrably worked, and the quadlets are days old.
+
+**The service user is `core`, uid 1000** — not `avanserv`, which no longer exists. Fedora CoreOS
+ships `core` at uid 1000 and Ignition cannot create a second user there, so the account that already
+held the uid was adopted. The filesystem stores uids, so `/mnt/media` and `config/` needed no chown.
 
 There is no application code here: no build, no lint, no test suite. The unit of work is a
 service definition, and the verification loop is "does the container come up and stay healthy".
@@ -26,10 +30,20 @@ service definition, and the verification loop is "does the container come up and
 ## Deployment model
 
 This repo is the source of truth. The server runs a **git checkout of it** at `/var/media-stack`,
-reachable over passwordless SSH as `home`. Containers run as `PUID`/`PGID` 1000.
+reachable over passwordless SSH as `home` (WAN, via the router's `9122 → 22` forward) or
+`home.local` (direct, `192.168.0.100`). **Prefer `home.local`** — the WAN route depends on NAT
+hairpinning and on the forward still pointing at the right address.
+
+`~/.config/containers/systemd/{common,torrent,media,infra}` are symlinks into `stacks/`, so
+`git pull && systemctl --user daemon-reload` is the entire deploy — there is no copy step.
+
+**Containers run `PUID=0`/`PGID=0`, which is not a privilege escalation.** Rootless Podman maps
+container UID 0 to the invoking user, `core` (uid 1000), which is what owns `/mnt/media` and
+`config/`. A container "running as root" is uid 1000 on the host. Anything *other* than 0 maps into
+the subuid range (`core:100000:65536`) and cannot read the data.
 
 ```bash
-ssh home 'cd /var/media-stack && git status --short'   # ALWAYS do this before editing
+ssh home.local 'cd /var/media-stack && git status --short'   # ALWAYS do this before editing
 ```
 
 **The remote has drifted from git before**, and it is easy to cause. Reconcile any drift into git
@@ -50,7 +64,8 @@ render silently discards it.
 ```bash
 sops secrets/env.sops.env      # decrypts into $EDITOR, re-encrypts on save
 git commit && git push          # then on the server:
-ssh home 'cd /var/media-stack && git pull && ./bin/render-env.sh && docker compose up -d'
+ssh home.local 'cd /var/media-stack && git pull && ./bin/render-env.sh &&
+                systemctl --user daemon-reload && systemctl --user restart <affected units>'
 ```
 
 - **Two age recipients**, workstation and server, so losing either machine does not lock you out.
@@ -109,23 +124,36 @@ repository, which is why restic was used from the start rather than tar.
 
 ## Commands
 
-All of these run on the server, from `/var/media-stack`:
+All of these run on the server as `core`, from `/var/media-stack`. **No `sudo`** — the stack is
+rootless, and `systemctl --user` is a different unit space from `systemctl`.
 
 ```bash
-./bin/render-env.sh                      # regenerate .env after pulling a secrets change
-docker compose config                    # validate YAML + .env interpolation — do this first
-docker compose up -d                     # apply changes (only recreates what changed)
-docker compose up -d --force-recreate <service>
-docker compose logs -f --tail=100 <service>
-docker compose ps                        # STATUS column shows healthy/unhealthy
-docker compose pull && docker compose up -d   # update images
+git pull && systemctl --user daemon-reload    # the whole deploy; quadlets are symlinked in
+./bin/render-env.sh                           # regenerate .env after a secrets change
+systemctl --user restart <service>
+systemctl --user status <service>
+journalctl --user -u <service> -f
+podman ps                                     # STATUS shows healthy/unhealthy
+systemctl --user list-units --failed          # the fastest health check
 
-docker compose build caddy                   # after editing ingress/Dockerfile
-docker exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change, no downtime
+systemctl --user start caddy-build            # after editing ingress/Dockerfile (~75s)
+podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change, no downtime
 ```
 
-`docker compose config` is the closest thing to a linter here — it catches missing `.env`
-variables and YAML errors without touching running containers. Run it before every `up`.
+**A unit stuck in `activating` is usually a `Restart=always` loop, not slow progress.** Read the
+journal rather than waiting — the real error scrolls past between restarts, and the restart counter
+tells you how long it has been failing.
+
+There is no `docker compose config` equivalent. The nearest linter is generating the units without
+starting anything, which catches syntax errors but **not** unset variables:
+
+```bash
+/usr/lib/systemd/user-generators/podman-system-generator --dryrun
+```
+
+Changing a network's subnet or options is not a live edit: a network cannot be modified in place or
+removed while containers are attached, so it takes stopping the stack, `podman network rm`, and
+starting again.
 
 The Caddyfile can be checked without deploying it, which is worth doing since a bad one takes the
 whole ingress down. `acme_dns gandi` does not exist in the stock image, so validation needs the
@@ -162,9 +190,27 @@ Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individual
 "proxy" network holding everything with a UI would re-flatten the topology and buy nothing. It is
 deliberately absent from `net-solver`.
 
-Docker blocks traffic between bridges in `DOCKER-ISOLATION-STAGE-2`, so **no shared network means
-no route, not merely no DNS name** — but verify a forbidden edge by IP anyway, because a container
-has one address per network it joins and resolving a name only proves one of them.
+**Isolation is not free under Podman, and this is the single most important difference from the
+Compose stack.** Docker put every bridge in `DOCKER-ISOLATION-STAGE-2` and dropped traffic between
+them, which is what made "no shared network means no route" true. **Netavark does not.** Created
+plain, these seven networks were fully routable to one another — measured, not assumed: a container
+on `net-solver` reached Sonarr on `net-arr` by IP, and so did `net-media`, `net-egress` and
+`net-transcode`. The topology looked segmented and was flat.
+
+Every `.network` unit therefore carries `Options=isolate=true`. **Do not remove it, and do not add a
+network without it.** It constrains bridges rather than membership, so Caddy still reaches each of
+the five segments it joins.
+
+Verify a forbidden edge **by IP, from a throwaway container on the source network**, never by name
+resolution: a container has one address per network it joins, a name proves only one of them, and
+the unit files look identical either way.
+
+```bash
+podman run --rm --network net-solver docker.io/library/busybox nc -w3 -z <sonarr-ip> 8989
+```
+
+Distinguish *refused* from *timeout* when reading the result. Connection-refused means the packet
+arrived and only the port was shut — that is not a blocked edge.
 
 `net-solver` and `net-media` carry most of the value. FlareSolverr exists to run headless Chrome
 against attacker-controlled indexer pages, so it is the likeliest thing here to be compromised;
@@ -183,9 +229,12 @@ Caddy, and the \*arr apps' download client settings — must use `gluetun:<port>
 `qbittorrent:8200` fails to resolve; that is what broke the JOAL route when it moved into the
 namespace.
 
-**Changing a subnet is not a live edit.** Docker refuses to create a network whose pool overlaps an
-existing one, and it will not delete a network that still has containers attached, so `up -d` fails
-half-applied. It takes `docker compose down`, `docker network rm <old>`, then `up -d`.
+**Changing a network is not a live edit**, and that covers its options as much as its subnet. Podman
+will not modify a network in place, will not create one whose pool overlaps an existing one, and
+will not remove one with containers attached — so a partial attempt leaves the stack half-started.
+It takes stopping every unit, `podman network rm`, `systemctl --user daemon-reload`, then starting
+again in order. Do it from a script running server-side: it outlives a dropped SSH session, and the
+half-way state is one where nothing is reachable.
 
 **No peer port is published on the host.** With `VPN_PORT_FORWARDING=on`, incoming peers arrive
 through the tunnel on the port ProtonVPN forwards, landing straight in gluetun's namespace.
@@ -263,15 +312,43 @@ If you add a config file that should be tracked, you must add a matching `!` rul
 
 Conclusions from auditing the running host. Do not rediscover these:
 
-- **`firewalld` does not protect published container ports.** Docker inserts its own DNAT and
-  FORWARD rules ahead of firewalld's zone filtering, so a published port stays reachable even
-  when the active zone does not allow it — verified on this host, not assumed. **Do not assume a
-  firewall rule will contain a container.** Either publish to a specific interface (what
-  `BIND_ADMIN`/`BIND_LAN` are for) or filter in the `DOCKER-USER` chain, the only iptables chain
-  Docker leaves under your control.
-- **The host OS predates the current stack design** and is being replaced rather than upgraded;
-  see Target architecture below. Do not invest in host-level configuration that the migration
-  will discard.
+- **`firewalld` now governs published ports, which is the reverse of the Docker host.** Under
+  Docker a published port stayed reachable whatever the zone allowed, because Docker's DNAT ran
+  ahead of firewalld's filtering. Rootless Podman publishes through a userspace `rootlessport`
+  process that binds like any other daemon, so firewalld's INPUT rules apply normally — and the
+  `FedoraServer` zone ships allowing only `ssh`, `cockpit` and `dhcpv6-client`. **Ports are now
+  closed by default rather than open by default.** A new published port needs a matching
+  `firewall-cmd` rule in `firewall-stack-ports.service`, or it is unreachable while the container
+  looks perfectly healthy. The symptom is `No route to host` — firewalld rejects rather than drops
+  — on a port whose container is logging that it is serving.
+- **SELinux blocks `/dev/net/tun` until `container_use_devices` is on.** The udev rule and
+  `AddDevice=` are both necessary and neither is sufficient. It presents as gluetun's
+  `ERROR checking TUN device: TUN device is not available`, with **no AVC logged**, while opening
+  the same node as `core` on the host succeeds — and it takes qBittorrent and JOAL down too. Note
+  `container_use_dri_devices` is already on in uCore, so the GPUs work while the tunnel does not.
+- **Podman does not create missing bind-mount source directories; Docker did.** A fresh host has
+  none of the scratch or log paths that no backup restores. With `Restart=always` this is a silent
+  5-second retry loop rather than a visible failure — the Tdarr units reached restart 126. Audit
+  with: expand every `Volume=` in `stacks/` against `.env` and test each host path.
+- **Podman will not guess a registry.** An unqualified `FROM caddy:2` fails under systemd with
+  `short-name resolution enforced but cannot prompt without a TTY`. Every image reference must be
+  fully qualified; all of them are, and are digest-pinned.
+- **Every quadlet that interpolates a variable needs its own `EnvironmentFile=`**, `.network` units
+  included. Unlike Compose's `${VAR:?err}`, systemd expands an unset variable to an empty string
+  and logs it at info level, so the visible error is podman's — `Error: invalid CIDR address:` —
+  three units away from the cause.
+- **`/mnt` is a symlink to `/var/mnt` on CoreOS**, as `/home` is to `/var/home`. systemd refuses a
+  mount unit whose path is not canonical, so the unit is `var-mnt-media.mount` with
+  `Where=/var/mnt/media`. Consumers can still say `/mnt/media`. It fails on a completely healthy
+  disk, with `vgs`, `lvs` and `/dev/disk/by-uuid` all looking correct.
+- **The host is uCore `stable-nvidia`, immutable and rpm-ostree managed.** `/usr` is read-only, so
+  host-level tools go in `~/.local/bin` (which is where `sops` and `age` live). Host configuration
+  belongs in `host/butane/ucore.bu` — anything applied only over SSH is undocumented state that the
+  next reinstall loses. Ignition runs **once, at first boot**, so editing `ucore.bu` does not change
+  the running machine; a change has to be applied by hand *and* committed there.
+- **Zincati is disabled.** Stock FCOS delegates updates to it, and `rpm-ostree` refuses to act while
+  a driver owns them — a manual rebase needs `--bypass-driver`. It also tracked the FCOS stream we
+  rebased away from. uCore brings its own update mechanism.
 - **Images are unpinned.** Everything is `:latest` (Prowlarr is `:develop`), so there is no
   reproducibility and no way to roll back a bad image. Pinning is part of the quadlets migration.
 - **`/mnt/media` is a single disk with no redundancy**, holding only re-downloadable media. It is
@@ -314,22 +391,26 @@ Conclusions from auditing the running host. Do not rediscover these:
 
 ## Target architecture
 
-The stack is migrating off Docker Compose on a mutable host. Direction, in order:
+**Steps 1 and 2 are done.** The host is uCore `stable-nvidia` and every service is a rootless Podman
+quadlet: `network_mode: service:gluetun` became a Podman pod, `runtime: nvidia` became CDI device
+refs, and every bind mount carries `:z`/`:Z` except `/mnt/media`, which is labelled once at mount
+time by `context=` instead of relabelling 7.3 TB per container start.
 
-1. **Host → [uCore](https://github.com/ublue-os/ucore) (`ucore:stable-nvidia`)**, a Fedora CoreOS
-   derivative that pre-bakes the NVIDIA open driver, CUDA and `nvidia-container-toolkit`.
-   Immutable, auto-updating, provisioned declaratively via Butane/Ignition.
-2. **Runtime → rootless Podman quadlets.** Each service becomes a `.container` systemd unit.
-   `network_mode: service:gluetun` becomes a Podman pod; `runtime: nvidia` becomes a CDI device ref.
-   Note that **SELinux is enforcing on CoreOS**, so every bind mount needs `:z`/`:Z` — the current
-   compose file has none. `podman secret` replaces `render-env.sh` as the consumer of the same
-   encrypted file.
+Doing ingress, segmentation and secrets on the Compose stack first was the right call, but not for
+the reason given at the time. The claim was that their configuration would "carry over unchanged".
+**It did not** — segmentation had to be rebuilt with `isolate=true` because netavark does not
+inherit Docker's inter-bridge isolation, and ingress needed firewalld rules that Docker made
+unnecessary. What carried over was the *design*, and the fact that it had been proven to work: when
+FlareSolverr could reach Sonarr on the new host, the question was "why is this different here",
+not "was this ever right".
 
-**Ingress, segmentation and secrets are already done** on the Compose stack, all three deliberately
-ahead of the host migration and for the same reason: their configuration carries over to quadlets
-unchanged, so the reinstall changes only the OS and the runtime rather than testing every new
-component at once during the least recoverable step. The seven `.network` units are a transcription
-of a topology already proven to work, not a design exercise.
+Remaining, in order:
+
+3. **A cloud backup target** — `restic copy` to a second repository. The repository, the age keys
+   and the restic password are still all on the one workstation, which is the outstanding gap.
+4. **Monitoring**, so a failed unit surfaces without someone running `systemctl --user --failed`.
+5. **`podman-auto-update`** — the units are digest-pinned, which is the prerequisite; auto-update is
+   the thing that makes pinning maintainable rather than a slow drift into staleness.
 
 **The applications keep their own logins.** Segmentation narrowed who can reach them; it did not
 reduce `net-arr` to a single caller, so `AuthenticationMethod=External` would still trust five

@@ -313,6 +313,49 @@ systemd:
         WantedBy=multi-user.target
 
     # ------------------------------------------------------------------------
+    # Open the ports the stack publishes
+    # ------------------------------------------------------------------------
+    # This is the REVERSE of the old host, and the reversal is the whole point.
+    #
+    # Under Docker, firewalld could not contain a published container port at
+    # all: Docker inserted its own DNAT ahead of firewalld's filtering, so a
+    # port stayed reachable no matter what the zone allowed. Rootless Podman
+    # publishes through a userspace rootlessport process that binds on the host
+    # like any other daemon, so firewalld's INPUT rules DO apply - and the
+    # FedoraServer zone ships allowing only ssh, cockpit and dhcpv6-client.
+    #
+    # So the failure is inverted too. Ports are now closed by default rather
+    # than open by default, and the symptom is "No route to host" on 443 while
+    # ssh on 22 works perfectly - firewalld REJECTs rather than drops. Caddy
+    # looks healthy and logs that it is serving, because it is; nothing reaches
+    # it.
+    #
+    # Ports are spelled out rather than read from .env because this runs at
+    # first boot, before the repository is cloned and before .env exists. They
+    # must be kept in step with PORT_CADDY_HTTP, PORT_CADDY_HTTPS and
+    # PORT_JELLYFIN_WEB.
+    - name: firewall-stack-ports.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Open the host ports the stack publishes
+        After=firewalld.service
+        Wants=firewalld.service
+        Before=multi-user.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        # --permanent --add-* is idempotent; re-adding warns and exits 0.
+        ExecStart=/usr/bin/firewall-cmd --permanent --add-service=http
+        ExecStart=/usr/bin/firewall-cmd --permanent --add-service=https
+        ExecStart=/usr/bin/firewall-cmd --permanent --add-port=8096/tcp
+        ExecStart=/usr/bin/firewall-cmd --reload
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # ------------------------------------------------------------------------
     # CDI device definitions for the two GPUs
     # ------------------------------------------------------------------------
     # `runtime: nvidia` has no equivalent in Podman; devices are referenced as

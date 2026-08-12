@@ -127,6 +127,11 @@
         "name": "selinux-container-devices.service"
       },
       {
+        "contents": "[Unit]\nDescription=Open the host ports the stack publishes\nAfter=firewalld.service\nWants=firewalld.service\nBefore=multi-user.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\n# --permanent --add-* is idempotent; re-adding warns and exits 0.\nExecStart=/usr/bin/firewall-cmd --permanent --add-service=http\nExecStart=/usr/bin/firewall-cmd --permanent --add-service=https\nExecStart=/usr/bin/firewall-cmd --permanent --add-port=8096/tcp\nExecStart=/usr/bin/firewall-cmd --reload\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "firewall-stack-ports.service"
+      },
+      {
         "contents": "[Unit]\nDescription=Generate CDI specification for NVIDIA devices\nAfter=local-fs.target\nBefore=multi-user.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml\n\n[Install]\nWantedBy=multi-user.target\n",
         "enabled": true,
         "name": "nvidia-cdi.service"
