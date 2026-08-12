@@ -29,13 +29,19 @@ ContainerName=jellyfin
 Network=net-media.network
 
 AddDevice=/dev/dri
-# GPU 0, AND NOTHING ELSE MAY HAVE IT. Playback is the one workload here with a
-# deadline: a transcode that runs slowly is invisible, a stream that runs slowly
-# is the whole point of the server failing. NVENC has no priority or QoS
-# mechanism - sessions are first-come-first-served, and no cgroup weight reaches
-# the GPU - so the only way to guarantee headroom is exclusivity. tdarr-node-01
-# is on GPU 1 for exactly this reason. **Do not point anything else at gpu=0.**
-AddDevice=nvidia.com/gpu=0
+# GPU 1, BECAUSE GPU 0's VIDEO ENGINES ARE DEAD. Both cards are RTX 3060 Ti on
+# the same VBIOS, but on GPU 0 (PCI 01:00.0, serial ...6697) every NVENC session
+# fails with "OpenEncodeSessionEx failed: unsupported device" and every NVDEC
+# init fails with CUDA_ERROR_NO_DEVICE. CUDA compute on that card is fine; only
+# the dedicated video block is gone. Reproduced 3/3 against GPU 1 passing in the
+# same loop, on two driver versions and two driver flavours, rootless and
+# rootful. It is a hardware fault, not configuration.
+#
+# This cost hours, because nvidia-smi reports the card as perfectly healthy and
+# `ffmpeg -encoders` lists hevc_nvenc regardless - neither proves an encode
+# session can be opened. **Test a real encode against a specific card index;
+# nothing else tells you the truth.**
+AddDevice=nvidia.com/gpu=1
 
 Volume=${DOCKER_VOLUME_CONFIG}/jellyfin:/config:Z
 Volume=${DOCKER_VOLUME_MEDIA}/library:/data/media
