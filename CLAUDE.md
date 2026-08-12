@@ -71,6 +71,42 @@ ssh home 'cd /var/media-stack && git pull && ./bin/render-env.sh && docker compo
   `/usr/local` needs a sudo password on the server and this does not. That directory is absent from
   a non-interactive ssh `PATH`, which is why `render-env.sh` sets it itself.
 
+## Backups
+
+`config/` is the only part of this system that cannot be rebuilt from git, and it lives on
+`nvme0n1p3` — the disk the uCore install wipes. `bin/backup-config.sh` is what makes that install
+recoverable.
+
+```bash
+./bin/backup-config.sh              # from the WORKSTATION, not the server
+```
+
+It pulls rather than pushes, so the server holds no credentials for the backup destination and no
+route to it — compromising the server does not get you the backups. The restic repository is at
+`~/backups/media-stack` on the workstation, password at `~/.config/restic/media-stack.pw`.
+
+**Three things it does that a plain `rsync` does not**, each of which otherwise produces a backup
+that looks complete and is not:
+
+- **Caddy's `/data` is root-owned inside its container** and unreadable to the ssh user, so rsync
+  skips it with a permission error among thousands of lines of output. It is only 192 KB, and it is
+  every TLS private key plus the ACME account key. It is pulled with `docker exec caddy tar`
+  instead, and the script **fails** if it captures no certificates.
+- **Live SQLite databases are snapshotted through SQLite's backup API**, not copied. The apps run
+  with WAL, so a file copy can be missing commits that live in the `-wal`.
+  `bin/snapshot-databases.sh` finds them by magic bytes rather than extension — Tdarr and Jellyfin
+  both use `.db` for things that are not SQLite.
+- **`-wal`/`-shm` are excluded.** Restoring a stale `-wal` next to a newer `.db` is worse than
+  having neither.
+
+`caddy/` is excluded from the rsync entirely rather than tolerated: a permanently-expected error 23
+on every run is the fastest way to train yourself to ignore this script's exit code.
+
+**What this does not protect against.** The repository, the age keys and the restic password all
+live on the same workstation. It covers the server's disk dying and the reinstall; it does not
+cover losing the workstation. A cloud target is a later phase — `restic copy` to a second
+repository, which is why restic was used from the start rather than tar.
+
 ## Commands
 
 All of these run on the server, from `/var/media-stack`:
