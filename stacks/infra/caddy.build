@@ -9,10 +9,10 @@
 # someone has to remember: caddy.container references this image, so systemd
 # builds it before starting the proxy.
 #
-# NOT digest-pinned, unlike everything else here, because ingress/Dockerfile
-# builds FROM the moving tags caddy:2-builder and caddy:2. Pinning those would
-# make the ingress reproducible too, at the cost of two more digests to bump by
-# hand. Worth doing; not done.
+# Reproducible like everything else here: ingress/Dockerfile pins both of its
+# FROM lines by digest, so this builds the same proxy on the new host as the one
+# running today. That is the point - this unit runs on first boot of a machine
+# nobody has used yet, and Caddy is the only path to every service on it.
 # ==============================================================================
 
 [Unit]
