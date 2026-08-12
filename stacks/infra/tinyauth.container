@@ -8,13 +8,10 @@
 # The whitelist matters: without it, any account Pocket ID knows about can sign
 # in to everything.
 #
-# KNOWN WART, carried over unchanged so that the migration changes one thing at
-# a time: TOKENURL and USERINFOURL address Pocket ID through its PUBLIC
-# hostname, so the token exchange leaves the network and hairpins back through
-# the router. AUTHURL genuinely has to stay public - the browser follows it -
-# but the other two could be http://pocket-id:1411/... Untested, because Pocket
-# ID may issue an `iss` claim Tinyauth then rejects; the symptom would be
-# sign-on failing at the callback.
+# AUTHURL and REDIRECTURL are public because the BROWSER follows them. TOKENURL
+# and USERINFOURL are back-channel calls Tinyauth makes itself, so they stay on
+# net-ingress rather than leaving the network and hairpinning through the
+# router's NAT to reach a container two addresses away.
 #
 # Image:  https://github.com/tinyauthapp/tinyauth/pkgs/container/tinyauth
 # See:    https://tinyauth.app/docs/guides/pocket-id
@@ -44,8 +41,8 @@ Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTID=${POCKETID_CLIENT_ID}
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRET=${POCKETID_CLIENT_SECRET}
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_AUTHURL=https://id.${DOMAIN}/authorize
-Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=https://id.${DOMAIN}/api/oidc/token
-Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=https://id.${DOMAIN}/api/oidc/userinfo
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=http://pocket-id:1411/api/oidc/token
+Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=http://pocket-id:1411/api/oidc/userinfo
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL=https://auth.${DOMAIN}/api/oauth/callback/pocketid
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups
 Environment=TINYAUTH_OAUTH_PROVIDERS_POCKETID_WHITELIST=${AUTH_WHITELIST}

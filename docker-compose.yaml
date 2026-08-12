@@ -364,9 +364,20 @@ services:
       - TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID
       - TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTID=${POCKETID_CLIENT_ID}
       - TINYAUTH_OAUTH_PROVIDERS_POCKETID_CLIENTSECRET=${POCKETID_CLIENT_SECRET}
+      # AUTHURL is public because the BROWSER follows it - it is where the
+      # passkey prompt happens. The other two are back-channel calls Tinyauth
+      # makes itself, so they stay on net-ingress.
+      #
+      # They used to be public too, which meant every sign-on left the network,
+      # hairpinned through the router's NAT and came back in through Caddy just
+      # to reach a container two IP addresses away. That made login - the thing
+      # gating all admin access - depend on hairpin NAT continuing to work.
+      # Pocket ID serves the same endpoints over the bridge and advertises
+      # absolute public URLs regardless of the Host header, and Tinyauth has no
+      # issuer or JWKS setting to mismatch against.
       - TINYAUTH_OAUTH_PROVIDERS_POCKETID_AUTHURL=https://id.${DOMAIN:?err}/authorize
-      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=https://id.${DOMAIN:?err}/api/oidc/token
-      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=https://id.${DOMAIN:?err}/api/oidc/userinfo
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_TOKENURL=http://pocket-id:1411/api/oidc/token
+      - TINYAUTH_OAUTH_PROVIDERS_POCKETID_USERINFOURL=http://pocket-id:1411/api/oidc/userinfo
       - TINYAUTH_OAUTH_PROVIDERS_POCKETID_REDIRECTURL=https://auth.${DOMAIN:?err}/api/oauth/callback/pocketid
       - TINYAUTH_OAUTH_PROVIDERS_POCKETID_SCOPES=openid email profile groups
       - TINYAUTH_OAUTH_PROVIDERS_POCKETID_WHITELIST=${AUTH_WHITELIST}
