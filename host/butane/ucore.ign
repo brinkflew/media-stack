@@ -122,6 +122,11 @@
         "name": "enable-linger.service"
       },
       {
+        "contents": "[Unit]\nDescription=Allow containers to use device nodes passed to them\nAfter=local-fs.target\nBefore=multi-user.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c 'getsebool container_use_devices | grep -q \" on$\" || setsebool -P container_use_devices 1'\n\n[Install]\nWantedBy=multi-user.target\n",
+        "enabled": true,
+        "name": "selinux-container-devices.service"
+      },
+      {
         "contents": "[Unit]\nDescription=Generate CDI specification for NVIDIA devices\nAfter=local-fs.target\nBefore=multi-user.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml\n\n[Install]\nWantedBy=multi-user.target\n",
         "enabled": true,
         "name": "nvidia-cdi.service"

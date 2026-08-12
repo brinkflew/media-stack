@@ -21,14 +21,23 @@
 # current ones with
 #   docker manifest inspect caddy:2 --verbose | grep -m1 digest
 #
+# THE REGISTRY IS SPELLED OUT because Podman, unlike Docker, does not assume
+# Docker Hub for an unqualified name. It consults the short-name aliases and
+# otherwise prompts - and a systemd unit has no terminal to prompt at, so the
+# build dies with
+#   Error: creating build container: short-name resolution enforced but cannot
+#   prompt without a TTY
+# which says nothing about registries. Caddy is the only image here that is
+# built rather than pulled, so it is the only place this can bite.
+#
 # See: https://github.com/caddy-dns/gandi
 #      https://caddyserver.com/docs/build#xcaddy
 # ==============================================================================
 
-FROM caddy:2-builder@sha256:198d47eaee306d4d0c38a9960c89ff2c959aa29ad51d3e2dafa3e93ac961782a AS builder
+FROM docker.io/library/caddy:2-builder@sha256:198d47eaee306d4d0c38a9960c89ff2c959aa29ad51d3e2dafa3e93ac961782a AS builder
 
 RUN xcaddy build --with github.com/caddy-dns/gandi
 
-FROM caddy:2@sha256:844f60b64e4724a5aa8245e019dace0d3f199f7433ce6c57676cb30a920dbad9
+FROM docker.io/library/caddy:2@sha256:844f60b64e4724a5aa8245e019dace0d3f199f7433ce6c57676cb30a920dbad9
 
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

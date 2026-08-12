@@ -267,6 +267,52 @@ systemd:
         WantedBy=multi-user.target
 
     # ------------------------------------------------------------------------
+    # Let containers open the device nodes they are handed
+    # ------------------------------------------------------------------------
+    # The udev rule above makes /dev/net/tun readable by the service user, and
+    # gluetun.container passes it in with AddDevice=. Neither is sufficient:
+    # SELinux still denies container_t access to tun_tap_device_t unless
+    # container_use_devices is on, and it ships off.
+    #
+    # The symptom is not a permission error on the VPN, it is
+    #
+    #   ERROR checking TUN device: TUN device is not available
+    #
+    # from a container whose device node is right there - and `ls -l` inside it
+    # returns "Permission denied" while the same open() as the service user on
+    # the host succeeds. No AVC is logged by default, so the audit log looks
+    # clean. gluetun then takes qBittorrent and JOAL down with it, since they
+    # share its namespace.
+    #
+    # Note container_use_dri_devices is already ON in uCore, which is why the
+    # GPUs work and this does not - an easy pair to conflate.
+    #
+    # This widens what a container may do with a device it has been GIVEN; it
+    # does not grant access to any device not explicitly passed with AddDevice=.
+    # A targeted policy module allowing only container_t -> tun_tap_device_t
+    # would be narrower, at the cost of building and shipping policy on an
+    # immutable host.
+    #
+    # Guarded rather than unconditional: setsebool -P rebuilds policy and is
+    # slow, and the setting already persists in /etc/selinux across reboots and
+    # rpm-ostree updates. This only pays that cost the once.
+    - name: selinux-container-devices.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Allow containers to use device nodes passed to them
+        After=local-fs.target
+        Before=multi-user.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/bin/sh -c 'getsebool container_use_devices | grep -q " on$" || setsebool -P container_use_devices 1'
+
+        [Install]
+        WantedBy=multi-user.target
+
+    # ------------------------------------------------------------------------
     # CDI device definitions for the two GPUs
     # ------------------------------------------------------------------------
     # `runtime: nvidia` has no equivalent in Podman; devices are referenced as
