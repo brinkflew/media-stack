@@ -80,18 +80,20 @@ RestartSec=5
 # Tdarr fast; it is to make Tdarr incapable of taking the host with it.
 #
 # NOTE: CPUWeight and IOWeight need the cpu and io controllers DELEGATED to the
-# user manager. memory and pids are delegated by default, cpu and io often are
-# not, and an undelegated controller fails SILENTLY - the directive is accepted
-# and does nothing. Verify with:
-#   cat /sys/fs/cgroup/user.slice/user-1000.slice/cgroup.controllers
+# user manager. memory and pids are delegated by default, io is NOT, and an
+# undelegated controller fails SILENTLY - the directive is accepted and does
+# nothing, which is how every IOWeight here was inert for its first day.
+# host/butane/ucore.bu ships the drop-in that fixes it. Verify, do not assume:
+#   systemctl show user@1000.service -p DelegateControllers
+#
+# These weights are only half of it. The other half is Tdarr's OWN limits, which
+# live in its database rather than here: worker counts (2 GPU transcode, 1 CPU
+# transcode, 1 GPU health check) and scannerThreadCount=1. Ten concurrent ffmpeg
+# processes were what the six-thread machine actually died of.
 CPUWeight=20
 IOWeight=20
 MemoryHigh=2G
 MemoryMax=3G
 
 [Install]
-# DELIBERATELY NOT STARTED AT BOOT. Tdarr is stopped until its own throttles are
-# configured - scanner threads, worker counts and whether a 470-episode health
-# check sweep should ever be queued in one go. Re-enable by restoring the line
-# below and running `systemctl --user enable --now tdarr-server`.
-# WantedBy=default.target
+WantedBy=default.target

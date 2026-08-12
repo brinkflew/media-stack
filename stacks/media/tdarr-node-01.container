@@ -102,5 +102,4 @@ MemoryHigh=3G
 MemoryMax=4G
 
 [Install]
-# DELIBERATELY NOT STARTED AT BOOT - see tdarr-server.container.
-# WantedBy=default.target
+WantedBy=default.target
