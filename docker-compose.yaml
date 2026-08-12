@@ -13,20 +13,101 @@
 # ------------------------------------------------------------------------------
 # Networking
 # ------------------------------------------------------------------------------
-# The media-network is shared between containers so that they can communicate
-# together. The downloaders are exempt from this network as they connect to
-# the Gluetun (VPN) instance instead.
+# One network per trust boundary, rather than the single shared bridge this
+# started as. On a flat bridge every container reaches every other by name,
+# which bypasses Caddy and therefore bypasses single sign-on entirely - the
+# applications' own logins were the only thing standing in the way.
+#
+# The edges below were read out of the running configuration, not assumed: the
+# *arr download-client and indexer settings, Prowlarr's applications and indexer
+# proxies, and Jellyseerr's settings.json. A service joins a network only where
+# something actually has to talk to it.
+#
+# Caddy joins each segment individually. A single shared "proxy" network holding
+# everything with a UI would just re-flatten the topology and buy nothing.
+#
+# Docker blocks traffic between bridges in its DOCKER-ISOLATION-STAGE-2 chain,
+# so "no shared network" means "no route", not merely "no DNS name". Verify a
+# forbidden edge by IP, not only by name resolution.
+#
+# The downloaders appear in none of these. They have no network stack of their
+# own - see the note on gluetun below.
 # ------------------------------------------------------------------------------
 
 networks:
-  media-network:
-    name: media-network
+
+  # Caddy and the sign-on pair. Nothing else has any business reaching the
+  # identity provider. TRUST_PROXY and TINYAUTH_AUTH_TRUSTEDPROXIES are pinned
+  # to this subnet, so it is the one Caddy must address them on.
+  net-ingress:
+    name: net-ingress
     driver: bridge
     ipam:
       driver: default
       config:
-      - subnet: ${NET_DOCKER_SUBNET:?err}
-        gateway: ${NET_DOCKER_GATEWAY:?err}
+        - subnet: ${NET_SUBNET_INGRESS:?err}
+
+  # The management applications and the things that poll their APIs.
+  net-arr:
+    name: net-arr
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${NET_SUBNET_ARR:?err}
+
+  # FlareSolverr, alone with Prowlarr. Its entire purpose is running headless
+  # Chrome against attacker-controlled indexer pages, which makes it the most
+  # likely thing here to be compromised. Prowlarr is the only service it can
+  # reach and the only one that can reach it.
+  net-solver:
+    name: net-solver
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${NET_SUBNET_SOLVER:?err}
+
+  # Everything that talks to qBittorrent's API, which means everything that
+  # talks to gluetun - see below.
+  net-download:
+    name: net-download
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${NET_SUBNET_DOWNLOAD:?err}
+
+  # Jellyfin is the mirror image of FlareSolverr: the most exposed service here,
+  # reachable from the LAN as well as the internet, yet it initiates no internal
+  # connections at all. Only Jellyseerr reads from it.
+  net-media:
+    name: net-media
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${NET_SUBNET_MEDIA:?err}
+
+  # The Tdarr nodes connect out to their server and to nothing else.
+  net-transcode:
+    name: net-transcode
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${NET_SUBNET_TRANSCODE:?err}
+
+  # For services that talk only to the internet. A container still needs some
+  # bridge to get NAT egress, and putting them on one with peers would hand them
+  # reachability they have no use for.
+  net-egress:
+    name: net-egress
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${NET_SUBNET_EGRESS:?err}
 
 # ------------------------------------------------------------------------------
 # Services
@@ -58,8 +139,11 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/gluetun:/gluetun
     devices:
       - /dev/net/tun:/dev/net/tun
+    # qBittorrent and JOAL live in this container's network namespace, so this
+    # entry is their networking too. Everything that needs to reach either of
+    # them addresses gluetun instead, and joins net-download to do it.
     networks:
-      - media-network
+      - net-download
     # Nothing is published on the host.
     #
     # The web UIs of the two containers sharing this namespace are reached
@@ -182,9 +266,10 @@ services:
       - --joal.ui.path.prefix=${JOAL_OBFUSCATION_PATH:?err}
       - --joal.ui.secret-token=${JOAL_SECRET_TOKEN:?err}
     # JOAL announces to trackers, so it belongs behind the VPN for the same
-    # reason qBittorrent does. It previously sat on media-network, which meant
-    # its announces carried the host's own IP while qBittorrent's went through
-    # ProtonVPN. Its web UI is published on the gluetun service above.
+    # reason qBittorrent does. It previously sat on the shared bridge, which
+    # meant its announces carried the host's own IP while qBittorrent's went
+    # through ProtonVPN. Like qBittorrent it has no address of its own, so Caddy
+    # reaches its web UI at gluetun:${PORT_JOAL_WEB}.
     network_mode: "service:gluetun"
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/joal:/config
@@ -220,7 +305,7 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/pocket-id:/app/data
     networks:
-      - media-network
+      - net-ingress
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -230,7 +315,7 @@ services:
       # port mismatch fails the registration ceremony at the finish step with a
       # generic "couldn't process the response from your passkey".
       - APP_URL=${POCKETID_APP_URL:?err}
-      - TRUST_PROXY=${NET_DOCKER_SUBNET:?err}
+      - TRUST_PROXY=${NET_SUBNET_INGRESS:?err}
       # Encrypts the passkey and OIDC client material at rest. Losing it means
       # losing every registered credential, so it belongs in the backup.
       - ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY:?err}
@@ -258,14 +343,14 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/tinyauth:/data
     networks:
-      - media-network
+      - net-ingress
     environment:
       - TZ=${TIMEZONE:?err}
       - TINYAUTH_APPURL=https://auth.${DOMAIN:?err}
       - TINYAUTH_DATABASE_PATH=/data/tinyauth.db
       # Everything reaches Tinyauth through Caddy, so without this it would see
       # Caddy's address as the client and every IP-based rule would be wrong.
-      - TINYAUTH_AUTH_TRUSTEDPROXIES=${NET_DOCKER_SUBNET:?err}
+      - TINYAUTH_AUTH_TRUSTEDPROXIES=${NET_SUBNET_INGRESS:?err}
       - TINYAUTH_AUTH_SECURECOOKIE=true
       # Skip Tinyauth's own login page and go straight to the passkey prompt.
       - TINYAUTH_OAUTH_AUTOREDIRECT=pocketid
@@ -308,8 +393,16 @@ services:
       - ./ingress:/etc/caddy:ro
       - ${DOCKER_VOLUME_CONFIG:?err}/caddy/data:/data
       - ${DOCKER_VOLUME_CONFIG:?err}/caddy/config:/config
+    # One entry per segment, because Caddy is the only thing allowed to cross
+    # them. Deliberately not on net-solver: FlareSolverr has no route worth
+    # exposing, and giving the proxy a leg into that segment would undo the
+    # point of isolating it.
     networks:
-      - media-network
+      - net-ingress
+      - net-arr
+      - net-download
+      - net-media
+      - net-transcode
     ports:
       # Public ingress. These are the only ports the router forwards, and every
       # service reaches the outside world through them.
@@ -338,8 +431,12 @@ services:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: flaresolverr
     restart: unless-stopped
+    # Alone with Prowlarr. This is the container most likely to be compromised,
+    # since it exists to render pages from indexer sites in a real browser. It
+    # still reaches the internet - every bridge NATs out - but from here it can
+    # see nothing else in the stack.
     networks:
-      - media-network
+      - net-solver
     environment:
       - LOG_LEVEL=info
       - LOG_HTML=false
@@ -363,8 +460,9 @@ services:
     restart: unless-stopped
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/duckdns:/config
+    # Talks to DuckDNS and nothing else, so it gets a bridge with no peers.
     networks:
-      - media-network
+      - net-egress
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -396,8 +494,15 @@ services:
       - gluetun
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/prowlarr:/config
+    # The only service in three segments: it syncs indexers to Sonarr and Radarr
+    # (net-arr), pushes releases to qBittorrent (net-download), and is the sole
+    # consumer of FlareSolverr (net-solver). That also makes it the one hop
+    # between a compromised solver and everything else, which is why its own
+    # login stays enabled.
     networks:
-      - media-network
+      - net-arr
+      - net-solver
+      - net-download
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -424,7 +529,8 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/radarr:/config
       - ${DOCKER_VOLUME_MEDIA:?err}:/data
     networks:
-      - media-network
+      - net-arr
+      - net-download
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -451,7 +557,8 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/sonarr:/config
       - ${DOCKER_VOLUME_MEDIA:?err}:/data
     networks:
-      - media-network
+      - net-arr
+      - net-download
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -485,8 +592,11 @@ services:
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/jellyfin:/config
       - ${DOCKER_VOLUME_MEDIA:?err}/library:/data/media
+    # Reachable by Caddy and Jellyseerr, and able to reach neither of them back
+    # into the rest of the stack. Jellyfin initiates no internal connections at
+    # all, which is what makes this segment as small as it is.
     networks:
-      - media-network
+      - net-media
     ports:
       - "${BIND_LAN:?err}:${PORT_JELLYFIN_WEB:?err}:8096"           # LAN clients connect directly
     environment:
@@ -513,8 +623,11 @@ services:
       - sonarr
     volumes:
       - ${DOCKER_VOLUME_CONFIG:?err}/jellyseerr:/app/config
+    # Reads the library from Jellyfin and files requests into Sonarr and Radarr,
+    # so it is the one service that legitimately spans both segments.
     networks:
-      - media-network
+      - net-arr
+      - net-media
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -550,7 +663,7 @@ services:
       - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
-      - media-network
+      - net-transcode
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -578,7 +691,7 @@ services:
       - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
-      - media-network
+      - net-transcode
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -609,7 +722,7 @@ services:
       - ${DOCKER_VOLUME_CACHE:?err}/tdarr:/temp
       - ${DOCKER_VOLUME_MEDIA:?err}:/media
     networks:
-      - media-network
+      - net-transcode
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
@@ -644,11 +757,12 @@ services:
       - ${DOCKER_VOLUME_CONFIG:?err}/unpackerr:/config
       - ${DOCKER_VOLUME_MEDIA:?err}:/data
     # Unpackerr polls the Sonarr/Radarr queue APIs to learn what to extract, so
-    # it needs the bridge. It previously ran `network_mode: none`, which left it
+    # it needs a network. It previously ran `network_mode: none`, which left it
     # logging "network is unreachable" every 2 minutes since at least Feb 2025
-    # without ever extracting anything. It publishes no ports of its own.
+    # without ever extracting anything. It publishes no ports of its own, and
+    # never touches the download client - it works off the filesystem.
     networks:
-      - media-network
+      - net-arr
     environment:
       - PUID=${PUID:?err}
       - PGID=${PGID:?err}
