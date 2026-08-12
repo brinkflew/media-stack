@@ -8,6 +8,18 @@ A self-hosted server stack, currently media-focused, defined as a single Docker 
 The scope is deliberately widening beyond media — prefer changes that generalise over ones that
 assume the stack is only Sonarr/Radarr/Jellyfin.
 
+| Path | What it is |
+|---|---|
+| `docker-compose.yaml` | **what is actually running.** Change this to change the server. |
+| `stacks/` | quadlet units replacing it after the host migration — validated, not deployed |
+| `host/butane/` | the Ignition config for that host — written, not applied |
+| `ingress/` | `Caddyfile` and the Caddy build with the Gandi DNS module |
+| `secrets/` | every credential, sops+age encrypted; `.env` is rendered from it |
+
+**`stacks/` and `host/` are not live.** Changing a quadlet unit changes nothing about the running
+server, and a change made only there will be silently lost at the migration if it is not also made
+in `docker-compose.yaml`. Until Compose is deleted, both have to be edited together.
+
 There is no application code here: no build, no lint, no test suite. The unit of work is a
 service definition, and the verification loop is "does the container come up and stay healthy".
 
@@ -231,9 +243,14 @@ Conclusions from auditing the running host. Do not rediscover these:
 - **Transcode scratch must stay off the media disk.** `DOCKER_VOLUME_CACHE` points at the SSD
   because both Tdarr nodes otherwise read source media and write scratch to the same spindle and
   contend for seeks. Do not "simplify" it back under `DOCKER_VOLUME_MEDIA`.
-- **`nv-patch.sh` is obsolete.** It lifted the NVENC concurrent-session limit, which NVIDIA raised
-  to 8 for consumer GPUs in Jan 2024. Two Tdarr nodes cannot reach that ceiling. Do not port it
-  forward — on an immutable host, patching a driver library in `/usr` fights OSTree every update.
+- **`nv-patch.sh` has been deleted, and should not come back.** It lifted the NVENC
+  concurrent-session limit, which NVIDIA raised to 8 for consumer GPUs in Jan 2024, and two Tdarr
+  nodes cannot reach that ceiling. On an immutable host, patching a driver library in `/usr` would
+  fight OSTree every update.
+- **`config/` is on the disk the migration wipes.** `/var/media-stack/config` is 6.3 GB on
+  `nvme0n1p3`; `/mnt/media` is a separate 7.3 TB XFS volume on LVM on `sda` and survives only
+  because it is a different device. The Stage 0 backup predates Caddy, Pocket ID and Tinyauth, so
+  it would not restore sign-on. **Back up and verify a restore before booting any installer.**
 - **The bridge is no longer flat, and the forbidden edges are verified.** FlareSolverr cannot reach
   Sonarr on either of its addresses, nor the torrent namespace, tested by IP from inside the
   container rather than by name resolution alone. Jellyfin, the Tdarr nodes and DuckDNS are

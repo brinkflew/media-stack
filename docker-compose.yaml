@@ -10,6 +10,12 @@
 # not need to edit this configuration.
 # ==============================================================================
 
+# Without this, Compose names the project after whichever directory it happens
+# to be run from, so a checkout at a different path silently becomes a second,
+# parallel stack sharing the same config volumes. DOCKER_COMPOSE_NAME was
+# documented in .env.sample for years without anything reading it.
+name: ${DOCKER_COMPOSE_NAME:?err}
+
 # ------------------------------------------------------------------------------
 # Networking
 # ------------------------------------------------------------------------------
@@ -242,6 +248,7 @@ services:
       - WEBUI_PORT=${PORT_QBITTORRENT_WEB:?err}
       - DOCKER_MODS=ghcr.io/gilbn/theme.park:qbittorrent
       - TP_THEME=${TP_THEME:?err}
+      - TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME:?err}
 
   # ----------------------------------------------------------------------------
   # Torrent Fake-Upload Client: JOAL (Jack of All Trades)
@@ -509,6 +516,7 @@ services:
       - TZ=${TIMEZONE:?err}
       - DOCKER_MODS=ghcr.io/gilbn/theme.park:prowlarr
       - TP_THEME=${TP_THEME:?err}
+      - TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME:?err}
 
   # ----------------------------------------------------------------------------
   # Movie Library Manager: Radarr
@@ -537,6 +545,7 @@ services:
       - TZ=${TIMEZONE:?err}
       - DOCKER_MODS=ghcr.io/gilbn/theme.park:radarr
       - TP_THEME=${TP_THEME:?err}
+      - TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME:?err}
 
   # ----------------------------------------------------------------------------
   # TV Shows Library Manager: Sonarr
@@ -565,6 +574,7 @@ services:
       - TZ=${TIMEZONE:?err}
       - DOCKER_MODS=ghcr.io/gilbn/theme.park:sonarr
       - TP_THEME=${TP_THEME:?err}
+      - TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME:?err}
 
   # ----------------------------------------------------------------------------
   # Media Server: Jellyfin

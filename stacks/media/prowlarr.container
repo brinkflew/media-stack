@@ -31,6 +31,7 @@ Environment=PGID=0
 Environment=TZ=${TIMEZONE}
 Environment=DOCKER_MODS=ghcr.io/gilbn/theme.park:prowlarr
 Environment=TP_THEME=${TP_THEME}
+Environment=TP_COMMUNITY_THEME=${TP_COMMUNITY_THEME}
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
