@@ -121,11 +121,19 @@ that looks complete and is not:
   differs, Qt assumes the lock is held and qBittorrent exits one second after starting, logging
   only `termination initiated`.
 
-**Off-site**, to Scaleway Object Storage:
+**Off-site**, to Scaleway Object Storage (`s3.fr-par.scw.cloud/home-server-backup`, live since
+2026-08-12, 1.43 GiB stored):
 
 ```bash
-./bin/backup-offsite.sh            # after backup-config.sh; --check to verify the destination
+./bin/backup-config.sh && ./bin/backup-offsite.sh --check    # the full routine
 ```
+
+**The bucket has versioning OFF, deliberately.** `forget --prune` deletes and rewrites pack files;
+with versioning on, every deletion is retained as a noncurrent version, so pruning frees nothing
+while restic reports the repository shrinking — a silent, billable divergence. Object lock is off
+for the same reason: it makes prune fail outright. That leaves a known gap — someone who
+compromises the workstation has the API key and can delete the off-site copy — which is worth
+revisiting with a separate locked bucket and a copy-only key rather than by turning these on.
 
 It **copies the repository** rather than backing up again, so the server is untouched and both
 copies hold identical, verifiable snapshots. Three deliberate choices:
