@@ -79,6 +79,13 @@ else
 	booted_ver=$(jq -r '.deployments[] | select(.booted) | .version' <<<"$status_json")
 	booted_ref=$(jq -r '.deployments[] | select(.booted) | ."container-image-reference" // "-"' <<<"$status_json")
 	staged_ver=$(jq -r '.deployments[] | select(.staged) | .version' <<<"$status_json")
+	# uCore's version string is the FCOS build date, and it does not move on
+	# every image change - a rebase to a signed ref, or a week of package
+	# updates, can leave it identical to the booted one. "OS UPDATE STAGED
+	# 44.20260720.3.1" against a booted 44.20260720.3.1 reads as a no-op and
+	# gets ignored, so carry the digest when the version cannot tell them apart.
+	staged_dig=$(jq -r '.deployments[] | select(.staged) | .["base-checksum"] // .checksum // ""' <<<"$status_json" | cut -c1-8)
+	staged_signed=$(jq -r '.deployments[] | select(.staged) | .["container-image-reference"] // ""' <<<"$status_json")
 	pinned_count=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 	depl_count=$(jq '.deployments | length' <<<"$status_json")
 
@@ -354,7 +361,10 @@ motd=/run/motd.d/40-media-stack.motd
 			staged_age=" (staged ${d}d ago)"
 			[ "$d" -ge 7 ] && staged_age=" (staged ${d} DAYS ago - running a superseded image)"
 		fi
-		printf '  \033[33mOS UPDATE STAGED\033[0m  %s%s\n' "$staged_ver" "$staged_age"
+		label="$staged_ver"
+		[ "$staged_ver" = "${booted_ver:-}" ] && [ -n "$staged_dig" ] && label="$staged_ver @$staged_dig"
+		case "$staged_signed" in ostree-image-signed:*) label="$label signed" ;; esac
+		printf '  \033[33mOS UPDATE STAGED\033[0m  %s%s\n' "$label" "$staged_age"
 		printf '      sudo systemctl reboot   — attended: be able to reach the machine\n'
 	fi
 	for f in ${fails+"${fails[@]}"}; do printf '  \033[31mFAIL\033[0m  %s\n' "$f"; done
