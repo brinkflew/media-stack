@@ -2,6 +2,14 @@
   "ignition": {
     "version": "3.4.0"
   },
+  "kernelArguments": {
+    "shouldExist": [
+      "mitigations=auto"
+    ],
+    "shouldNotExist": [
+      "mitigations=auto,nosmt"
+    ]
+  },
   "passwd": {
     "users": [
       {
@@ -44,6 +52,23 @@
         "contents": {
           "compression": "",
           "source": "data:;base64,U1VCU1lTVEVNPT0ibmV0IiwgQUNUSU9OPT0iYWRkIiwgRFJJVkVSUz09Ij8qIiwgQVRUUnthZGRyZXNzfT09IjRjOmVkOmZiOjNmOjk3OjExIiwgQVRUUnt0eXBlfT09IjEiLCBOQU1FPSJuaWMwIgo="
+        },
+        "mode": 420
+      },
+      {
+        "path": "/etc/systemd/system/user@.service.d/10-delegate-io.conf",
+        "contents": {
+          "compression": "",
+          "source": "data:,%5BService%5D%0ADelegate%3Dcpu%20cpuset%20io%20memory%20pids%0A"
+        },
+        "mode": 420
+      },
+      {
+        "overwrite": true,
+        "path": "/etc/rpm-ostreed.conf",
+        "contents": {
+          "compression": "",
+          "source": "data:,%5BDaemon%5D%0AAutomaticUpdatePolicy%3Dstage%0A"
         },
         "mode": 420
       },
@@ -112,6 +137,20 @@
   "systemd": {
     "units": [
       {
+        "enabled": false,
+        "mask": true,
+        "name": "zincati.service"
+      },
+      {
+        "enabled": false,
+        "mask": true,
+        "name": "bootc-fetch-apply-updates.timer"
+      },
+      {
+        "enabled": true,
+        "name": "rpm-ostreed-automatic.timer"
+      },
+      {
         "contents": "[Unit]\nDescription=Media library (XFS on vg_xfs_media/xfs_db)\nBefore=local-fs.target\n# LVM must be assembled before this device node exists.\nRequires=lvm2-monitor.service\nAfter=lvm2-monitor.service\n\n[Mount]\nWhat=/dev/disk/by-uuid/fce53d5f-0849-40dd-81aa-ba21819c7eeb\nWhere=/var/mnt/media\nType=xfs\nOptions=rw,relatime,noquota,context=system_u:object_r:container_file_t:s0\n\n[Install]\nWantedBy=local-fs.target\n",
         "enabled": true,
         "name": "var-mnt-media.mount"
@@ -130,11 +169,6 @@
         "contents": "[Unit]\nDescription=Open the host ports the stack publishes\nAfter=firewalld.service\nWants=firewalld.service\nBefore=multi-user.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\n# --permanent --add-* is idempotent; re-adding warns and exits 0.\nExecStart=/usr/bin/firewall-cmd --permanent --add-service=http\nExecStart=/usr/bin/firewall-cmd --permanent --add-service=https\nExecStart=/usr/bin/firewall-cmd --permanent --add-port=8096/tcp\nExecStart=/usr/bin/firewall-cmd --reload\n\n[Install]\nWantedBy=multi-user.target\n",
         "enabled": true,
         "name": "firewall-stack-ports.service"
-      },
-      {
-        "contents": "[Unit]\nDescription=Generate CDI specification for NVIDIA devices\nAfter=local-fs.target\nBefore=multi-user.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml\n\n[Install]\nWantedBy=multi-user.target\n",
-        "enabled": true,
-        "name": "nvidia-cdi.service"
       }
     ]
   }

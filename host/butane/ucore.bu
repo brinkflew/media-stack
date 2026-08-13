@@ -195,6 +195,37 @@ storage:
           Delegate=cpu cpuset io memory pids
 
     # ------------------------------------------------------------------------
+    # OS updates: download and deploy nightly, NEVER reboot unattended
+    # ------------------------------------------------------------------------
+    # `stage` means rpm-ostreed-automatic fetches the new image, writes the
+    # deployment and its kernel into /boot, and then stops. Applying it is a
+    # separate, human act. That split IS the policy, and it is chosen because
+    # this machine has no console and no BMC: a deployment that does not boot,
+    # and one that boots but breaks sshd, are both a car journey. Nothing in
+    # software fixes that, so the reboot happens when someone who could make
+    # that journey decides it does.
+    #
+    # This RESTATES uCore's own default rather than changing it -
+    # /etc/rpm-ostreed.conf and /usr/etc/rpm-ostreed.conf are byte-identical
+    # today, and stock FCOS ships `none` while uCore ships `stage`. It is
+    # written anyway so the policy is a decision in this repository rather than
+    # an inherited default that can change underneath it. bin/verify-host.sh
+    # asserts the EFFECTIVE policy out of `rpm-ostree status`, so a divergence
+    # surfaces rather than rots.
+    #
+    # `check` is the alternative: it reports without consuming a /boot slot.
+    # Prefer it if /boot ever becomes the binding constraint - it holds exactly
+    # two kernels and cannot be grown, because nvme0n1p4 is XFS and XFS cannot
+    # be shrunk by any tool.
+    - path: /etc/rpm-ostreed.conf
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: |
+          [Daemon]
+          AutomaticUpdatePolicy=stage
+
+    # ------------------------------------------------------------------------
     # Subuid/subgid range for the service user
     # ------------------------------------------------------------------------
     # Rootless Podman needs a mapped range for every UID inside a container
@@ -235,6 +266,48 @@ storage:
 
 systemd:
   units:
+    # ------------------------------------------------------------------------
+    # Exactly one thing may update this machine, and it is rpm-ostree
+    # ------------------------------------------------------------------------
+    # Three updaters are installed and only one may be armed. Two of them
+    # racing would each try to write a deployment into a /boot that holds
+    # exactly two kernels, and the loser fails overnight with nobody watching.
+    #
+    #   zincati               stock FCOS's updater. It tracks the FCOS stream
+    #                         we rebased AWAY from, and while it is running
+    #                         rpm-ostree refuses to act at all:
+    #                           error: Updates and deployments are driven by
+    #                           Zincati (zincati.service)
+    #                         which is why host/RUNBOOK.md needed
+    #                         --bypass-driver. Masking it here deletes that
+    #                         step from the migration entirely.
+    #   bootc-fetch-apply     bootc's own updater. Disabled by preset today,
+    #                         masked so a future uCore preset cannot quietly
+    #                         arm a second one. bootc stays as a read-only
+    #                         diagnostic (`bootc status`) and a rollback verb;
+    #                         its soft-reboot is wrong here, because most of
+    #                         what an update changes on this host is the NVIDIA
+    #                         kernel module, and a soft reboot keeps the
+    #                         running kernel - leaving the old nvidia.ko loaded
+    #                         against new userspace libraries.
+    #   rpm-ostreed-automatic the one we keep. Its systemd preset is `disabled`,
+    #                         so this line is the entire reason the host checks
+    #                         for updates at all.
+    #
+    # MASK rather than disable: `disable` only removes the .wants symlink, and
+    # a Wants= from anything else silently re-enables it in practice - the same
+    # trap that had media-stack-promote.service starting Tdarr every 10 minutes.
+    - name: zincati.service
+      enabled: false
+      mask: true
+
+    - name: bootc-fetch-apply-updates.timer
+      enabled: false
+      mask: true
+
+    - name: rpm-ostreed-automatic.timer
+      enabled: true
+
     # ------------------------------------------------------------------------
     # /mnt/media, with its SELinux label set once
     # ------------------------------------------------------------------------
@@ -400,23 +473,37 @@ systemd:
         WantedBy=multi-user.target
 
     # ------------------------------------------------------------------------
-    # CDI device definitions for the two GPUs
+    # There is deliberately NO CDI unit here
     # ------------------------------------------------------------------------
     # `runtime: nvidia` has no equivalent in Podman; devices are referenced as
-    # nvidia.com/gpu=N and that mapping has to be generated once per boot,
-    # because it embeds driver library paths that change across updates.
-    - name: nvidia-cdi.service
-      enabled: true
-      contents: |
-        [Unit]
-        Description=Generate CDI specification for NVIDIA devices
-        After=local-fs.target
-        Before=multi-user.target
-
-        [Service]
-        Type=oneshot
-        RemainAfterExit=yes
-        ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-
-        [Install]
-        WantedBy=multi-user.target
+    # nvidia.com/gpu=N, and that mapping has to be generated because it embeds
+    # driver library paths. This used to do it with a oneshot writing
+    # /etc/cdi/nvidia.yaml. That was a duplicate, and a harmful one.
+    #
+    # uCore ships NVIDIA's own nvidia-cdi-refresh.service and .path, both
+    # enabled by the image's preset, and they are strictly better:
+    #
+    #   - they write /run/cdi/nvidia.yaml, on TMPFS. A spec embeds the driver
+    #     version in dozens of paths - /usr/lib64/libcuda.so.580.173.02,
+    #     /lib/firmware/nvidia/580.173.02/gsp_ga10x.bin,
+    #     --host-driver-version=580.173.02. Writing it to /etc made it survive
+    #     the update that invalidated it.
+    #   - the .path unit watches /lib/modules/%v/modules.dep and
+    #     /usr/bin/nvidia-ctk, so a driver change regenerates the spec with no
+    #     reboot and nothing to remember.
+    #   - the .service has an ExecCondition on the module actually being loaded
+    #     and Restart=on-failure, so it retries rather than leaving a stale spec.
+    #
+    # Keeping both was not redundancy, it was a conflict waiting for the first
+    # driver bump: two files defining nvidia.com/gpu=1 with different library
+    # paths, which the CDI resolver rejects rather than merges. Both Jellyfin
+    # and tdarr-node-01 consume that device, so it would have taken out
+    # hardware transcoding and the whole Tdarr pipeline at once - on an update
+    # nobody was watching, hours before anything visibly failed.
+    #
+    # bin/verify-host.sh asserts that exactly one spec exists and that it names
+    # the running driver, so a regression here is caught rather than rediscovered.
+    #
+    # The cost is that between the install and the rebase there is no spec at
+    # all, because plain FCOS has no nvidia-ctk. Nothing needs one until the
+    # Restore steps in host/RUNBOOK.md, so this is free.
