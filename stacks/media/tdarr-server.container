@@ -58,7 +58,13 @@ EnvironmentFile=/var/media-stack/.env
 # visible failure - this unit reached restart 126 before anyone looked. These
 # are all scratch or log paths that no backup restores, so a fresh host has
 # none of them.
-ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/server ${DOCKER_VOLUME_CONFIG}/tdarr/configs ${DOCKER_VOLUME_CONFIG}/tdarr/logs ${DOCKER_VOLUME_CACHE}/tdarr
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/server ${DOCKER_VOLUME_CONFIG}/tdarr/configs ${DOCKER_VOLUME_CONFIG}/tdarr/logs ${DOCKER_VOLUME_CACHE}/tdarr ${DOCKER_VOLUME_CONFIG}/tdarr/server/Tdarr/Plugins/Local
+# Local plugins are TRACKED IN GIT at tdarr/plugins/ and copied in on every
+# start, because everything under config/ is gitignored runtime state. The copy
+# is authoritative-from-git: editing the one in Plugins/Local/ on the server is
+# pointless, it is overwritten here. The trailing /. copies the directory
+# CONTENTS - systemd runs this without a shell, so a glob would not expand.
+ExecStartPre=/usr/bin/cp -a /var/media-stack/tdarr/plugins/. ${DOCKER_VOLUME_CONFIG}/tdarr/server/Tdarr/Plugins/Local/
 Restart=always
 RestartSec=5
 

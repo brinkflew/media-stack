@@ -1,0 +1,63 @@
+# ==============================================================================
+# Bazarr: subtitle manager
+# ------------------------------------------------------------------------------
+# Nothing in this stack fetched subtitles before it. Jellyfin's Open Subtitles
+# plugin was installed and fully credentialed but every library had
+# EnableInternetProviders=false, so it never ran - and the Tdarr flow was
+# actively destroying the embedded subtitle tracks that did exist.
+#
+# net-arr ONLY. It talks to radarr:7878 and sonarr:8989 by container name and to
+# subtitle providers on the internet; it needs nothing else. It deliberately
+# does NOT join net-media - Jellyfin reads the .srt sidecars off the filesystem,
+# so the two never speak.
+#
+# NO PATH MAPPING TO MAINTAIN. Bazarr reads each item's path from Radarr and
+# Sonarr, and bin/promote-transcoded.py keeps those pointing at whichever of
+# queued/ or transcoded/ the file actually occupies. So Bazarr follows the file
+# through the pipeline on its own. This is why /data is mounted at the same
+# path the *arr apps use, and why mounting only library/ would break it.
+#
+# Sidecars, not embedded. Muxing subtitles into the MKV would mean a remux on
+# every subtitle upgrade and would put Bazarr's sync/fix tooling out of reach.
+#
+# Image:  https://docs.linuxserver.io/images/docker-bazarr
+# ==============================================================================
+
+[Unit]
+Description=Bazarr
+
+[Container]
+Image=lscr.io/linuxserver/bazarr@sha256:b3d44d324399152be4d50775ff639a364c0fa1cfda67f71b1f38264c4d0ca09f
+ContainerName=bazarr
+Network=net-arr.network
+
+Volume=${DOCKER_VOLUME_CONFIG}/bazarr:/config:Z
+Volume=${DOCKER_VOLUME_MEDIA}:/data
+
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=${UMASK}
+Environment=TZ=${TIMEZONE}
+
+# No PublishPort. Caddy reaches it by name over net-arr; an admin port would be
+# a second way in that single sign-on does not cover.
+HealthCmd=curl -fsS http://localhost:6767/ || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=90s
+HealthRetries=3
+
+[Service]
+EnvironmentFile=/var/media-stack/.env
+# Podman does not create a missing bind-mount source directory; Docker did.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/bazarr
+Restart=always
+RestartSec=5
+
+# A ceiling, not a tuning knob. Bazarr's subtitle sync can spike, so it gets a
+# little more headroom than the *arr apps.
+MemoryHigh=1536M
+MemoryMax=2G
+
+[Install]
+WantedBy=default.target

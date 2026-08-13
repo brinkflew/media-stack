@@ -130,6 +130,11 @@ prowlarr.{$DOMAIN} {
 	reverse_proxy prowlarr:9696
 }
 
+bazarr.{$DOMAIN} {
+	import protected
+	reverse_proxy bazarr:6767
+}
+
 tdarr.{$DOMAIN} {
 	import protected
 	reverse_proxy tdarr-server:{$PORT_TDARR_WEB}
