@@ -27,7 +27,8 @@
 Description=Bazarr
 
 [Container]
-Image=lscr.io/linuxserver/bazarr@sha256:b3d44d324399152be4d50775ff639a364c0fa1cfda67f71b1f38264c4d0ca09f
+Image=lscr.io/linuxserver/bazarr:latest
+AutoUpdate=registry
 ContainerName=bazarr
 Network=net-arr.network
 

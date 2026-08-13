@@ -28,7 +28,13 @@
 Description=Pocket ID
 
 [Container]
-Image=ghcr.io/pocket-id/pocket-id@sha256:c9c1d7b70006968d673a1073df048a3fdec73ccb54e182320b56bb911340f6f1
+# :v2, and emphatically NOT :v1 - that tag is the 1.x line, so it would be a
+# major DOWNGRADE of the service that gates sign-on for everything here.
+# Pinning the major means a breaking release cannot close every UI at once
+# overnight; moving to :v3 will be a deliberate act with a passkey login to
+# prove it afterwards.
+Image=ghcr.io/pocket-id/pocket-id:v2
+AutoUpdate=registry
 ContainerName=pocket-id
 Network=net-ingress.network
 

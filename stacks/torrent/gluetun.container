@@ -26,7 +26,16 @@ Description=Gluetun VPN client
 After=network-online.target
 
 [Container]
-Image=docker.io/qmcgaw/gluetun@sha256:f9cd584c6bb8c89e7e4c6d799c7547f600bc86842fd5636307543c001d929bbb
+# :v3 rather than :latest, because this container IS the kill-switch. qBittorrent
+# and JOAL have no network stack of their own - they live in this pod's namespace
+# - so a gluetun that fails to come up takes both down with it, by design. A v4
+# arriving overnight is not a risk worth running for a container doing its job.
+#
+# This is also the one unit whose rollback already works properly: Notify=healthy
+# means systemd does not consider it started until the tunnel is up, so a bad
+# image fails the unit and podman auto-update puts the old one back.
+Image=docker.io/qmcgaw/gluetun:v3
+AutoUpdate=registry
 ContainerName=gluetun
 Pod=torrent.pod
 

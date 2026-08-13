@@ -24,7 +24,8 @@
 Description=Jellyfin
 
 [Container]
-Image=lscr.io/linuxserver/jellyfin@sha256:0c7af94c048cd17f7438cd22c4d9c78d4c9c381d565352846aac847dd3cd74f4
+Image=lscr.io/linuxserver/jellyfin:latest
+AutoUpdate=registry
 ContainerName=jellyfin
 Network=net-media.network
 

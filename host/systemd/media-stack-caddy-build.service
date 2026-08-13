@@ -1,0 +1,36 @@
+# ==============================================================================
+# Rebuild Caddy, so that the one built image is not the one that never updates
+# ------------------------------------------------------------------------------
+# Every other image in the stack is pulled, carries AutoUpdate=registry, and
+# moves on its own. Caddy is built here from ingress/Dockerfile, and TWO things
+# would otherwise conspire to freeze it for ever:
+#
+#   - a quadlet .build unit only runs when its image is ABSENT. Once
+#     localhost/media-stack/caddy:latest exists, systemd never builds again.
+#   - podman auto-update's `local` policy compares the running container against
+#     the image in local storage. It notices a newer image; it does not make one.
+#
+# So this is the missing half. It rebuilds against caddy:2, which produces a new
+# image if upstream moved; the next auto-update run sees the difference and
+# restarts the proxy.
+#
+# IT DELIBERATELY DOES NOT RESTART CADDY. The build is the safety net: xcaddy has
+# to compile caddy-dns/gandi against the new Caddy, so an incompatible release
+# fails HERE, while the running container keeps serving every service. Restarting
+# from this unit would throw that away.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Rebuild the Caddy image against current upstream
+Documentation=file:/var/media-stack/ingress/Dockerfile
+
+[Service]
+Type=oneshot
+# `restart`, not `start`: the generated caddy-build.service is a oneshot that
+# sits `inactive (dead)` after it has run once, and `start` on it is a no-op.
+ExecStart=/usr/bin/systemctl --user restart caddy-build.service
+# It compiles Caddy from source - the same reason caddy.container carries
+# TimeoutStartSec=900.
+TimeoutStartSec=900

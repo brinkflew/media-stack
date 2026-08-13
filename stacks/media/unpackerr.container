@@ -18,7 +18,11 @@ Description=Unpackerr
 After=sonarr.service radarr.service
 
 [Container]
-Image=ghcr.io/hotio/unpackerr@sha256:5d5e36d98630f891ba16649dee59bc9b4ca76d1e4d80e1ffb4fb62bb9f657d34
+# hotio publishes :release rather than :latest. NOTE this container defines no
+# HealthCmd, so podman auto-update cannot roll it back on anything subtler than
+# an immediate crash - see stacks/README.md.
+Image=ghcr.io/hotio/unpackerr:release
+AutoUpdate=registry
 ContainerName=unpackerr
 Network=net-arr.network
 

@@ -17,7 +17,8 @@
 Description=Sonarr
 
 [Container]
-Image=lscr.io/linuxserver/sonarr@sha256:bed3afb5d46fde809290997760f2e19d41e57d1eb34f507c485d5a8979c7cd8d
+Image=lscr.io/linuxserver/sonarr:latest
+AutoUpdate=registry
 ContainerName=sonarr
 Network=net-arr.network
 Network=net-download.network

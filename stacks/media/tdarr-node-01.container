@@ -25,7 +25,9 @@ Description=Tdarr node 01
 After=tdarr-server.service
 
 [Container]
-Image=ghcr.io/haveagitgat/tdarr_node@sha256:fab0c179faac72727f5ca98ff33104596099feaef1faf72410159a51077b520b
+# Must stay in lockstep with tdarr-server - see the note there.
+Image=ghcr.io/haveagitgat/tdarr_node:latest
+AutoUpdate=registry
 ContainerName=tdarr-node-01
 Network=net-transcode.network
 

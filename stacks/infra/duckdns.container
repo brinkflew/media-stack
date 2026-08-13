@@ -16,7 +16,10 @@
 Description=DuckDNS updater
 
 [Container]
-Image=lscr.io/linuxserver/duckdns@sha256:71737cabc025d139822146c66529705608155b7e1d13c8b3c6d7948e68400306
+# NOTE this container defines no HealthCmd, so podman auto-update cannot roll
+# it back on anything subtler than an immediate crash - see stacks/README.md.
+Image=lscr.io/linuxserver/duckdns:latest
+AutoUpdate=registry
 ContainerName=duckdns
 Network=net-egress.network
 

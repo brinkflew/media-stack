@@ -24,7 +24,12 @@
 Description=Tdarr server
 
 [Container]
-Image=ghcr.io/haveagitgat/tdarr@sha256:e66fd4083cd6024bc3e2d66cc1f07f84eeb1a66f57e75ca9354015a4b776413a
+# Server and node MUST move together - a node refuses to register with a server
+# of a different version. Both track :latest so one auto-update run moves the
+# pair; if one ever rolls back and the other does not, transcoding stops with
+# both containers reporting healthy.
+Image=ghcr.io/haveagitgat/tdarr:latest
+AutoUpdate=registry
 ContainerName=tdarr-server
 Network=net-transcode.network
 

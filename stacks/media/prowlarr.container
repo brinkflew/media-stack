@@ -18,7 +18,12 @@
 Description=Prowlarr
 
 [Container]
-Image=lscr.io/linuxserver/prowlarr@sha256:1776ab8b030fdb198e7e2dae407a01b06c14360e9fb95f459c7e38914026da79
+# :develop, not :latest. Prowlarr was tracking the develop branch before these
+# images were pinned, and quietly moving it to the release branch would be a
+# downgrade dressed up as an update - develop is currently 2.6.1 against
+# release's 2.5.2.
+Image=lscr.io/linuxserver/prowlarr:develop
+AutoUpdate=registry
 ContainerName=prowlarr
 Network=net-arr.network
 Network=net-download.network

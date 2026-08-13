@@ -22,7 +22,12 @@ Description=Tinyauth
 After=pocket-id.service
 
 [Container]
-Image=ghcr.io/tinyauthapp/tinyauth@sha256:a1bde189951900f84a60f133c26a1ec7a3264073ec7875b548f4fbadb7f5f735
+# :v5, the line already running. Together with Pocket ID this gates sign-on for
+# every service, and the two are coupled - the X-Tinyauth-Location behaviour and
+# Pocket ID's exact-origin check have both cost time before. Pinning the major
+# keeps a breaking release from landing on both at once, unwatched.
+Image=ghcr.io/tinyauthapp/tinyauth:v5
+AutoUpdate=registry
 ContainerName=tinyauth
 Network=net-ingress.network
 

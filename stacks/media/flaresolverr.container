@@ -22,7 +22,11 @@
 Description=FlareSolverr
 
 [Container]
-Image=ghcr.io/flaresolverr/flaresolverr@sha256:7962759d99d7e125e108e0f5e7f3cdbcd36161776d058d1d9b7153b92ef1af9e
+# Update this one EAGERLY. It runs attacker-controlled JavaScript in headless
+# Chrome by design, so it is the single image here whose staleness is a
+# security cost rather than a stability benefit.
+Image=ghcr.io/flaresolverr/flaresolverr:latest
+AutoUpdate=registry
 ContainerName=flaresolverr
 Network=net-solver.network
 

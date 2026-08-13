@@ -18,7 +18,14 @@ Requires=gluetun.service
 After=gluetun.service
 
 [Container]
-Image=lscr.io/linuxserver/qbittorrent@sha256:b645fa7cbd7023321848d25545f0e3b54ad401e4f0eaffdcf8787fcb6dc749ce
+# :libtorrentv1, NOT :latest. The pinned image was a libtorrent 1.2 build, and
+# :latest is built against libtorrent 2.0 - which memory-maps torrent data and
+# behaves very differently under disk pressure. This host's media disk loses 45%
+# of its throughput to a second concurrent reader, so a silent libtorrent major
+# upgrade is exactly the change that must not arrive unattended. This tag still
+# follows qBittorrent's own releases: 5.2.0 -> 5.2.3 without crossing that line.
+Image=lscr.io/linuxserver/qbittorrent:libtorrentv1
+AutoUpdate=registry
 ContainerName=qbittorrent
 Pod=torrent.pod
 

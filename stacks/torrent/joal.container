@@ -19,7 +19,8 @@ Requires=gluetun.service
 After=gluetun.service
 
 [Container]
-Image=docker.io/anthonyraymond/joal@sha256:fc942567c5649b29377e50aa0ca934e4750534d02b4ecf5a0eda3984630f35d7
+Image=docker.io/anthonyraymond/joal:latest
+AutoUpdate=registry
 ContainerName=joal
 Pod=torrent.pod
 

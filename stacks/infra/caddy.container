@@ -26,6 +26,14 @@ After=tinyauth.service
 
 [Container]
 Image=caddy.build
+# `local`, not `registry`: this image is built here, so there is no tag upstream
+# to resolve. Local policy compares the running container against the image of
+# the same name in local storage and restarts if they differ.
+#
+# IT DOES NOT TRIGGER THE BUILD. Nothing would ever produce a newer image, and
+# Caddy would silently never update - which is why media-stack-caddy-build.timer
+# exists. That rebuilds weekly; this notices the result.
+AutoUpdate=local
 ContainerName=caddy
 Network=net-ingress.network
 Network=net-arr.network

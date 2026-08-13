@@ -16,7 +16,8 @@ Description=Jellyseerr
 After=jellyfin.service radarr.service sonarr.service
 
 [Container]
-Image=docker.io/fallenbagel/jellyseerr@sha256:4538137bc5af902dece165f2bf73776d9cf4eafb6dd714670724af8f3eb77764
+Image=docker.io/fallenbagel/jellyseerr:latest
+AutoUpdate=registry
 ContainerName=jellyseerr
 Network=net-arr.network
 Network=net-media.network

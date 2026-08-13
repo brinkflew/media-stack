@@ -11,7 +11,8 @@
 Description=Radarr
 
 [Container]
-Image=lscr.io/linuxserver/radarr@sha256:659e5f20500948b1491f31dd85c6f99a43508ce3e46595793e1e15aa955bf6d7
+Image=lscr.io/linuxserver/radarr:latest
+AutoUpdate=registry
 ContainerName=radarr
 Network=net-arr.network
 Network=net-download.network

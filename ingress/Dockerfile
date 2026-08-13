@@ -9,17 +9,26 @@
 # bearer_token. The legacy `dns_gandi_api_key` that certbot used in SWAG is a
 # different, now-deprecated credential and will not authenticate.
 #
-# BOTH STAGES ARE PINNED BY DIGEST, and the tags are left alongside only as a
-# hint to a human about what they are. This is the only image in the stack that
-# is built rather than pulled, so it was also the only one with no rollback:
-# `caddy:2` moves, and the next rebuild would silently produce a different
-# proxy. That matters most during the host migration, where the new machine
-# rebuilds this from scratch and it is the sole path to every service - the
-# worst possible moment to meet a Caddy nobody has run before.
+# BOTH STAGES TRACK THE MAJOR TAG, not a digest. They were digest-pinned, which
+# made a rebuild reproducible - and also meant a rebuild could never pick
+# anything up, so this image would have been the one thing in the stack that
+# never updated at all. `caddy:2` follows Caddy 2.x and stops before a 3.0.
 #
-# Updating is deliberate: change a digest, rebuild, verify, commit. Resolve the
-# current ones with
-#   docker manifest inspect caddy:2 --verbose | grep -m1 digest
+# The rebuild is not automatic either way: a .build unit only runs when the
+# image is absent, and podman auto-update's `local` policy notices a new image
+# but does not produce one. media-stack-caddy-build.timer is what actually
+# rebuilds, weekly; auto-update then restarts the proxy.
+#
+# THE BUILD IS THE SAFETY NET HERE, and it is a real one. xcaddy has to compile
+# caddy-dns/gandi against the new Caddy, so an incompatible release fails at
+# BUILD time - while the running container keeps serving, because the timer
+# only produces an image and never restarts anything. This is the only update
+# in the stack that can fail without taking its service down.
+#
+# What is given up: a rebuild on a fresh host produces whatever caddy:2 is that
+# day, and it is the sole path to every service on a machine with no console.
+# Check `journalctl --user -u caddy` for ACME errors after any Caddy update -
+# the healthcheck answers on the admin API whether or not certificates work.
 #
 # THE REGISTRY IS SPELLED OUT because Podman, unlike Docker, does not assume
 # Docker Hub for an unqualified name. It consults the short-name aliases and
@@ -34,10 +43,10 @@
 #      https://caddyserver.com/docs/build#xcaddy
 # ==============================================================================
 
-FROM docker.io/library/caddy:2-builder@sha256:198d47eaee306d4d0c38a9960c89ff2c959aa29ad51d3e2dafa3e93ac961782a AS builder
+FROM docker.io/library/caddy:2-builder AS builder
 
 RUN xcaddy build --with github.com/caddy-dns/gandi
 
-FROM docker.io/library/caddy:2@sha256:844f60b64e4724a5aa8245e019dace0d3f199f7433ce6c57676cb30a920dbad9
+FROM docker.io/library/caddy:2
 
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
