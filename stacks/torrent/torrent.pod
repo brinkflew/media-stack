@@ -29,5 +29,29 @@ Description=Torrent pod (VPN namespace shared by gluetun, qBittorrent and JOAL)
 PodName=torrent
 Network=net-download.network
 
+# THE POD MUST SURVIVE ITS MEMBERS RESTARTING, and by default it does not.
+#
+# Quadlet creates the pod with `--exit-policy stop`, which stops the pod as soon
+# as its last container exits. Restarting any member is therefore a trap:
+# systemd stops the dependants first, the last container goes, the exit policy
+# stops the pod, torrent-pod.service sees its infra pid disappear and runs
+# `podman pod rm --force` - and then the member cannot come back, because it is
+# BindsTo=torrent-pod.service and the pod no longer exists. It fails with
+#
+#   gluetun.service: Bound to unit torrent-pod.service, but unit isn't active.
+#
+# leaving gluetun, qBittorrent and JOAL all down. Measured, not theorised: a
+# plain `systemctl --user restart gluetun` did exactly this and took the whole
+# torrent stack out until the pod was started by hand.
+#
+# That matters far more now than it used to. podman auto-update restarts the
+# unit named in each container's PODMAN_SYSTEMD_UNIT, which for a pod member is
+# the MEMBER's unit - so an unattended gluetun update would have hit this at
+# midnight and left downloads dead until someone noticed.
+#
+# `continue` keeps the infra container running when members stop, so the
+# namespace persists and a restarted member rejoins the pod it was already in.
+PodmanArgs=--exit-policy=continue
+
 [Install]
 WantedBy=default.target
