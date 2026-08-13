@@ -22,3 +22,14 @@ Description=Build Caddy with caddy-dns/gandi
 ImageTag=localhost/media-stack/caddy:latest
 File=/var/media-stack/ingress/Dockerfile
 SetWorkingDirectory=/var/media-stack/ingress
+
+# WITHOUT THIS THE WEEKLY REBUILD IS DECORATIVE. podman build's default pull
+# policy is `missing`: once docker.io/library/caddy:2 exists in local storage
+# under that tag, it is reused and upstream is never consulted again. The build
+# would keep succeeding, keep taking four seconds, and keep producing the same
+# binary - so Caddy, alone in this stack, would never update while looking like
+# it did.
+#
+# `newer` makes it check the registry each time and pull only when the tag has
+# actually moved. One manifest request a week.
+Pull=newer
