@@ -47,6 +47,10 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3
+HealthStartupCmd=curl -fsS http://localhost:6767/ || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
 Notify=healthy
 
 [Service]
