@@ -18,10 +18,9 @@ Requires=gluetun.service
 After=gluetun.service
 # PartOf as well as Requires, and the difference is the whole point. Requires=
 # propagates gluetun STOPPING to this unit; it does not propagate a RESTART. So
-# `systemctl restart gluetun` - which is exactly what podman auto-update does
-# when a new gluetun image lands - stopped qBittorrent and never brought it
-# back. PartOf= makes the restart propagate, so the downloaders follow the VPN
-# up as well as down.
+# `systemctl --user restart gluetun` stopped qBittorrent and never brought it
+# back - measured, not theorised. PartOf= makes the restart propagate, so the
+# downloaders follow the VPN up as well as down.
 PartOf=gluetun.service
 
 [Container]

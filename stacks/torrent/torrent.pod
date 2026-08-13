@@ -44,13 +44,16 @@ Network=net-download.network
 # plain `systemctl --user restart gluetun` did exactly this and took the whole
 # torrent stack out until the pod was started by hand.
 #
-# That matters far more now than it used to. podman auto-update restarts the
-# unit named in each container's PODMAN_SYSTEMD_UNIT, which for a pod member is
-# the MEMBER's unit - so an unattended gluetun update would have hit this at
-# midnight and left downloads dead until someone noticed.
-#
 # `continue` keeps the infra container running when members stop, so the
 # namespace persists and a restarted member rejoins the pod it was already in.
+#
+# NOTE this is not the auto-update path, and it is worth being precise about
+# which is which. podman auto-update IS pod-aware: although each member's
+# PODMAN_SYSTEMD_UNIT label names its own unit, `podman auto-update --dry-run`
+# reports all three under torrent-pod.service, and that is what it restarts - a
+# whole-pod restart, which always worked. What was broken is the ordinary
+# operator action: `systemctl --user restart gluetun` to pick up a config
+# change, which is also what any runbook would tell you to do.
 PodmanArgs=--exit-policy=continue
 
 [Install]

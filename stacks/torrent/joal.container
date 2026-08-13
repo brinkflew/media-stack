@@ -18,8 +18,8 @@ Description=JOAL
 Requires=gluetun.service
 After=gluetun.service
 # See qbittorrent.container: Requires= propagates a stop but not a restart, so
-# without this an auto-update of gluetun leaves JOAL down - announcing nothing,
-# with nothing obviously wrong.
+# without this a restart of gluetun leaves JOAL down - announcing nothing, with
+# nothing obviously wrong.
 PartOf=gluetun.service
 
 [Container]
