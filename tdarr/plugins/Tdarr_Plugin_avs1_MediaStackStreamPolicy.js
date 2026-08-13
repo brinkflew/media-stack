@@ -276,8 +276,24 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     return response;
   }
 
+  // STRIP THE SOURCE'S STATISTICS TAGS. mkvmerge writes BPS / NUMBER_OF_BYTES /
+  // DURATION / _STATISTICS_* per track, and ffmpeg carries them across with the
+  // stream - so a 4.5 GB output inherited the 23 GB source's numbers and
+  // Jellyfin displayed them verbatim: "Bitrate 9.0 Mbps", "Opus 3.6 Mbps", and
+  // a video track claiming NUMBER_OF_BYTES=18,987,321,520 inside a 4.5 GB file.
+  // Nothing was actually wrong with the encode; the metadata was lying.
+  //
+  // `-metadata:s KEY=` with no stream specifier clears KEY on every stream.
+  // The flow then runs mkvpropedit on the OUTPUT to recompute them correctly -
+  // which is cheap, because at that point the file is a few GB on the NVMe
+  // cache. Running mkvpropedit on the 23 GB SOURCE off the spindle, as the
+  // community flow did, is the part that was pure waste.
+  const stripStats = ['BPS', 'DURATION', 'NUMBER_OF_FRAMES', 'NUMBER_OF_BYTES',
+    '_STATISTICS_WRITING_APP', '_STATISTICS_WRITING_DATE_UTC', '_STATISTICS_TAGS']
+    .map((tag) => `-metadata:s ${tag}=`).join(' ');
+
   const inputArgs = hevcIsFine ? '' : '-hwaccel cuda -hwaccel_output_format cuda';
-  response.preset = `${inputArgs},${maps.join(' ')} ${out.join(' ')}`
+  response.preset = `${inputArgs},${maps.join(' ')} ${out.join(' ')} ${stripStats}`
     + ' -map_metadata 0 -map_chapters 0 -max_muxing_queue_size 9999';
   response.processFile = true;
   response.infoLog += `Keeping ${keptAudio.length}/${audios.length} audio and `
