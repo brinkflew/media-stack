@@ -34,10 +34,13 @@ things that were learned the hard way and should not be rediscovered.
 
 ## Direction
 
-Migrating to an immutable [uCore](https://github.com/ublue-os/ucore) host running rootless Podman
-quadlets. Ingress, network segmentation and secrets are already done on the current stack,
-deliberately ahead of the reinstall, so that the least recoverable step changes only the OS.
+Runs on an immutable [uCore](https://github.com/ublue-os/ucore) host with rootless Podman quadlets,
+migrated from Fedora 37 and Docker Compose on 2026-08-12.
 
 ---
 
-Currently running on Fedora 37, kernel 6.1 — which is exactly why it is being replaced.
+**Both halves update themselves, on separate tracks.** Containers follow tags and are updated
+nightly by `podman-auto-update`, which restores the previous image if a unit fails to start. The OS
+stages a new deployment nightly and **never reboots on its own** — the machine has no console and no
+BMC, so applying it is a deliberate act. `bin/verify-host.sh` runs hourly and writes the MOTD, which
+is how you learn an update is waiting.

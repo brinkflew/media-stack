@@ -174,6 +174,28 @@ podman ps --filter health=unhealthy           # the one that catches a live-but-
 
 systemctl --user start caddy-build            # after editing ingress/Dockerfile (~75s)
 podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change, no downtime
+
+./bin/verify-host.sh                          # the whole battery; also writes the MOTD
+./bin/verify-host.sh --routes                 # plus the public routes (slow)
+podman auto-update --dry-run                  # 17 rows with a policy, not an empty table
+systemctl --user list-timers                  # verify hourly, auto-update nightly, caddy weekly
+```
+
+**Updates are automatic, in two independent tracks.** Containers: `podman-auto-update.timer`
+nightly, following tags, rolling back on a failed start. Host: `rpm-ostreed-automatic.timer`
+nightly, which **stages and never reboots** — applying it is a deliberate human act, because there
+is no console, no BMC and (yet) no greenboot, so a deployment that boots but breaks sshd is a car
+journey. `bin/verify-host.sh` is what tells you one is waiting, via `/run/motd.d/`.
+
+**The reboot procedure, which is the only genuinely dangerous step:**
+
+```bash
+rpm-ostree status && df -h /boot              # what is staged, and room to apply it
+systemctl --user list-units --failed; podman ps --filter health=unhealthy
+nvidia-smi --query-gpu=utilization.encoder --format=csv   # 0,0 - nothing mid-encode
+sudo ostree admin pin 0                       # pin the BOOTED one - free, it already has its slot
+sudo systemctl reboot                         # on a day you could reach the machine
+./bin/verify-host.sh && sudo ostree admin pin 0 --unpin   # a forgotten pin fills /boot
 ```
 
 **A unit stuck in `activating` is usually a `Restart=always` loop, not slow progress.** Read the
@@ -184,8 +206,13 @@ There is no `docker compose config` equivalent. The nearest linter is generating
 starting anything, which catches syntax errors but **not** unset variables:
 
 ```bash
-/usr/lib/systemd/user-generators/podman-system-generator --dryrun
+/usr/libexec/podman/quadlet -dryrun -user
 ```
+
+**That path, not `/usr/lib/systemd/user-generators/podman-system-generator`** — this podman ships
+the generator as `podman-user-generator` and the standalone binary is the one above. The wrong path
+fails with `No such file or directory`, which reads like the check is unavailable rather than
+misspelled.
 
 Changing a network's subnet or options is not a live edit: a network cannot be modified in place or
 removed while containers are attached, so it takes stopping the stack, `podman network rm`, and
@@ -536,16 +563,66 @@ Conclusions from auditing the running host. Do not rediscover these:
   qBittorrent. This predates the migration; it came in with the restored config. "Localhost" here is
   inside gluetun's namespace, which only gluetun, qBittorrent and JOAL share, so this is not the
   same as exposing the API.
-- **The host is uCore `stable-nvidia`, immutable and rpm-ostree managed.** `/usr` is read-only, so
+- **The host is uCore `stable-nvidia-lts`, immutable and rpm-ostree managed.** `/usr` is read-only, so
   host-level tools go in `~/.local/bin` (which is where `sops` and `age` live). Host configuration
   belongs in `host/butane/ucore.bu` — anything applied only over SSH is undocumented state that the
   next reinstall loses. Ignition runs **once, at first boot**, so editing `ucore.bu` does not change
   the running machine; a change has to be applied by hand *and* committed there.
-- **Zincati is disabled.** Stock FCOS delegates updates to it, and `rpm-ostree` refuses to act while
-  a driver owns them — a manual rebase needs `--bypass-driver`. It also tracked the FCOS stream we
-  rebased away from. uCore brings its own update mechanism.
-- **Images are unpinned.** Everything is `:latest` (Prowlarr is `:develop`), so there is no
-  reproducibility and no way to roll back a bad image. Pinning is part of the quadlets migration.
+- **`-lts` is the NVIDIA DRIVER branch, not an LTS kernel**, and this is easy to get backwards.
+  Both deployments run the identical kernel (`7.1.4-200.fc44`); the rebase moved the driver
+  **610.57.04 → 580.173.02**, NVIDIA's production branch, as deliberate conservatism rather than in
+  response to a fault. `rpm-ostree db diff` is what proves it. Anyone "fixing the documentation" by
+  reverting the tag to `stable-nvidia` would silently reinstall 610.
+- **Zincati and `bootc-fetch-apply-updates.timer` are MASKED, not merely disabled.** Three updaters
+  are installed and exactly one may be armed — two would each write a deployment into a `/boot` that
+  holds two kernels, and the loser fails overnight with nobody watching. Masking matters because
+  `disable` only removes the `.wants` symlink and a `Wants=` elsewhere silently re-enables it, the
+  same trap that had `media-stack-promote` starting Tdarr every 10 minutes. Masking zincati also
+  removes `--bypass-driver` from the migration.
+- **`AutomaticUpdatePolicy=stage` is uCore's own default, not something anyone set** — `/etc/rpm-ostreed.conf`
+  is byte-identical to `/usr/etc/`. It is restated in `ucore.bu` anyway so the policy is a decision
+  in this repo rather than an inherited default that can change underneath it. The only deliberate
+  act was enabling `rpm-ostreed-automatic.timer`, whose preset is `disabled`.
+- **The OS image ref is `ostree-image-signed:docker://`.** `/etc/containers/policy.json` ships from
+  the image with a `sigstoreSigned` scope for `ghcr.io/ublue-os` and both cosign keys in
+  `/etc/pki/containers/`, so this needed no file changes — only a rebase. Do **not** ship your own
+  policy or key through Ignition: it becomes a permanent `/etc` override that ostree preserves, so a
+  ublue key rotation would pin you to a dead key and every update would fail silently. Note the
+  `docker` transport has a `""` → `insecureAcceptAnything` catch-all, which is why ordinary
+  container pulls work unverified; a typo'd scope would fall through to it and verification would
+  silently pass. `podman image trust show` prints the scope that actually matches.
+- **Images follow tags and `podman-auto-update` runs nightly** (since 2026-08-13). Digest pinning was
+  dropped because nothing maintained it — thirteen of eighteen images were three months old. See
+  `stacks/README.md` for the tag choices, which are the remaining risk control. Two things about it
+  are load-bearing and non-obvious:
+  - **`Notify=healthy` is what makes the rollback fire.** auto-update restores the previous image
+    only if the unit fails to **start**, and systemd otherwise calls a container started the moment
+    it runs — so a broken-but-running image passes and nothing is restored. Proven by pointing a
+    test unit at a deliberately broken image and watching the journal restore the old one.
+  - **auto-update does not trigger a `.build` unit.** Caddy is `AutoUpdate=local`, which notices a
+    new image without producing one, and a `.build` unit only runs when its image is absent — so
+    without `media-stack-caddy-build.timer` Caddy alone would never update. That unit also needs
+    `Pull=newer` in `caddy.build`, because podman build's default pull policy is `missing` and it
+    would otherwise reuse a stale local `caddy:2` for ever while succeeding in four seconds.
+- **The nightly prune does not eat the rollback.** The shipped `podman-auto-update.service` runs
+  `podman image prune -f` afterwards, but a superseded image keeps its repository digest and is
+  therefore not *dangling* — verified: every pre-update image survived. Only `prune -a` would remove
+  them, so **never run that**; the previous image in local storage is the only rollback there is.
+- **uCore ships NVIDIA's own `nvidia-cdi-refresh.{path,service}`**, writing `/run/cdi/nvidia.yaml` on
+  tmpfs, with the `.path` unit watching `modules.dep` and `nvidia-ctk` so a driver change regenerates
+  the spec with no reboot. `ucore.bu` used to define a second unit writing `/etc/cdi/nvidia.yaml`.
+  The files were byte-identical, which is exactly why it was invisible — but a spec names the driver
+  version in dozens of paths, so the first driver-changing update would have left two files defining
+  `nvidia.com/gpu=1` with different library paths, which the resolver **rejects rather than merges**.
+  Both Jellyfin and tdarr-node-01 consume that device. Removed 2026-08-13; `bin/verify-host.sh`
+  asserts exactly one spec exists and that it names the running driver.
+- **`/boot` costs one slot per DISTINCT KERNEL, not per deployment**, and holds exactly two. Both
+  current deployments share one 146 MB slot because they ship the same kernel; two slots plus GRUB is
+  303 MB of 350 MB. Two rules follow: never hold three distinct kernels, and **pin only the booted
+  deployment** — that is free, since it already occupies the slot you are running from, whereas
+  pinning an older one with a different kernel costs a full slot and leaves ~25 MB. A forgotten pin
+  is the failure mode. **`/boot` cannot be grown**: `nvme0n1p4` is XFS, which cannot be shrunk by any
+  tool, so enlarging it means repartitioning the disk that carries `config/`.
 - **`/mnt/media` is a single disk with no redundancy**, holding only re-downloadable media. It is
   treated as disposable and is deliberately not backed up. `config/` is the part that matters.
 - **Transcode scratch must stay off the media disk.** `DOCKER_VOLUME_CACHE` points at the SSD
@@ -661,10 +738,10 @@ Conclusions from auditing the running host. Do not rediscover these:
 
 ## Target architecture
 
-**Steps 1 and 2 are done.** The host is uCore `stable-nvidia` and every service is a rootless Podman
-quadlet: `network_mode: service:gluetun` became a Podman pod, `runtime: nvidia` became CDI device
-refs, and every bind mount carries `:z`/`:Z` except `/mnt/media`, which is labelled once at mount
-time by `context=` instead of relabelling 7.3 TB per container start.
+**Steps 1 and 2 are done.** The host is uCore `stable-nvidia-lts` and every service is a rootless
+Podman quadlet: `network_mode: service:gluetun` became a Podman pod, `runtime: nvidia` became CDI
+device refs, and every bind mount carries `:z`/`:Z` except `/mnt/media`, which is labelled once at
+mount time by `context=` instead of relabelling 7.3 TB per container start.
 
 Doing ingress, segmentation and secrets on the Compose stack first was the right call, but not for
 the reason given at the time. The claim was that their configuration would "carry over unchanged".
@@ -680,13 +757,29 @@ was the actual gap, since the alternative was an off-site backup nobody could de
 
 Remaining, in order:
 
+**Step 5 is done, and it replaced the pinning rather than building on it.** The old wording here
+claimed digest pinning was auto-update's *prerequisite*; that was backwards. `AutoUpdate=registry`
+resolves a tag, so a digest makes it a no-op — the two are alternatives, and the pinning was
+abandoned because nothing maintained it. See `stacks/README.md`.
+
+Remaining, in order:
+
 4. **Monitoring**, so a failed unit surfaces without someone running `systemctl --user --failed`.
-   Two prerequisites are now in place and both were load-bearing: journal priorities mean something
-   (Caddy and Tinyauth were emitting ~1950 false errors a day), and 16 of 18 containers report real
-   health. `duckdns` and `unpackerr` never will — neither serves HTTP — so a check that assumes
-   every container has a health status will report them broken for ever.
-5. **`podman-auto-update`** — the units are digest-pinned, which is the prerequisite; auto-update is
-   the thing that makes pinning maintainable rather than a slow drift into staleness.
+   `bin/verify-host.sh` and its MOTD are the first half and cover the specific things automatic
+   updates put at risk — a staged deployment nobody applies, an update run that silently stopped, a
+   CDI spec that no longer matches the driver. What is still missing is anything that reaches a
+   human who is not logged in. Two prerequisites remain load-bearing: journal priorities mean
+   something (Caddy and Tinyauth were emitting ~1950 false errors a day), and 16 of 18 containers
+   report real health. `duckdns` and `unpackerr` never will — neither serves HTTP — so a check that
+   assumes every container has a health status will report them broken for ever.
+6. **greenboot, and only then an unattended reboot window.** Today nothing detects a bad boot:
+   greenboot is not installed, so there is no automatic rollback, and with no console and no BMC a
+   deployment that boots but breaks sshd needs a physical visit. That is the whole reason the reboot
+   is attended. `bin/verify-host.sh --greenboot` already exists as the health check — host-level
+   assertions only, never the 18 containers, because a slow Tdarr start must not be able to roll a
+   good deployment back. **Treat it as a gate**: package layering on an immutable host is what
+   `nv-patch.sh` was deleted for, and greenboot's GRUB boot-counting is unverified on FCOS+uCore. If
+   it does not layer cleanly, reboots stay attended rather than becoming unguarded.
 
 **The applications keep their own logins.** Segmentation narrowed who can reach them; it did not
 reduce `net-arr` to a single caller, so `AuthenticationMethod=External` would still trust five
@@ -695,5 +788,6 @@ that their *"Disabled for Local Addresses"* option is never the right tool here:
 other container are RFC1918 addresses, so it disables authentication for precisely the attacker
 path.
 
-Until step 1 lands, work on the Compose stack as it exists — but avoid adding anything that will
-be expensive to unwind, especially new `docker.sock` mounts or host-level package dependencies.
+**Avoid host-level package dependencies.** `/usr` is read-only and every layered package makes the
+next rebase slower and able to fail on dependency solving — which is why `nv-patch.sh` was deleted,
+and the reason greenboot is a gate rather than a given.

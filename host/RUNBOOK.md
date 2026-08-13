@@ -285,23 +285,47 @@ The host key has changed:
 ssh-keygen -R 192.168.0.100 && ssh-keygen -R home.avanserv.com
 ```
 
-**Turn Zincati off before rebasing, and pass `--bypass-driver`.** Stock FCOS delegates all updates
-to Zincati, and `rpm-ostree` refuses to act while a driver owns them:
+**Ignition masks Zincati, so `--bypass-driver` is no longer needed.** Stock FCOS delegates all
+updates to Zincati, and `rpm-ostree` refuses to act while a driver owns them:
 
 ```
 error: Updates and deployments are driven by Zincati (zincati.service)
 ```
 
 Zincati also tracks the *FCOS* stream, so leaving it enabled points an auto-updater at the image you
-are deliberately rebasing away from. uCore brings its own update mechanism.
+are deliberately rebasing away from. `host/butane/ucore.bu` masks it and
+`bootc-fetch-apply-updates.timer`, leaving `rpm-ostreed-automatic.timer` as the only armed updater —
+three are installed and exactly one may be, or they race for the two kernel slots in `/boot`.
+
+**This takes TWO rebases, and the order is not optional.** The first cannot be signature-verified:
+stock FCOS's `/etc/containers/policy.json` has no `ghcr.io/ublue-os` scope — that arrives with
+uCore's own `/usr/etc`, and `/etc` is only merged when the new deployment is created. So the policy
+in force during the first pull is FCOS's, whose `docker` catch-all is `insecureAcceptAnything`.
+Shipping the ublue key through Ignition to close that one-time gap would be worse: it becomes a
+permanent `/etc` override that ostree preserves for ever, so a key rotation would pin you to a dead
+key and every update afterwards would fail silently.
 
 ```bash
-ssh core@192.168.0.100 'sudo systemctl disable --now zincati.service'
+# 1. unverified, because there is not yet a policy to verify against
 ssh core@192.168.0.100 'sudo systemd-run --unit=ucore-rebase --collect \
-  rpm-ostree rebase --bypass-driver ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia'
+  rpm-ostree rebase ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia-lts'
 ssh core@192.168.0.100 'journalctl -u ucore-rebase -f'     # ~1.3 GB to pull
 ssh core@192.168.0.100 'sudo systemctl reboot'
+
+# 2. uCore's policy.json and cosign keys are now in place - rebase again, signed
+ssh core@192.168.0.100 'sudo podman image trust show | grep ublue'   # sigstoreSigned, NOT the catch-all
+ssh core@192.168.0.100 'sudo systemd-run --unit=ucore-signed --collect \
+  rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/ucore:stable-nvidia-lts'
+ssh core@192.168.0.100 'sudo systemctl reboot'
 ```
+
+**`-lts` is the NVIDIA driver branch, not an LTS kernel** — the 580 production branch rather than
+610, with an identical kernel either way. Do not "correct" it to `stable-nvidia`.
+
+A bad signature is the safe failure: the rebase exits non-zero and **creates no deployment**, so
+there is nothing to undo. The dangerous one is the opposite — a typo'd scope falls through to the
+`docker` catch-all and verification silently passes, which is what the `image trust show` line
+above is for.
 
 `systemd-run` rather than a foreground command for the same reason the disk image used it: it
 outlives the SSH session, so a dropped laptop does not abort a multi-gigabyte pull.
@@ -429,51 +453,140 @@ systemctl --user list-units 'net-*' --no-legend  # seven networks, all active
 
 ## Verify
 
-Run the same battery this stack was signed off with. Anything less and you are guessing.
+Most of this battery is now `bin/verify-host.sh`, which is also what runs hourly and writes the
+MOTD. Run it first; it covers the address, the mount and its SELinux label, CDI and the driver
+match, firewalld, lingering, the `io` delegation, and every unit and container.
 
 ```bash
-# the address held, which is what the router's port forward depends on.
-# check this FIRST - if it moved, fix it before you lose the session you are in.
-ip -4 -o addr show | grep 192.168.0.100
-nmcli -f GENERAL.STATE,IP4.ADDRESS connection show lan
+/var/media-stack/bin/verify-host.sh --routes     # --routes adds the public route walk
+```
 
-# the media disk mounted with the right SELinux label - not just mounted
-findmnt /mnt/media -o SOURCE,FSTYPE,OPTIONS      # xfs, context=...container_file_t
-ls /mnt/media/library | head
+What it deliberately does **not** cover, and you should still do by hand:
 
-# GPUs visible through CDI
-nvidia-ctk cdi list | head
-podman exec tdarr-node-01 nvidia-smi -L          # GPU 1 only - GPU 0 is Jellyfin's alone
-
+```bash
 # segmentation, both directions - the forbidden ones are the point
 podman exec flaresolverr getent hosts sonarr  || echo "flaresolverr -> sonarr: blocked"
 podman exec jellyfin     getent hosts radarr  || echo "jellyfin -> radarr: blocked"
 podman exec prowlarr     getent hosts flaresolverr && echo "prowlarr -> solver: ok"
 podman exec sonarr       getent hosts gluetun     && echo "sonarr -> torrent: ok"
 
-# routes: admin 302, watch 302, request 307, auth/id 200
-for h in watch request id auth sonarr radarr prowlarr tdarr torrent fakerr; do
-  printf '%-9s %s\n' $h "$(curl -s -o /dev/null -w '%{http_code}' https://$h.avanserv.com/)"
-done
-
 # the VPN still is a VPN
 podman exec gluetun wget -qO- https://ipinfo.io/json    # NOT the home IP
 
 # the applications agree
-#   Sonarr/Radarr/Prowlarr: download client test passes
+#   Sonarr/Radarr/Prowlarr: download client test passes, host is "torrent"
 #   Prowlarr: FlareSolverr and both app syncs pass
-#   both Tdarr nodes registered
+#   Tdarr node registered with the server
 ```
 
 Then, in a browser: a passkey login, and Jellyfin playing something that transcodes.
+
+<details>
+<summary>The original hand-run battery, for reference</summary>
+
+```bash
+ip -4 -o addr show | grep 192.168.0.100
+nmcli -f GENERAL.STATE,IP4.ADDRESS connection show lan
+findmnt /mnt/media -o SOURCE,FSTYPE,OPTIONS      # xfs, context=...container_file_t
+nvidia-ctk cdi list | head
+podman exec tdarr-node-01 nvidia-smi -L          # one GPU, ordinal 0 inside the container
+# routes: admin 302, watch 302, request 307, auth/id 200
+for h in watch request id auth sonarr radarr prowlarr tdarr torrent fakerr; do
+  printf '%-9s %s\n' $h "$(curl -s -o /dev/null -w '%{http_code}' https://$h.avanserv.com/)"
+done
+```
+
+</details>
+
+---
+
+## Updating
+
+**Two independent tracks, and only one of them ever needs you.**
+
+Containers update themselves nightly via `podman-auto-update.timer`: it pulls each tracked tag,
+restarts the unit, and — because every service with a healthcheck carries `Notify=healthy` —
+restores the previous image if the unit fails to reach healthy. Caddy is rebuilt weekly by
+`media-stack-caddy-build.timer` instead, since it is built here rather than pulled. Nothing to do.
+
+The OS stages a deployment nightly and **never applies it**. That is the whole policy: this machine
+has no console and no BMC, so a deployment that does not boot, or that boots without sshd, is a car
+journey. Until greenboot is in place there is no automatic rollback either.
+
+**The reboot procedure. Do it on a day you could physically reach the machine.**
+
+```bash
+ssh home.local
+/var/media-stack/bin/verify-host.sh            # what is staged, and is everything healthy now
+df -h /boot                                    # >160M free
+nvidia-smi --query-gpu=utilization.encoder --format=csv,noheader   # 0% - nothing mid-encode
+
+sudo ostree admin pin 0                        # pin the BOOTED deployment - see below
+sudo systemctl reboot
+
+until ssh -o ConnectTimeout=5 home.local true 2>/dev/null; do sleep 5; done
+/var/media-stack/bin/verify-host.sh            # must pass before you walk away
+sudo ostree admin pin 0 --unpin                # a forgotten pin is a /boot bomb
+```
+
+**Pinning the booted deployment is free; pinning an older one is not.** `/boot` costs one slot per
+*distinct kernel*, not per deployment, and holds exactly two — the booted deployment already
+occupies the slot it runs from, so pinning it consumes nothing. Pinning an older deployment with a
+different kernel costs a full 146 MB slot and leaves ~25 MB, at which point the next staged update
+has nowhere to write. `/boot` cannot be grown: `nvme0n1p4` is XFS, which cannot be shrunk.
+
+**An OS update changes the NVIDIA driver**, which ships inside the uCore image. The CDI spec names
+that version in dozens of paths, so `verify-host.sh` asserts the spec matches the running driver —
+that check is the reason it exists. uCore's `nvidia-cdi-refresh.path` regenerates it automatically;
+there is deliberately no second spec in `/etc/cdi`.
+
+**If nothing has staged for a fortnight, something is wrong** and it looks identical to a quiet
+upstream. `verify-host.sh` asserts the last run's exit status and age for exactly that reason — a
+ublue signing-key rotation, or a full `/boot`, would otherwise stop every update in silence.
 
 ---
 
 ## Rollback
 
-Putting the old system back means writing to `nvme0n1`, so it has to be done from something that is
-not running off it — the live environment. **Get there first**, which is the same `kexec` as before
-if the installed system still boots:
+There are two kinds, and they are wildly different in cost. Try the first.
+
+### A bad deployment — seconds, and the everyday case
+
+rpm-ostree keeps the previous deployment. Nothing here touches the disk image or `config/`.
+
+```bash
+rpm-ostree status                  # index 0 is booted, index 1 is where you are going
+sudo rpm-ostree rollback --reboot  # swaps the default and reboots
+
+# afterwards, the one you left is index 1 again - so this undoes the undo
+sudo rpm-ostree rollback --reboot
+```
+
+Keep a known-good deployment past the two rpm-ostree retains with `sudo ostree admin pin 0` — see
+the `/boot` caveat under **Updating**, and unpin once you are satisfied.
+
+If a stage ever fails for space:
+
+```bash
+sudo rpm-ostree cleanup -bpr       # base, pending and rollback
+sudo rpm-ostree upgrade
+```
+
+**A container rollback is separate and does not need a reboot at all.** The previous image is still
+in local storage — the nightly `podman image prune -f` removes only *dangling* images, and a
+superseded image keeps its repository digest:
+
+```bash
+podman images                                          # find the previous image ID
+podman tag <old-id> lscr.io/linuxserver/sonarr:latest
+systemctl --user restart sonarr
+```
+
+### Putting the pre-migration system back — the disk image
+
+Writing to `nvme0n1` has to be done from something that is not running off it — the live
+environment. **Get there first**, which is the same `kexec` as before if the installed system still
+boots:
 
 ```bash
 ./bin/remote-kexec.sh                                            # if uCore still boots

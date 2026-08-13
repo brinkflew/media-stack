@@ -166,18 +166,26 @@ cat <<EOF
   Its SSH host key has changed:
       ssh-keygen -R $TARGET_IP && ssh-keygen -R home.avanserv.com
 
-  Then, still Fedora CoreOS rather than uCore - the rebase is next. Zincati owns
-  updates on stock FCOS and rpm-ostree refuses to act while it does, so turn it
-  off first and pass --bypass-driver:
-      ssh core@$TARGET_IP 'sudo systemctl disable --now zincati.service'
+  Then, still Fedora CoreOS rather than uCore - the rebase is next. Ignition has
+  already masked zincati, so --bypass-driver is not needed. It takes TWO
+  rebases: the first cannot be signature-verified, because stock FCOS has no
+  ghcr.io/ublue-os scope in its policy.json - that arrives with uCore itself.
       ssh core@$TARGET_IP 'sudo systemd-run --unit=ucore-rebase --collect \\
-        rpm-ostree rebase --bypass-driver \\
-        ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia'
+        rpm-ostree rebase \\
+        ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia-lts'
       ssh core@$TARGET_IP 'journalctl -u ucore-rebase -f'   # ~1.3 GB
       ssh core@$TARGET_IP 'sudo systemctl reboot'
 
-  nvidia-cdi.service FAILS on this first boot and that is expected - plain FCOS
-  has no nvidia-ctk. It succeeds after the rebase. Do not chase it.
+  Then again, signed, now that uCore's policy and cosign keys are in place:
+      ssh core@$TARGET_IP 'sudo systemd-run --unit=ucore-signed --collect \\
+        rpm-ostree rebase \\
+        ostree-image-signed:docker://ghcr.io/ublue-os/ucore:stable-nvidia-lts'
+      ssh core@$TARGET_IP 'sudo systemctl reboot'
+
+  -lts is the NVIDIA DRIVER branch, not an LTS kernel. Do not "correct" it.
+
+  There is no nvidia-cdi.service any more - uCore ships NVIDIA's own
+  nvidia-cdi-refresh.path, which regenerates /run/cdi on a driver change.
 
   Then continue at host/RUNBOOK.md, "Restore" - starting with the age key,
   without which nothing else works.

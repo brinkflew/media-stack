@@ -36,6 +36,25 @@ runtimes until Compose is deleted.
 member containers declare `Pod=torrent.pod` and no network of their own. Giving one its own
 `Network=` would put it outside the VPN.
 
+**The pod is created with `--exit-policy=continue`, and it must be.** Quadlet's default is `stop`,
+which stops the pod as soon as its last container exits — so restarting any member was a trap:
+systemd stops the dependants first, gluetun goes last, the exit policy stops the pod,
+`torrent-pod.service` sees its infra pid vanish and runs `podman pod rm --force`, and the member
+cannot come back because it is `BindsTo=torrent-pod.service`:
+
+```
+gluetun.service: Bound to unit torrent-pod.service, but unit isn't active.
+```
+
+Measured, not theorised: a plain `systemctl --user restart gluetun` took the whole torrent stack
+down and left it there. `podman auto-update` is *not* affected — it is pod-aware and restarts
+`torrent-pod.service` — but the ordinary operator action any runbook would tell you to do was
+broken.
+
+**qBittorrent and JOAL carry `PartOf=gluetun.service` as well as `Requires=`.** `Requires=`
+propagates a stop but *not* a restart, so even with the pod intact they stayed down while gluetun
+came back up.
+
 **Health-gated start, which Compose did with `depends_on: condition: service_healthy`.** gluetun
 sets `Notify=healthy`, so systemd does not consider it started until its healthcheck passes;
 qBittorrent and JOAL then `Requires=`/`After=` it. This matters more here than under Compose: pod
@@ -43,10 +62,57 @@ members share the infra container's network namespace, which has a working defau
 through the bridge *before* gluetun builds the tunnel and the killswitch. Starting a downloader
 into that window would leak traffic around the VPN.
 
-**Images are pinned by digest**, taken from what was actually running and verified — not from
-whatever `:latest` resolved to that day. That makes a rollback a `git revert`. Updating is
-deliberate: change the digest, commit, restart. `podman-auto-update` is *not* enabled, because it
-follows tags and would quietly undo the pinning.
+**Images follow tags, and `podman-auto-update` runs nightly.** They were digest-pinned, and the
+pinning was abandoned on 2026-08-13 because nothing maintained it: thirteen of eighteen images were
+three months old and gluetun's tag had moved twice. A pin with no update path is worse than a tag —
+the same staleness, plus the appearance of deliberateness. What was given up is reproducibility and
+`git revert` as the rollback; what was gained is security patches arriving without anyone acting.
+
+**Where upstream publishes a major-version tag, it is used.** That is the only remaining control
+over what lands unattended, and it costs nothing in currency. Three were checked rather than assumed
+and all three were wrong at first guess:
+
+| Unit | Tag | Why not `:latest` |
+|---|---|---|
+| `qbittorrent` | `:libtorrentv1` | `:latest` is a libtorrent **2.0** build; the pin was 1.2. libtorrent 2.0 memory-maps torrent data, and this host's media disk loses 45% of its throughput to a second concurrent reader. |
+| `pocket-id` | `:v2` | `:v1` is the 1.x line — it would have **downgraded** the service that gates sign-on. |
+| `tinyauth` | `:v5` | `:v3` does not exist; v5.1.3 is what runs. |
+| `gluetun` | `:v3` | It is the kill-switch. A v4 overnight is not worth it. |
+| `prowlarr` | `:develop` | Where it was before pinning. Moving it to the release branch would be a downgrade. |
+
+**`Notify=healthy` is what makes the rollback real, and without it the rollback is decorative.**
+`podman auto-update` restores the previous image only if the unit fails to **start**, and by default
+systemd calls a container started the moment it is running — so an image that comes up and is broken
+passes. Every service with a `HealthCmd=` therefore carries `Notify=healthy`, which binds the unit's
+start to its healthcheck. **Proven, not assumed**: a test unit was pointed at a deliberately broken
+image, `podman auto-update` was run, and the journal shows the failed start followed by the previous
+image being pulled back and started.
+
+**Each also carries a `HealthStartupCmd=` at a 5s interval**, and that is not cosmetic. With only
+the 60s `HealthInterval` the first probe does not run until t=60s, so every unit took ~65s to start —
+about 15 minutes across a full sequential update run. The startup check brought the same restart to
+20s. The 60s steady-state interval is untouched, because that is what keeps podman's ~1.5 KB
+`health_status` events out of the journal.
+
+**`duckdns` and `unpackerr` define no healthcheck**, so they get no rollback beyond "did it crash
+immediately". That is accepted, not overlooked.
+
+**Caddy is built here, so it takes `AutoUpdate=local`** — and `local` policy notices a new image
+without ever *producing* one, while a `.build` unit only runs when its image is absent. Left alone,
+the one built image would have been the only thing in the stack that never updated.
+`media-stack-caddy-build.timer` rebuilds it weekly, and `caddy.build` carries `Pull=newer` because
+podman build's default pull policy is `missing` — it would otherwise reuse a stale local `caddy:2`
+for ever while succeeding in four seconds.
+
+**Old images survive the nightly prune.** The shipped `podman-auto-update.service` runs
+`podman image prune -f` afterwards, but a superseded image keeps its repository digest and so is not
+*dangling*; only `prune -a` would remove it. So the manual rollback below keeps working:
+
+```bash
+podman images                                          # find the previous image ID
+podman tag <old-id> lscr.io/linuxserver/sonarr:latest
+systemctl --user restart sonarr
+```
 
 **SELinux labels, which the Compose file has none of** because the current host does not enforce.
 Per-service config directories get `:Z` (private relabel). Shared directories get `:z`. The media

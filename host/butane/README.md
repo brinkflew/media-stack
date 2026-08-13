@@ -26,8 +26,14 @@ and each fails in a way that does not obviously point at its cause:
 | `context=` on the `/mnt/media` mount | either SELinux denies every media read, or a `:z` relabels 8 TB |
 | `linger` for the service user | every container stops at logout and does not start at boot |
 
-`ucore.bu` is written but **not yet applied** — it describes the machine the migration will create,
-not the one running today.
+**`ucore.bu` was applied on 2026-08-12, and Ignition runs only once.** So it now describes the
+machine as first created, not necessarily as it stands: editing it changes nothing on the running
+host. Anything added here must also be applied by hand, and anything applied by hand must be added
+here, or the next reinstall loses it.
+
+The applied config predates two of the units below — `firewall-stack-ports.service` and
+`selinux-container-devices.service` were created by hand on 2026-08-13 to close that gap, along with
+`/etc/rpm-ostreed.conf` and the updater masks.
 
 ## `live.bu`
 
