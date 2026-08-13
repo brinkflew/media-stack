@@ -384,6 +384,46 @@ decision, not a technical one. `v_cq=18` was the old value and is near-lossless.
 *whole* file to flush them, so a 60-second test of a 22 GB film took 131 s instead of 9 s. Production
 encodes the whole file anyway and pays nothing. Measure video-only, or measure the real thing.
 
+## The Radarr [VO] profile encodes one rule: VO now, French when it appears
+
+Profile 9 `[VO]` is the only Radarr profile that scores custom formats, and every film is on it.
+The scoring says: **a VO-only release is acceptable, but keep looking until one carries French too,
+then stop.**
+
+| Setting | Value | Why |
+|---|---|---|
+| `minFormatScore` | 30 | A VO-only release scores ~50, so it is grabbable. |
+| `Lang: Original + French` | **500** | Dominates every other format, so a French-carrying release always outranks a VO-only one. |
+| `cutoffFormatScore` | **500** | Satisfied *only* by French. Reaching it is what makes Radarr stop searching. |
+| `Rejected: 3D` | **−10000** | `3D`/`SBS`/`OU` in the release title. |
+
+It was `cutoffFormatScore: 300`, which required `Global: Best` — AV1 **and** surround **and**
+Original **and** French. That is effectively unobtainable, so nothing ever satisfied the cutoff and
+every monitored film would have been searched for upgrades for ever.
+
+**Radarr scores an existing FILE from its stored `sceneName`, not the renamed filename.** That is
+what makes this work: the eight Harry Potter films are renamed to `Title (Year).mkv` with no
+language markers, yet they score **820** because Radarr still holds
+`...MULTI.1080p.BluRay.REMUX...`. They are at cutoff and inert. The Hobbit files score 50, and
+*Battle of the Five Armies* scores **−9150** because the 3D penalty applies to existing files too —
+which is exactly what let a 7.7 GB 2D release replace a 38.3 GB 3D one that Radarr had recorded as
+`Bluray-2160p` (it is 3840x1080 side-by-side, so it looks like 4K by width).
+
+**Check `/api/v3/moviefile`, not `/api/v3/movie`.** The movie list endpoint returns the nested
+`movieFile` *without* `customFormatScore`, so every film reads `None` and looks below cutoff.
+
+## Downloads are hardlinked, so the "source" usually still exists
+
+`copyUsingHardlinks: true` means `library/queued/…` and `downloads/…` are the **same inode**
+(`stat` shows `links=2`). Two consequences worth knowing before reaching for a re-download:
+
+- The 130 GB in `queued/` costs nothing on top of `downloads/`, and Tdarr deleting the queued path
+  leaves the torrent seeding untouched.
+- **A film the pipeline damaged can usually be restored locally.** Five films lost their French dub
+  to the old flow and had their queued copies deleted — but the original `MULTI` remuxes were still
+  seeding, so `os.link()` put them back for 0 bytes and no bandwidth. **Look in `downloads/` before
+  re-downloading anything.**
+
 ## Ingress and access control
 
 **`caddy` is the single TLS terminator**, built from `ingress/Dockerfile` because the official
