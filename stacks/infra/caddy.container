@@ -67,6 +67,15 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=30s
 HealthRetries=3
+# See sonarr.container. Note what this check does and does not prove: the admin
+# API on 2019 answering means the config parsed and loaded, NOT that Caddy can
+# still issue certificates. After a Caddy update, read `journalctl --user -u
+# caddy` for ACME errors rather than trusting a green healthcheck.
+HealthStartupCmd=curl -fsS http://localhost:2019/config/ || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env

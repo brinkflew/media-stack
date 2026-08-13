@@ -54,11 +54,20 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=30s
 HealthRetries=3
+# See sonarr.container. Tinyauth is ordered after this one, and Caddy after
+# that, so this unit's start time is the head of the sign-on chain at boot.
+HealthStartupCmd=curl -fsS http://localhost:1411/healthz || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always
 RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.

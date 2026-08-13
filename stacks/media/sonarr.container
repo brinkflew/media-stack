@@ -42,11 +42,32 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=60s
 HealthRetries=3
+# The startup check is what makes Notify=healthy cheap. Measured on Bazarr: with
+# only the 60s HealthInterval the first check does not run until t=60s, so every
+# unit took ~65s to start. A 5s startup check that stops at the first success
+# brought that to 20s - the service's real readiness - while leaving the 60s
+# steady-state interval alone, which is what keeps podman's per-check
+# health_status events out of the journal.
+HealthStartupCmd=curl -fsS http://localhost:8989/ping || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+# WITHOUT THIS THE ROLLBACK IS DECORATIVE. podman auto-update rolls back only if
+# the unit fails to START, and by default systemd calls a container started the
+# moment it is running - so an image that comes up and is broken passes, and the
+# old one is never restored. Notify=healthy makes the unit's start depend on the
+# healthcheck, which is what turns the rollback into a real one.
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always
 RestartSec=5
+# Notify=healthy makes the unit's start block on the healthcheck, and the
+# startup check can run for HealthStartupRetries x HealthStartupInterval = 300s.
+# systemd's default start timeout is 90s, which would kill a slow but perfectly
+# healthy service - so this has to clear 300s with room to spare.
+TimeoutStartSec=360
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.

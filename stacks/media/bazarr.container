@@ -47,6 +47,7 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3
+# See sonarr.container: this is the unit the 65s -> 20s figure was measured on.
 HealthStartupCmd=curl -fsS http://localhost:6767/ || exit 1
 HealthStartupInterval=5s
 HealthStartupRetries=60
@@ -59,6 +60,8 @@ EnvironmentFile=/var/media-stack/.env
 ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/bazarr
 Restart=always
 RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
 
 # A ceiling, not a tuning knob. Bazarr's subtitle sync can spike, so it gets a
 # little more headroom than the *arr apps.

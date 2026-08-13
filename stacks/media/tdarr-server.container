@@ -53,6 +53,12 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3
+# See sonarr.container.
+HealthStartupCmd=curl -fsS http://localhost:8266/api/v2/status || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
@@ -72,6 +78,8 @@ ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/server ${DOCKER_VOL
 ExecStartPre=/usr/bin/cp -a /var/media-stack/tdarr/plugins/. ${DOCKER_VOLUME_CONFIG}/tdarr/server/Tdarr/Plugins/Local/
 Restart=always
 RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
 
 # ------------------------------------------------------------------------------
 # Resource limits - added after this unit took the whole host down

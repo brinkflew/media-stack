@@ -98,6 +98,11 @@ HealthInterval=5s
 HealthTimeout=5s
 HealthStartPeriod=30s
 HealthRetries=1
+# NO HealthStartupCmd here, deliberately - do not "fix" the inconsistency with
+# the other units. A startup check exists to stop Notify=healthy waiting a full
+# HealthInterval before the first probe; this interval is already 5s, because
+# gluetun is the kill-switch and a dead tunnel must be noticed immediately. It
+# has nothing to gain.
 Notify=healthy
 
 [Service]

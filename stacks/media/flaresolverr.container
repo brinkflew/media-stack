@@ -45,11 +45,20 @@ HealthInterval=60s
 HealthTimeout=10s
 HealthStartPeriod=60s
 HealthRetries=3
+# See sonarr.container. This is the image updated most eagerly, so it is also
+# the one whose rollback gets exercised most.
+HealthStartupCmd=curl -fsS http://localhost:8191/health || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always
 RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.

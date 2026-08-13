@@ -59,11 +59,20 @@ HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3
+# See sonarr.container. Jellyfin is the slowest of the *arr-shaped starts, which
+# is exactly why the startup check earns its place here.
+HealthStartupCmd=curl -fsS http://localhost:8096/health || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always
 RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.

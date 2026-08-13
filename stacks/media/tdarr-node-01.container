@@ -75,6 +75,14 @@ HealthInterval=120s
 HealthTimeout=5s
 HealthStartPeriod=90s
 HealthRetries=3
+# See sonarr.container. The 120s steady-state interval is deliberate - this node
+# emits the largest health_status events - so without a startup check
+# Notify=healthy would cost two full minutes on every restart.
+HealthStartupCmd=pgrep -f Tdarr_Node >/dev/null || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
@@ -88,6 +96,8 @@ EnvironmentFile=/var/media-stack/.env
 ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/configs ${DOCKER_VOLUME_CONFIG}/tdarr/logs ${DOCKER_VOLUME_CACHE}/tdarr
 Restart=always
 RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
 
 # ------------------------------------------------------------------------------
 # Resource limits - see tdarr-server.container for the incident that prompted them

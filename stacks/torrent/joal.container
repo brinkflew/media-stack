@@ -49,11 +49,19 @@ HealthInterval=60s
 HealthTimeout=10s
 HealthStartPeriod=60s
 HealthRetries=3
+# See sonarr.container.
+HealthStartupCmd=curl -s -o /dev/null --max-time 5 http://localhost:${PORT_JOAL_WEB}/ || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
 Restart=always
 RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.
