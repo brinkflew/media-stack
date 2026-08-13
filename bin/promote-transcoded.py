@@ -49,6 +49,28 @@ ENV_FILE = "/var/media-stack/.env"
 HOST_LIBRARY = "/mnt/media/library"
 ARR_LIBRARY = "/data/library"
 
+# What counts as "the film is here". Checking for the DIRECTORY does not work
+# and silently disabled this whole script: Tdarr deletes the video file with
+# deleteParentFolderIfEmpty, but the folder still holds fanart.jpg, poster.jpg
+# and a .nfo, so it is never empty and never removed. Every film therefore
+# looked like it was still in queued/ and nothing was ever reconciled - which
+# is the same symptom this script was written to fix.
+VIDEO_EXTENSIONS = (".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts",
+                    ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".vob", ".evo")
+
+
+def has_video(directory):
+    """True if the directory holds at least one video file, at any depth."""
+    try:
+        for _root, _dirs, files in os.walk(directory):
+            for name in files:
+                if name.lower().endswith(VIDEO_EXTENSIONS):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 SERVICES = {
     "radarr": {
         "container": "radarr", "port": 7878, "key": "RADARR_API_KEY",
@@ -137,8 +159,8 @@ def main():
             if not path.startswith(queued_arr + "/"):
                 continue  # already promoted, or somewhere else entirely
             leaf = path[len(queued_arr) + 1:]
-            gone = not os.path.isdir("%s/queued/%s/%s" % (HOST_LIBRARY, kind, leaf))
-            arrived = os.path.isdir("%s/transcoded/%s/%s" % (HOST_LIBRARY, kind, leaf))
+            gone = not has_video("%s/queued/%s/%s" % (HOST_LIBRARY, kind, leaf))
+            arrived = has_video("%s/transcoded/%s/%s" % (HOST_LIBRARY, kind, leaf))
             if gone and arrived:
                 promote.append(it)
             else:
