@@ -260,6 +260,50 @@ if [ -z "$sysfailed" ]; then ok "no failed system units"; else bad "failed syste
 # rollback triggered by a slow Tdarr start would be both wrong and invisible.
 # ==============================================================================
 if [ -z "$GREENBOOT" ]; then
+	say "Container updates"
+
+	# The same argument as rpm-ostreed-automatic above: a timer that has stopped
+	# firing, or a run that failed, looks exactly like a week with no upstream
+	# releases. There is no alerting here yet, so the MOTD is the channel - which
+	# means the check has to exist rather than the failure being assumed visible.
+	if [ "$(systemctl --user is-enabled podman-auto-update.timer 2>/dev/null)" = enabled ]; then
+		ok "podman-auto-update.timer enabled"
+	else
+		bad "podman-auto-update.timer is not enabled - no container ever updates"
+	fi
+	au_run=$(systemctl --user show podman-auto-update.service -p ExecMainExitTimestamp --value 2>/dev/null)
+	au_rc=$(systemctl --user show podman-auto-update.service -p ExecMainStatus --value 2>/dev/null)
+	if [ -z "$au_run" ]; then
+		warn "podman-auto-update has never run"
+	else
+		au_age=$(( ( $(date +%s) - $(date -d "$au_run" +%s) ) / 3600 ))
+		if [ "${au_rc:-1}" != 0 ]; then
+			bad "the last container update run FAILED (exit $au_rc, ${au_age}h ago)"
+		elif [ "$au_age" -gt 48 ]; then
+			bad "the last container update run was ${au_age}h ago - the timer has stopped"
+		else
+			ok "last container update run ${au_age}h ago, exit 0"
+		fi
+	fi
+
+	# Caddy is built here, and `local` policy notices a new image without ever
+	# producing one - so if this timer stops, Caddy silently stops updating while
+	# every other service carries on.
+	if [ "$(systemctl --user is-enabled media-stack-caddy-build.timer 2>/dev/null)" = enabled ]; then
+		ok "media-stack-caddy-build.timer enabled"
+	else
+		bad "media-stack-caddy-build.timer is off - Caddy will never be rebuilt"
+	fi
+
+	# Every container that can be auto-updated should be. A unit that lost its
+	# policy would simply never appear here again, silently.
+	au_count=$(podman auto-update --dry-run 2>/dev/null | grep -cE 'registry|local' || true)
+	if [ "${au_count:-0}" -ge 17 ]; then
+		ok "$au_count containers carry an auto-update policy"
+	else
+		bad "only ${au_count:-0} containers carry an auto-update policy, expected 17"
+	fi
+
 	say "Containers"
 
 	userfailed=$(systemctl --user list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}')

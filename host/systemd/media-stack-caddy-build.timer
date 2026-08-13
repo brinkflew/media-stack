@@ -1,23 +1,28 @@
 # ==============================================================================
-# Rebuild Caddy weekly, well before the nightly auto-update run
+# Rebuild Caddy weekly, a couple of hours before the nightly auto-update run
 # ------------------------------------------------------------------------------
-# Sunday 03:00 against podman-auto-update.timer's midnight: the build has to
-# have finished and produced an image before auto-update looks, or the restart
-# waits another week. Three hours is generous for a ~75s compile, and generous
-# is the right call for something nobody watches.
+# Saturday 22:00 against podman-auto-update.timer's `OnCalendar=daily`, i.e.
+# midnight with up to 15 minutes of jitter. Building AFTER midnight would work
+# too, but the new image would then sit unused until the following night; this
+# way Sunday's run restarts Caddy onto the image built two hours earlier.
 #
-# Weekly rather than nightly because this is a source build, not a pull - it
-# costs CPU and a full Go toolchain download, and Caddy does not release daily.
+# Neither is load-bearing - a late image is picked up on the next run, not lost.
+# It just keeps "rebuilt" and "running the rebuild" in the same night, which is
+# what someone reading the journal will expect.
 #
-# Persistent=true so a machine that was off on Sunday rebuilds when it comes
-# back rather than skipping a week.
+# Weekly rather than nightly because this is a source build, not a pull: it
+# compiles Caddy with xcaddy and pulls a Go toolchain, and Caddy does not
+# release daily.
+#
+# Persistent=true so a machine that was off on Saturday rebuilds when it comes
+# back rather than skipping the week.
 # ==============================================================================
 
 [Unit]
 Description=Rebuild the Caddy image weekly
 
 [Timer]
-OnCalendar=Sun *-*-* 03:00
+OnCalendar=Sat *-*-* 22:00
 Persistent=true
 RandomizedDelaySec=15min
 AccuracySec=5min
