@@ -215,7 +215,7 @@ other by container name (`http://sonarr:8989`), but only where they share a netw
 | Network | Members |
 |---|---|
 | `net-ingress` | caddy, tinyauth, pocket-id |
-| `net-arr` | caddy, sonarr, radarr, prowlarr, jellyseerr, unpackerr |
+| `net-arr` | caddy, sonarr, radarr, prowlarr, jellyseerr, unpackerr, bazarr |
 | `net-solver` | prowlarr, flaresolverr |
 | `net-download` | caddy, gluetun, sonarr, radarr, prowlarr |
 | `net-media` | caddy, jellyfin, jellyseerr |
@@ -323,12 +323,66 @@ It runs **on the host, not in a container**, and that is the design rather than 
 cannot reach Radarr, Sonarr or Jellyfin and should not be able to. `podman exec` works regardless of
 network topology, so the reconciler grants no container any reachability it did not have.
 
-**It never touches a media file.** It asks Tdarr which files passed *both* transcode and health
-check, then calls the \*arr editor endpoints with `moveFiles: true` so the applications move their
-own files and update their own databases in one operation. Anything that moves a file behind an
-\*arr's back orphans it — which is exactly what left *Flow* and *The Hobbit* sitting in `transcoded/`
-while Radarr reported `hasFile=false` and stood ready to download them again. **Do not add a step
-that moves media directly.**
+**It never touches a media file.** It reads the filesystem to see where each film actually is, then
+calls the \*arr editor endpoints with `moveFiles: false` plus a rescan — the flow has *already* moved
+the file, so the applications only need to be told. Anything that moves a file behind an \*arr's back
+orphans it, which is what left *Flow* and *The Hobbit* in `transcoded/` while Radarr reported
+`hasFile=false`. **Do not add a step that moves media directly.**
+
+**It decides "has this moved?" by looking for a VIDEO FILE, never for the directory**, and that
+distinction is the difference between working and silently doing nothing. It originally tested
+`os.path.isdir()` on the queued folder. Tdarr does delete the film, with
+`deleteParentFolderIfEmpty:true` — but the folder is not empty, because Radarr and Sonarr write
+`fanart.jpg`, `poster.jpg` and a `.nfo` beside it. So the directory always survived, `gone` was never
+true, and **the script never promoted a single file in its entire existence** while cheerfully
+reporting "12 still in queued/, 0 moved by Tdarr". *Flow* and *The Hobbit* sat unmapped for nine
+months as a result. If a reconciler here looks like it is working, check that it has actually done
+something.
+
+## The transcode policy
+
+**One ffmpeg pass, defined by one tracked plugin.** `tdarr/plugins/Tdarr_Plugin_avs1_MediaStackStreamPolicy.js`
+is a *classic* Tdarr plugin — deliberately, not a flow plugin: a flow plugin must live at
+`Plugins/Local/FlowPlugins/<cat>/<name>/1.0.0/index.js` and the community ones reach `FlowHelpers`
+through relative `require`s that **do not resolve from `Local/`**. A classic plugin is one file in
+`Plugins/Local/`, its single `require('../methods/lib')` is correct there, and it returns the raw
+ffmpeg argument string. The flow `avsOnePass1` is then only 7 nodes around it.
+
+It is **tracked in git** and copied into the gitignored `config/` tree by an `ExecStartPre=` on
+`tdarr-server.container`. Editing the copy on the server is pointless; it is overwritten every start.
+
+Things in it that are not obvious and cost time to find:
+
+- **10-bit is done with `-vf scale_cuda=format=p010le`, NOT `-pix_fmt p010le`.** With
+  `-hwaccel_output_format cuda` the frames never leave GPU memory, so a pixel-format conversion has
+  nowhere to happen and ffmpeg fails with *"Impossible to convert between the formats supported by
+  the filter 'Parsed_null_0' and the filter 'auto_scale_0'"*. Do not "simplify" it back.
+- **Opus bitrates are TOTAL, not per channel** — 128k stereo, 256k 5.1, 450k 7.1. The old flow
+  multiplied by channel count and produced 1536k and 2048k Opus, which is why it made files *bigger*.
+- **Opus only for codecs that do not direct-play** (truehd/dts/flac/pcm/mlp). AAC, AC3, E-AC3, MP3
+  and Opus are copied: lossy→lossy is generation loss for nothing. Plain DTS *is* converted despite
+  being lossy — it is badly supported and runs 768–1536 kb/s.
+- **The AC3 companion is decided per LANGUAGE, not per file.** These releases carry French AC3 next
+  to an English DTS-HD VO, so a per-file "does an AC3 exist?" test wrongly concludes yes and leaves
+  the VO Opus-only — precisely the direct-play case the companion exists for.
+- **Channel count is never a selection criterion.** The old flow filtered audio by "keep the highest
+  channel count" *before* looking at language, which is what deleted VO tracks.
+- Inside the container **only one GPU is visible, so the healthy card is ordinal 0**. `-gpu 1` and
+  `-hwaccel_device 1` fail there with `CUDA_ERROR_INVALID_DEVICE`.
+
+**CQ 26, calibrated not guessed.** Against a 20 Mbps VC-1 remux (60 s, preset p6, SSIM vs source):
+
+| CQ | 20 | 22 | 24 | 26 | 28 |
+|---|---|---|---|---|---|
+| kbps | 9631 | 8618 | 6354 | 4541 | 3179 |
+| SSIM | .98817 | .98771 | .98584 | .98379 | .98164 |
+
+SSIM moves **0.0065 across a 3× bitrate range** — there is no cliff to find, so this is a storage
+decision, not a technical one. `v_cq=18` was the old value and is near-lossless.
+
+**A subtitle-inclusive benchmark cannot use `-t`.** Copying sparse PGS streams makes ffmpeg read the
+*whole* file to flush them, so a 60-second test of a 22 GB film took 131 s instead of 9 s. Production
+encodes the whole file anyway and pays nothing. Measure video-only, or measure the real thing.
 
 ## Ingress and access control
 
@@ -506,6 +560,34 @@ Conclusions from auditing the running host. Do not rediscover these:
   Jellyfin one is ~1.5 KB. Sixteen containers at 30s tripled journal volume, so the interval is 60s
   (120s for the Tdarr nodes, 5s for gluetun, which is the kill-switch). Worth knowing before adding
   a seventeenth.
+- **The media disk gets SLOWER with concurrency, and this is measured.** O_DIRECT sequential reads
+  off `sda`: **1 reader 127.5 MB/s, 2 readers 70.9 MB/s aggregate, 3 readers 71.4, 4 readers 66.5.**
+  Going from one reader to two costs **45% of total throughput** and quadruples `await` (7.7→28 ms).
+  Three readers on the *same* LBA region run at full speed (124.7 MB/s), 6 GiB apart inside one file
+  costs 37%, three different files 40% — so **the penalty is head travel, not filesystem layout**,
+  and no readahead or scheduler change will fix it. This is why the answer to "it's slow" here is
+  *fewer* concurrent jobs, not a bigger bandwidth cap.
+- **Tdarr's spindle reads are a burst at job ingest, not a sustained load.** Sampled mid-transcode,
+  `tdarr-node-01` read **0.00 MB/s from `sda`** and 16.8 MB/s from the NVMe: it stages the source
+  into its cache work directory and then works entirely from SSD. Limit concurrency, not bandwidth.
+- **Two NVENC sessions already pin the encoder block at 100%** while the SM sits at 10%. A third GPU
+  worker cannot encode faster; it only adds cache and spindle pressure. Worker limits are therefore
+  `transcodegpu:2, transcodecpu:0, healthcheckgpu:0, healthcheckcpu:0`. `transcodecpu` is 0 because
+  `libx265 -preset medium` measured **0.54× realtime** — about 4½ hours a film — while competing for
+  the same disk that NVENC's source ingest needs.
+- **`queueSortType: sortPathAZ` is how episodes come out in order.** Sonarr names files
+  `<Series> - S01E02 - …` inside `Season 01` folders, so alphabetical path order *is* season/episode
+  order. It is a single global setting, not per-library; `prioritiseLibraries` is on so the library
+  `priority` field is honoured instead of round-robin.
+- **The community "5 steps" flow was actively destructive and is retained only as a rollback.** Its
+  audio node ran `-c:a:0 libopus` with **no `-map`**, so exactly one audio track survived — which one
+  depended on the stream reorder, so it deleted the French dub on the Harry Potter films and the
+  Latvian VO on *Flow*. It ran `mkvpropedit` three times and two full `-c copy` remuxes (27 minutes
+  of pure I/O before the first frame), used work directories of **53 GB per worker** where the
+  one-pass flow uses **1.0 GB**, and its net effect across all four libraries since 2025-03-15 was
+  **−141.6 GB, i.e. the outputs were 141.6 GB larger than the inputs**. 707 of 2027 transcodes
+  errored, averaging 44.7 min each. Flows `htpX8Ypt1`…`25kSD__gW` are left in place, unused;
+  rollback is pointing a library's `flowId` back at `htpX8Ypt1`.
 - **A Tdarr health check is a full-file decode, not a metadata read**, and queueing 470 of them took
   the whole host down. Moving 470 episodes into a watched folder was enough: that is the entire
   library read end to end off one 7200rpm spindle. **The kernel stayed healthy throughout** — it
