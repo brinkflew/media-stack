@@ -1,0 +1,27 @@
+# ==============================================================================
+# Keep the MOTD honest about whether this host is healthy
+# ------------------------------------------------------------------------------
+# There is no alerting here yet - monitoring is roadmap item 4 - so the only
+# channel that reliably reaches a human is the thing they see anyway: the
+# message printed when they ssh in. This is what writes it.
+#
+# It exists because the host now updates itself. rpm-ostreed-automatic stages a
+# new deployment nightly and never applies it, so without this nobody learns
+# that one is waiting; and an OS update changes the NVIDIA driver, so without
+# the CDI checks nobody learns the GPUs broke until a transcode fails hours
+# later.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Verify the host and refresh its MOTD
+Documentation=file:/var/media-stack/bin/verify-host.sh
+
+[Service]
+Type=oneshot
+ExecStart=/var/media-stack/bin/verify-host.sh --quiet
+# A FAIL is this unit's OUTPUT, not a reason to mark it failed. The finding is
+# already in the MOTD, and a unit sitting in `failed` would be one more thing
+# nobody is watching - which is the problem this exists to solve, not add to.
+SuccessExitStatus=0 1

@@ -1,0 +1,26 @@
+# ==============================================================================
+# Refresh the host's MOTD hourly
+# ------------------------------------------------------------------------------
+# Hourly rather than more often because nothing it reports changes faster than
+# that: updates stage once a night, and a driver only moves on a reboot.
+#
+# OnBootSec=10min, not immediately. The interesting failure - a container that
+# cannot get its GPU - takes a few Restart=always cycles to become permanent
+# rather than transient, and Caddy can take minutes to build on a fresh host.
+# Checking too early would report a stack that is merely still starting.
+#
+# Persistent=true so a machine that was off overnight writes a fresh MOTD at
+# boot rather than showing nothing until the hour is up.
+# ==============================================================================
+
+[Unit]
+Description=Verify the host and refresh its MOTD, hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target
