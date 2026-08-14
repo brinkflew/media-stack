@@ -157,8 +157,17 @@ fi
 # card - a check that cannot fail, on the one question it exists to ask.
 # verify-host.sh --greenboot has already asserted the driver and the CDI spec by
 # the time we get here, so an empty answer is anomalous rather than routine.
-enc_raw=$(nvidia-smi --query-gpu=utilization.encoder --format=csv,noheader,nounits 2>/dev/null)
-[ -n "$enc_raw" ] || refuse "nvidia-smi answered nothing - cannot tell whether a transcode is running, and unknown is not idle"
+#
+# The override is the same argument again, and it is not hypothetical: this
+# branch was unprovable the first time it was tried, because the transcode that
+# had been running while the code was written finished before the test ran. A
+# gate that can only be exercised when something else happens to be busy is a
+# gate nobody exercises.
+enc_raw="${MEDIA_STACK_ENCODER_PCT:-}"
+if [ -z "$enc_raw" ]; then
+	enc_raw=$(nvidia-smi --query-gpu=utilization.encoder --format=csv,noheader,nounits 2>/dev/null)
+	[ -n "$enc_raw" ] || refuse "nvidia-smi answered nothing - cannot tell whether a transcode is running, and unknown is not idle"
+fi
 enc=$(awk '{s+=$1} END {print s+0}' <<<"$enc_raw")
 
 # THE ESCALATION, AND WHY IT IS NOT A CONTRADICTION. Each individual refusal
