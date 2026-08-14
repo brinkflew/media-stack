@@ -1,0 +1,267 @@
+{
+  "_id": "avsOnePass1",
+  "flowEdges": [
+    {
+      "animated": true,
+      "id": "e_aStart_1_aPolicy",
+      "source": "aStart",
+      "sourceHandle": "1",
+      "target": "aPolicy",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aPolicy_1_aStats",
+      "source": "aPolicy",
+      "sourceHandle": "1",
+      "target": "aStats",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aStats_1_aSize",
+      "source": "aStats",
+      "sourceHandle": "1",
+      "target": "aSize",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aStats_err1_aSize",
+      "source": "aStats",
+      "sourceHandle": "err1",
+      "target": "aSize",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aSize_1_aHealth",
+      "source": "aSize",
+      "sourceHandle": "1",
+      "target": "aHealth",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aSize_2_aMoveRev",
+      "source": "aSize",
+      "sourceHandle": "2",
+      "target": "aMoveRev",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aSize_3_aMoveRev",
+      "source": "aSize",
+      "sourceHandle": "3",
+      "target": "aMoveRev",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aHealth_1_aMoveDone",
+      "source": "aHealth",
+      "sourceHandle": "1",
+      "target": "aMoveDone",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aHealth_err1_aMoveRev",
+      "source": "aHealth",
+      "sourceHandle": "err1",
+      "target": "aMoveRev",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aMoveRev_1_aReview",
+      "source": "aMoveRev",
+      "sourceHandle": "1",
+      "target": "aReview",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aMoveDone_1_aDelete",
+      "source": "aMoveDone",
+      "sourceHandle": "1",
+      "target": "aDelete",
+      "targetHandle": null,
+      "type": "smoothstep"
+    },
+    {
+      "animated": true,
+      "id": "e_aPolicy_2_aMoveKeep",
+      "source": "aPolicy",
+      "sourceHandle": "2",
+      "target": "aMoveKeep",
+      "targetHandle": null,
+      "type": "smoothstep"
+    }
+  ],
+  "flowPlugins": [
+    {
+      "fpEnabled": true,
+      "id": "aStart",
+      "inputsDB": {
+        "fileAccessChecks": "true"
+      },
+      "name": "Start \ud83d\ude80",
+      "pluginName": "inputFile",
+      "position": {
+        "x": 600,
+        "y": 0
+      },
+      "sourceRepo": "Community",
+      "version": "1.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aPolicy",
+      "inputsDB": {
+        "audioLanguages": "{{{args.userVariables.library.audio_languages}}}",
+        "pluginSourceId": "Local:Tdarr_Plugin_avs1_MediaStackStreamPolicy"
+      },
+      "name": "One-pass HEVC + Opus + VO/EN/FR \u23f3",
+      "pluginName": "runClassicTranscodePlugin",
+      "position": {
+        "x": 600,
+        "y": 140
+      },
+      "sourceRepo": "Community",
+      "version": "2.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aStats",
+      "inputsDB": null,
+      "name": "Recompute track statistics \u23f3",
+      "pluginName": "runMkvPropEdit",
+      "position": {
+        "x": 600,
+        "y": 250
+      },
+      "sourceRepo": "Community",
+      "version": "1.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aSize",
+      "inputsDB": {
+        "greaterThan": "3",
+        "lessThan": "200"
+      },
+      "name": "Sanity: output size 3-200% \u23f3",
+      "pluginName": "compareFileSizeRatio",
+      "position": {
+        "x": 600,
+        "y": 340
+      },
+      "sourceRepo": "Community",
+      "version": "2.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aHealth",
+      "inputsDB": null,
+      "name": "Health check the OUTPUT \u23f3",
+      "pluginName": "runHealthCheck",
+      "position": {
+        "x": 600,
+        "y": 420
+      },
+      "sourceRepo": "Community",
+      "version": "1.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aMoveDone",
+      "inputsDB": {
+        "keepRelativePath": "true",
+        "outputDirectory": "{{{args.userVariables.library.output_dir_done}}}"
+      },
+      "name": "Move to transcoded/ \u2705",
+      "pluginName": "moveToDirectory",
+      "position": {
+        "x": 600,
+        "y": 560
+      },
+      "sourceRepo": "Community",
+      "version": "2.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aDelete",
+      "inputsDB": {
+        "deleteParentFolderIfEmpty": "true",
+        "fileToDelete": "originalFile"
+      },
+      "name": "Delete the source \u2705",
+      "pluginName": "deleteFile",
+      "position": {
+        "x": 600,
+        "y": 700
+      },
+      "sourceRepo": "Community",
+      "version": "1.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aMoveRev",
+      "inputsDB": {
+        "keepRelativePath": "true",
+        "outputDirectory": "{{{args.userVariables.library.output_dir_review}}}"
+      },
+      "name": "Move to review/ \u26a0\ufe0f",
+      "pluginName": "moveToDirectory",
+      "position": {
+        "x": 1100,
+        "y": 420
+      },
+      "sourceRepo": "Community",
+      "version": "2.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aReview",
+      "inputsDB": null,
+      "name": "Needs a human \u26a0\ufe0f",
+      "pluginName": "requireReview",
+      "position": {
+        "x": 1100,
+        "y": 560
+      },
+      "sourceRepo": "Community",
+      "version": "1.0.0"
+    },
+    {
+      "fpEnabled": true,
+      "id": "aMoveKeep",
+      "inputsDB": {
+        "keepRelativePath": "true",
+        "outputDirectory": "{{{args.userVariables.library.output_dir_done}}}"
+      },
+      "name": "Move to transcoded/ (already compliant)",
+      "pluginName": "moveToDirectory",
+      "position": {
+        "x": 150,
+        "y": 420
+      },
+      "sourceRepo": "Community",
+      "version": "2.0.0"
+    }
+  ],
+  "name": "Media Stack - one pass (HEVC + Opus, VO/EN/FR)",
+  "priority": 2
+}

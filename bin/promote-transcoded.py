@@ -71,6 +71,24 @@ def has_video(directory):
     return False
 
 
+# Tdarr's verdicts that mean "this file is finished". If one of these is recorded
+# against a path that is STILL in queued/ with its video intact, the flow decided
+# it was done and then failed to move it - which is invisible from the filesystem
+# alone, because that looks identical to a file still waiting its turn.
+#
+# That is not hypothetical. runClassicTranscodePlugin 2.0.0 leaves an
+# already-compliant file on outputNumber 2, and avsOnePass1 had no edge wired to
+# it, so the flow ended before its move-to-directory node. The Hobbit: The Battle
+# of the Five Armies sat in queued/ for a day while Radarr, Tdarr and Jellyfin
+# were each individually correct and this script printed "1 waiting on Tdarr"
+# every ten minutes. See apps/tdarr/flows/README.md.
+TDARR_DONE_VERDICTS = ("Not required", "Transcode success")
+
+# Tdarr sees the same tree at a third prefix - /media, where the host says
+# /mnt/media and the *arr apps say /data. Its file table is keyed by that path.
+TDARR_LIBRARY = "/media/library"
+
+
 # One *arr app can own SEVERAL library types, and each is a separate root folder
 # pair. Radarr holds films under queued/movies and documentaries under
 # queued/documentaries; Sonarr holds series and anime the same way.
@@ -142,6 +160,32 @@ def arr(svc, method, path, payload=None, keys=None):
         return None
 
 
+def tdarr_finished_paths():
+    """Paths Tdarr considers done, as a set of its own /media/... keys.
+
+    Returns an empty set if Tdarr cannot be reached or answers something
+    unexpected, which degrades to the old behaviour rather than inventing a
+    stall. This is a diagnostic, and it must never be able to break or delay the
+    reconciliation it annotates - the same reasoning as the leading `-` on
+    jellyfin.container's ExecStartPre.
+    """
+    body = json.dumps({"data": {"collection": "FileJSONDB", "mode": "getAll"}})
+    out = exec_curl("tdarr-server",
+                    ["-X", "POST", "-H", "Content-Type: application/json",
+                     "http://localhost:8266/api/v2/cruddb"], body)
+    if out is None:
+        return set()
+    try:
+        rows = json.loads(out)
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(rows, list):
+        return set()
+    return set(r.get("_id", "") for r in rows
+               if isinstance(r, dict)
+               and r.get("TranscodeDecisionMaker") in TDARR_DONE_VERDICTS)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true", help="change nothing")
@@ -151,6 +195,9 @@ def main():
 
     keys = load_env(ENV_FILE)
     promoted_any = False
+
+    # Asked once per run, not per kind: it is the same table for all four.
+    finished = tdarr_finished_paths()
 
     for svc, cfg in SERVICES.items():
         items = arr(svc, "GET", cfg["list"], keys=keys)
@@ -170,7 +217,7 @@ def main():
             queued_arr = "%s/queued/%s" % (ARR_LIBRARY, kind)
             target_arr = "%s/transcoded/%s" % (ARR_LIBRARY, kind)
 
-            promote, waiting = [], 0
+            promote, waiting, undownloaded, stuck = [], 0, 0, []
             for it in items:
                 path = it.get("path") or ""
                 if not path.startswith(queued_arr + "/"):
@@ -180,12 +227,36 @@ def main():
                 arrived = has_video("%s/transcoded/%s/%s" % (HOST_LIBRARY, kind, leaf))
                 if gone and arrived:
                     promote.append(it)
-                else:
-                    waiting += 1
+                    continue
+                if gone:
+                    # No video in EITHER place, so there is nothing for Tdarr to
+                    # be working on: this is a monitored title that has not been
+                    # downloaded yet. Counting it as "waiting on Tdarr" made the
+                    # number meaningless - 50 wishlist entries were added in one
+                    # day and turned "1 waiting" into "51 waiting" overnight,
+                    # which is exactly the kind of noise that gets a line ignored.
+                    undownloaded += 1
+                    continue
+                waiting += 1
+                # Still in queued/, and Tdarr has already recorded a verdict that
+                # means it is finished with the file. No number of further passes
+                # will move it: the flow ended before its move node. Without this,
+                # "waiting on Tdarr" covers both a live transcode and a permanent
+                # stall, and the two are indistinguishable from out here.
+                prefix = "%s/queued/%s/%s/" % (TDARR_LIBRARY, kind, leaf)
+                if any(p.startswith(prefix) for p in finished):
+                    stuck.append(it)
 
             if args.verbose:
-                print("== %s/%s: %d still in queued/, %d moved by Tdarr"
-                      % (svc, kind, waiting, len(promote)))
+                print("== %s/%s: %d still in queued/, %d moved by Tdarr, "
+                      "%d not downloaded yet"
+                      % (svc, kind, waiting, len(promote), undownloaded))
+            for it in stuck:
+                print("== %s/%s: STUCK: %s" % (svc, kind, it.get("title") or it.get("path")),
+                      file=sys.stderr)
+                print("   Tdarr has finished with it but it is still in queued/ - the flow "
+                      "ended before its move node. See apps/tdarr/flows/README.md.",
+                      file=sys.stderr)
             if not promote:
                 if waiting or args.verbose:
                     print("== %s/%s: nothing to reconcile (%d waiting on Tdarr)"
