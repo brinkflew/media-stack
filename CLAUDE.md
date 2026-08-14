@@ -1129,12 +1129,27 @@ Conclusions from auditing the running host. Do not rediscover these:
   not: h264, hevc, vc1, av1, vp9, vp8 and mpeg2video are all enabled, confirmed against
   `/System/Configuration/encoding`. **Read a config through the API, or with `sed -n '/<tag>/,/<\/tag>/p'`
   - a line-matching grep cannot show you an XML element's contents.**
-- **Jellyfin sits AT its `MemoryHigh` and is in continuous reclaim.** `memory.current` 3.00G against
-  `MemoryHigh=3G`, `MemoryPeak` **2 MB above the watermark**, and `memory.events` `high` climbing
-  750 -> 1948 inside twenty minutes with `NRestarts=0`; Sonarr and Radarr are at `high 0`. Same
-  signature as `tdarr-node-01`, which was raised 3G/4G -> 6G/8G for it. **Much of that is page cache
-  from the trickplay backlog above**, charged to Jellyfin's cgroup, so fix the decoding first and
-  re-measure before raising the ceiling - the two findings are coupled.
+- **Jellyfin sits AT its `MemoryHigh` with a fast-climbing throttle counter, and that is FINE.**
+  `memory.current` 3.00G against `MemoryHigh=3G`, `MemoryPeak` **2 MB above the watermark**, and
+  `memory.events` `high` at 6,398 within seven minutes of a restart. It looks exactly like the
+  `tdarr-node-01` problem, and **it is not the same thing** - `MemoryHigh` was deliberately left at
+  3G after measuring. What settles it is `memory.stat`, not the event counter:
+
+  | | Jellyfin |
+  |---|---|
+  | `anon` (its actual working set) | **0.385 G** |
+  | `file` / of which `inactive_file` | 2.543 G / **2.338 G** |
+  | `pgscan` vs `pgsteal` | 2,776,855 vs 2,776,829 |
+  | `memory.pressure some` | **avg10/60/300 all 0.00**, 65 ms total stall, ever |
+
+  Jellyfin needs under 400 MB. The rest is cold, clean page cache from streaming media, which the
+  kernel reclaims at essentially zero cost - `pgsteal` tracks `pgscan` to five digits, so every page
+  scanned is successfully freed, and nothing ever stalls. **A cgroup doing file I/O will always sit
+  at its `MemoryHigh` and always accumulate `high` events**, because that is what the watermark is
+  for; raising the ceiling would only let more cold cache pile up before the same free reclaim.
+  **`memory.events high` on its own proves nothing. Read `anon` vs `inactive_file`, and read
+  `memory.pressure`** - real starvation shows a large `anon`, `pgsteal` falling short of `pgscan`,
+  a climbing `workingset_refault_file`, and nonzero pressure.
 - **Jellyfin 10.11's own queries are slow, and it is not this stack's fault.** The real home-screen
   query takes **29-79 ms in-container** for a 522-item library and a 26 KB response, against ~1 ms
   for Sonarr's equivalent, and the log carries EF Core's `Compiling a query which loads related
