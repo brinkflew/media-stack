@@ -124,15 +124,37 @@ rollback path is unreachable no matter what the checks say. `wanted.d` on top of
 asserts that no system unit has failed and would otherwise report its own check as a fault.
 
 Moving the symlink to `required.d` and adding `custom.cfg` is what arms it. Do not do that
-without running the negative control - a check that cannot fail is decorative:
+without running the negative control - a check that cannot fail is decorative.
+
+**The failing check must fail on the NEW deployment only.** `/etc` is merged forward, so a
+check that simply `exit 1`s is present on the deployment you roll back INTO as well, and reds
+that too - turning a clean test into a host that is unhealthy whichever way it boots. Key it
+to something only the test deployment has:
 
 ```bash
-printf '#!/bin/sh\nexit 1\n' | sudo tee /etc/greenboot/check/required.d/99-prove-it.sh
+# create the deployment to be rejected, with a marker the check can see
+sudo rpm-ostree install tree
+
+sudo tee /etc/greenboot/check/required.d/99-prove-it.sh >/dev/null <<'EOS'
+#!/bin/sh
+# Negative control. Fails ONLY where `tree` is layered, so the deployment we
+# fall back to still boots green and the rollback can be made permanent.
+command -v tree >/dev/null && { echo "deliberate failure - negative control" >&2; exit 1; }
+exit 0
+EOS
 sudo chmod +x /etc/greenboot/check/required.d/99-prove-it.sh
-# reboot, on a day you can reach the machine, with two deployments present.
-# GRUB should count down and revert. Then REMOVE the file.
-sudo grub2-editenv /boot/grub2/grubenv list      # boot_counter, boot_success
 ```
+
+Then reboot into it, on a day you can reach the machine, and watch:
+
+```bash
+sudo grub2-editenv /boot/grub2/grubenv list          # boot_counter counts DOWN each boot
+sudo journalctl -b -u greenboot-healthcheck -o cat   # red -> "rebooting to try again"
+rpm-ostree status                                     # ends on the deployment WITHOUT tree
+```
+
+Expect several reboots: one per `GREENBOOT_MAX_BOOT_ATTEMPTS`. Afterwards remove
+`99-prove-it.sh` and `sudo rpm-ostree cleanup -r`.
 
 ## The verdict, and where to read it
 
