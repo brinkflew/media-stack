@@ -430,14 +430,20 @@ if [ -z "$GREENBOOT" ]; then
 		if [ "$gb_dir" = absent ]; then
 			bad "the media-stack check is in neither required.d nor wanted.d - greenboot is not checking this host"
 		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ] && [ "${depl_count:-0}" -lt 2 ]; then
-			# ARMED WITH NOWHERE TO GO. greenboot reboots the machine itself on a
-			# red boot - that is inside the binary, not in any unit file - and
-			# GRUB decrements the counter each time until it selects entry 1. On
-			# a host with one deployment there is no entry 1, and the machine has
-			# rebooted several times to reach that discovery with no console
-			# attached. A counter was observed on this host with nothing staged,
-			# so "a counter implies a rollback target" is NOT true.
-			bad "greenboot is armed but there is only ${depl_count:-?} deployment - a red boot would reboot repeatedly toward a menu entry that does not exist"
+			# ARMED WITH NOWHERE TO GO, which is the NORMAL state here rather
+			# than a fault: an attended reboot ends in `rpm-ostree cleanup -r`,
+			# so the host sits on one deployment until the next one stages. A
+			# rollback is only possible in the window between staging and that
+			# cleanup - which is also the only window in which a deployment can
+			# be bad, so the cover is where it needs to be.
+			#
+			# A WARN rather than a FAIL because greenboot stops itself here. Seen
+			# in the journal, on this host: "Boot counter exhausted but no
+			# rollback trigger set - manual intervention required". The trigger
+			# is set only on the first boot into a NEW deployment, so with one
+			# deployment a red boot costs GREENBOOT_MAX_BOOT_ATTEMPTS reboots and
+			# then stops, rather than looping.
+			warn "greenboot is armed but there is only ${depl_count:-?} deployment - nothing to roll back to until one stages"
 		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ]; then
 			ok "greenboot is armed - a failed check reverts the deployment"
 		else

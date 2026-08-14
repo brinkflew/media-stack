@@ -1,0 +1,32 @@
+# ==============================================================================
+# Apply a staged OS deployment, unattended
+# ------------------------------------------------------------------------------
+# The other half of greenboot. greenboot judges a deployment AFTER the reboot;
+# bin/reboot-when-staged.sh decides whether to reboot at all, and refuses on any
+# of a dozen grounds - nothing staged, greenboot not armed, a deployment rejected
+# and not yet understood, the host unhealthy now, /boot tight, an encoder busy.
+#
+# A user unit rather than a system one, because that is the symlink root this
+# repository already deploys through, and `core` has passwordless sudo - which
+# bin/verify-host.sh already depends on. The script reboots via `sudo -n`.
+#
+# EXIT 0 IS NOT "IT REBOOTED". Every refusal is also exit 0, deliberately: on
+# most nights there is nothing staged, and a unit that goes red on a quiet week
+# is a unit people stop reading. What it did is in the journal, and the run
+# itself is recorded in /var/lib/media-stack/boot-state.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Apply a staged OS deployment if it is safe to
+Documentation=file:/var/media-stack/bin/reboot-when-staged.sh
+# Ordering only, never Wants=. The backup runs at 03:00 with a 45 minute
+# timeout, and rebooting out from under restic would leave a partial snapshot
+# and a lock in the off-site repository that the append-only key cannot remove.
+After=media-stack-backup.service
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/var/media-stack/bin/reboot-when-staged.sh

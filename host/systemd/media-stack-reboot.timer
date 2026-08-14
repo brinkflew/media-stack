@@ -1,0 +1,37 @@
+# ==============================================================================
+# Weekly, Sunday 05:00 - and weekly rather than nightly on purpose
+# ------------------------------------------------------------------------------
+# The OS stages a deployment nightly. Applying one nightly would mean the machine
+# reboots most nights of the week, which is a lot of reboots on a box with no
+# console to buy an update that was not urgent. Weekly still means no deployment
+# sits unapplied for more than seven days, which was the actual problem: the host
+# ran a superseded image for as long as nobody was at a keyboard.
+#
+# 05:00 Sunday is clear of everything else that runs here:
+#
+#   00:00  podman-auto-update, +15min jitter, restarting containers as it goes
+#   00:00  rpm-ostreed-automatic, staging the deployment this may apply
+#   03:00  media-stack-backup, +5min jitter, TimeoutStartSec=45min
+#   22:00  media-stack-caddy-build, Saturdays
+#
+# So the backup has finished with an hour to spare, and the reboot lands on the
+# morning most likely to be noticed if it goes wrong.
+#
+# Persistent=false, which is the opposite of the backup timer and for the
+# opposite reason. A missed backup is a hole and must be caught up; a missed
+# reboot is simply next week, and catching one up means a machine that was off
+# all weekend reboots itself the moment it comes back - exactly when someone is
+# most likely to be doing something to it.
+# ==============================================================================
+
+[Unit]
+Description=Weekly window for applying a staged OS deployment
+
+[Timer]
+OnCalendar=Sun *-*-* 05:00
+Persistent=false
+RandomizedDelaySec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

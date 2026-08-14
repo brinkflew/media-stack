@@ -16,7 +16,8 @@ for u in /var/media-stack/host/systemd/*.service /var/media-stack/host/systemd/*
 done
 systemctl --user daemon-reload
 systemctl --user enable --now media-stack-promote.timer media-stack-verify.timer \
-                              media-stack-caddy-build.timer media-stack-backup.timer
+                              media-stack-caddy-build.timer media-stack-backup.timer \
+                              media-stack-reboot.timer
 ```
 
 **The loop is a glob rather than a list on purpose.** It used to name the four files it knew about,
@@ -38,6 +39,7 @@ symlinks, so there is no copy step. Only `daemon-reload` is needed.
 | `media-stack-promote` | Moves media that Tdarr has both transcoded **and** health-checked from `library/queued/<type>` into `library/transcoded/<type>`, which is the only place Jellyfin reads. It calls Radarr's and Sonarr's editor endpoints with `moveFiles=false` plus a rescan, so the applications are told where the file went and never lose track of it. See `bin/promote-transcoded.py`. |
 | `media-stack-verify` | Runs the host health battery hourly and writes `/run/motd.d/40-media-stack.motd`, so a staged OS update, a failed unit, a stale CDI spec or a backup that has stopped running is the first thing an ssh session shows. See `bin/verify-host.sh`. |
 | `media-stack-caddy-build` | Rebuilds the Caddy image weekly. Caddy is the one image built here rather than pulled, and `AutoUpdate=local` notices a new image without producing one - so without this it is the only thing in the stack that never updates. See `bin/../apps/caddy/Dockerfile`. |
+| `media-stack-reboot` | Applies a staged OS deployment, Sundays at 05:00 - but only if greenboot is armed to undo it, no deployment has been rejected and left unexplained, the host is healthy now and nothing is mid-transcode. Every check is a refusal; doing nothing is the default. See `bin/reboot-when-staged.sh`. |
 | `media-stack-backup` | Backs up `config/` nightly at 03:00, to `/var/backups/media-stack` and then off-site by `restic copy`. This is the backup that actually happens; the workstation's `bin/backup-config.sh` is a third copy taken when someone is home. See `bin/backup-server.sh`. |
 
 ```bash
