@@ -374,9 +374,11 @@ outlive the machine they are talking about:
 
 **Updates are automatic, in two independent tracks.** Containers: `podman-auto-update.timer`
 nightly, following tags, rolling back on a failed start. Host: `rpm-ostreed-automatic.timer`
-nightly, which **stages and never reboots** - applying it is a deliberate human act, because there
-is no console, no BMC and (yet) no greenboot, so a deployment that boots but breaks sshd is a car
-journey. `bin/verify-host.sh` is what tells you one is waiting, via `/run/motd.d/`.
+nightly, which **stages and never reboots**. Applying it is either a deliberate human act via
+`bin/reboot-host.sh`, or `media-stack-reboot.timer` on Sundays at 05:00 - which applies a staged
+deployment only when greenboot is armed to undo it and refuses on anything else. A deployment that
+boots but breaks sshd now rolls itself back rather than being a car journey; `bin/verify-host.sh`
+still tells you one is waiting, via `/run/motd.d/`.
 
 **The reboot procedure, which is the only genuinely dangerous step, is now a script.** Run it from
 the **workstation**, because the waiting cannot happen on the machine that is rebooting:
@@ -1249,14 +1251,30 @@ Remaining, in order:
    last success, not just a unit that exits 0.** `ExecMainExitTimestamp` is wiped by a reboot, and a
    pull-based job leaves no trace on the machine being watched at all. Anything added here should
    write its own timestamp somewhere `verify-host.sh` can read.
-2. **greenboot, and only then an unattended reboot window.** Today nothing detects a bad boot:
-   greenboot is not installed, so there is no automatic rollback, and with no console and no BMC a
-   deployment that boots but breaks sshd needs a physical visit. That is the whole reason the reboot
-   is attended. `bin/verify-host.sh --greenboot` already exists as the health check - host-level
-   assertions only, never the 18 containers, because a slow Tdarr start must not be able to roll a
-   good deployment back. **Treat it as a gate**: package layering on an immutable host is what
-   `nv-patch.sh` was deleted for, and greenboot's GRUB boot-counting is unverified on FCOS+uCore. If
-   it does not layer cleanly, reboots stay attended rather than becoming unguarded.
+2. ~~greenboot, and only then an unattended reboot window.~~ **Done, 2026-08-14.** See
+   `host/greenboot/README.md`. greenboot is layered - the one package on this host, and a
+   deliberate exception to the rule below - and a rejected deployment rolls itself back. The
+   reboot window is `media-stack-reboot.timer`, Sundays at 05:00, driven by
+   `bin/reboot-when-staged.sh`, which is nothing but refusals.
+
+   **The rollback is proven, not assumed**, by layering `tree` to make a second deployment and
+   rejecting it: four red boots, then `Rollback successful`, then a clean boot on the deployment
+   without `tree`, seven and a half minutes unattended. Three things that cost real time and
+   would cost it again:
+
+   - **GRUB boot counting does not work on FCOS out of the box, and its absence is silent.**
+     greenboot ships its snippet to a bootupd *source* directory that layering never regenerates,
+     so the counter is armed and never counted down: checks run, journal reads healthy, rollback
+     cannot happen. `/boot/grub2/custom.cfg` is what closes it.
+   - **greenboot reboots the machine itself on a red boot.** The unit files say otherwise - no
+     `OnFailure=`, no `redboot.target` - and every one of those facts is true and leads to the
+     wrong conclusion, because the behaviour is in the binary. Reasoning from unit files about
+     what a program does is how a whole afternoon gets spent.
+   - **A system unit, or a drop-in for one, cannot be a symlink into `/var/media-stack`.**
+     SELinux is Enforcing and the checkout is `var_t`, so PID 1 cannot read it - while
+     `systemctl cat` prints the file happily and no AVC is logged. The check scripts *are*
+     symlinks and correctly so: greenboot execs those itself. What systemd launches or parses
+     must be labelled; what a running process then reaches is free.
 
 **The applications keep their own logins.** Segmentation narrowed who can reach them; it did not
 reduce `net-arr` to a single caller, so `AuthenticationMethod=External` would still trust five

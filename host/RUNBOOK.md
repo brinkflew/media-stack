@@ -527,8 +527,11 @@ restores the previous image if the unit fails to reach healthy. Caddy is rebuilt
 `media-stack-caddy-build.timer` instead, since it is built here rather than pulled. Nothing to do.
 
 The OS stages a deployment nightly and **never applies it**. That is the whole policy: this machine
-has no console and no BMC, so a deployment that does not boot, or that boots without sshd, is a car
-journey. Until greenboot is in place there is no automatic rollback either.
+has no console and no BMC, so a deployment that does not boot, or that boots without sshd, would be
+a car journey - which is what greenboot now prevents: a deployment that fails its health check
+rolls itself back, proven end to end on 2026-08-14. `media-stack-reboot.timer` applies a staged
+deployment on Sundays at 05:00 when it is safe to; the procedure below is still how you do it by
+hand, and is still worth doing on a day you could reach the machine.
 
 **The reboot procedure. Do it on a day you could physically reach the machine.**
 
