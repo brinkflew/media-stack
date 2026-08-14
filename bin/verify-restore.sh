@@ -81,7 +81,36 @@ case "$REPO_KIND" in
 esac
 [ -s "$RESTIC_PASSWORD_FILE" ] || die "no repository password at $RESTIC_PASSWORD_FILE"
 
-TARGET=$(mktemp -d "${TMPDIR:-/tmp}/media-stack-restore.XXXXXX") || die "cannot create a scratch directory"
+# WHERE THE SCRATCH TREE GOES IS NOT A DETAIL. config/ is 5.5 GB, and on this
+# workstation /tmp is tmpfs with 7.6 GB free out of 15 GB of RAM - so the
+# obvious default would restore the whole tree INTO MEMORY, and either OOM or
+# leave the machine swapping. Default to somewhere disk-backed and let TMPDIR
+# override it deliberately.
+SCRATCH="${TMPDIR:-$HOME/.cache/media-stack}"
+mkdir -p "$SCRATCH" 2>/dev/null
+
+# Fail before downloading gigabytes rather than partway through. restic reports
+# the snapshot's size, so the requirement is knowable up front; ask for 1.5x it
+# to leave room for the restore's own bookkeeping.
+# Snapshots written by older restic have no summary, so fall back to a figure
+# comfortably above what config/ has ever been rather than skipping the check.
+need_mb=$(restic snapshots --latest 1 --json 2>/dev/null \
+	| jq -r '[.[].summary.total_bytes_processed // 0] | max // 0' \
+	| awk '{n = ($1 / 1048576) * 1.5; printf "%d", (n < 1 ? 9000 : n)}')
+have_mb=$(df -Pm "$SCRATCH" | awk 'NR==2 {print $4}')
+fstype=$(findmnt -no FSTYPE --target "$SCRATCH" 2>/dev/null)
+if [ "${need_mb:-0}" -gt 0 ] && [ "${have_mb:-0}" -lt "${need_mb}" ]; then
+	die "$SCRATCH has ${have_mb}M free, this needs about ${need_mb}M.
+  Point TMPDIR somewhere with room:  TMPDIR=/var/tmp $0 $*"
+fi
+case "$fstype" in
+	tmpfs|ramfs)
+		die "$SCRATCH is $fstype - restoring $(( need_mb / 1024 ))G there would go into RAM.
+  Point TMPDIR at disk-backed storage:  TMPDIR=\$HOME/.cache $0 $*" ;;
+esac
+echo "  scratch: $SCRATCH ($fstype, ${have_mb}M free, needs ~${need_mb}M)"
+
+TARGET=$(mktemp -d "$SCRATCH/media-stack-restore.XXXXXX") || die "cannot create a scratch directory"
 cleanup() { [ -n "$KEEP" ] || rm -rf "$TARGET"; }
 trap cleanup EXIT
 
