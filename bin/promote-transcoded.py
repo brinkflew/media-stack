@@ -71,16 +71,25 @@ def has_video(directory):
     return False
 
 
+# One *arr app can own SEVERAL library types, and each is a separate root folder
+# pair. Radarr holds films under queued/movies and documentaries under
+# queued/documentaries; Sonarr holds series and anime the same way.
+#
+# This used to be a single `kind` per service, which meant a transcoded
+# documentary moved to transcoded/documentaries and Radarr was never told - the
+# identical failure to the one described above, just in a folder nobody was
+# watching. The reconciliation has to be per KIND, not per service, because the
+# editor call sets one rootFolderPath for the whole batch.
 SERVICES = {
     "radarr": {
         "container": "radarr", "port": 7878, "key": "RADARR_API_KEY",
         "list": "movie", "editor": "movie/editor", "ids": "movieIds",
-        "rescan": "RescanMovie", "kind": "movies",
+        "rescan": "RescanMovie", "kinds": ("movies", "documentaries"),
     },
     "sonarr": {
         "container": "sonarr", "port": 8989, "key": "SONARR_API_KEY",
         "list": "series", "editor": "series/editor", "ids": "seriesIds",
-        "rescan": "RescanSeries", "kind": "series",
+        "rescan": "RescanSeries", "kinds": ("series", "anime"),
     },
 }
 
@@ -144,51 +153,72 @@ def main():
     promoted_any = False
 
     for svc, cfg in SERVICES.items():
-        kind = cfg["kind"]
-        queued_arr = "%s/queued/%s" % (ARR_LIBRARY, kind)
-        target_arr = "%s/transcoded/%s" % (ARR_LIBRARY, kind)
-
         items = arr(svc, "GET", cfg["list"], keys=keys)
         if items is None:
             print("== %s: API did not answer, skipping" % svc)
             continue
 
-        promote, waiting = [], 0
-        for it in items:
-            path = it.get("path") or ""
-            if not path.startswith(queued_arr + "/"):
-                continue  # already promoted, or somewhere else entirely
-            leaf = path[len(queued_arr) + 1:]
-            gone = not has_video("%s/queued/%s/%s" % (HOST_LIBRARY, kind, leaf))
-            arrived = has_video("%s/transcoded/%s/%s" % (HOST_LIBRARY, kind, leaf))
-            if gone and arrived:
-                promote.append(it)
-            else:
-                waiting += 1
+        # The editor call sets rootFolderPath, and an *arr app rejects a path
+        # that is not one of its configured root folders. Without this check the
+        # failure is a silent no-op on exactly the type nobody is watching, so
+        # ask once and refuse loudly per kind.
+        roots = arr(svc, "GET", "rootfolder", keys=keys) or []
+        known = set(r.get("path", "").rstrip("/") for r in roots)
 
-        if args.verbose:
-            print("== %s: %d still in queued/, %d moved by Tdarr" % (svc, waiting, len(promote)))
-        if not promote:
-            print("== %s: nothing to reconcile (%d waiting on Tdarr)" % (svc, waiting))
-            continue
+        rescan_needed = False
+        for kind in cfg["kinds"]:
+            queued_arr = "%s/queued/%s" % (ARR_LIBRARY, kind)
+            target_arr = "%s/transcoded/%s" % (ARR_LIBRARY, kind)
 
-        print("== %s: reconciling %d that Tdarr has already moved" % (svc, len(promote)))
-        for it in promote:
-            print("   ->     %s" % (it.get("title") or it.get("path")))
-        if args.dry_run:
-            continue
+            promote, waiting = [], 0
+            for it in items:
+                path = it.get("path") or ""
+                if not path.startswith(queued_arr + "/"):
+                    continue  # already promoted, or a different kind entirely
+                leaf = path[len(queued_arr) + 1:]
+                gone = not has_video("%s/queued/%s/%s" % (HOST_LIBRARY, kind, leaf))
+                arrived = has_video("%s/transcoded/%s/%s" % (HOST_LIBRARY, kind, leaf))
+                if gone and arrived:
+                    promote.append(it)
+                else:
+                    waiting += 1
 
-        # moveFiles=false: the file is ALREADY at the target. Asking the
-        # application to move it would fail on a source that no longer exists.
-        payload = {cfg["ids"]: [it["id"] for it in promote],
-                   "rootFolderPath": target_arr, "moveFiles": False}
-        if arr(svc, "PUT", cfg["editor"], payload, keys) is None:
-            print("   %s editor call failed - nothing changed" % svc, file=sys.stderr)
-            continue
-        # Then make it look at disk again, so the file is re-detected in place.
-        arr(svc, "POST", "command",
-            {"name": cfg["rescan"]}, keys)
-        promoted_any = True
+            if args.verbose:
+                print("== %s/%s: %d still in queued/, %d moved by Tdarr"
+                      % (svc, kind, waiting, len(promote)))
+            if not promote:
+                if waiting or args.verbose:
+                    print("== %s/%s: nothing to reconcile (%d waiting on Tdarr)"
+                          % (svc, kind, waiting))
+                continue
+
+            if target_arr.rstrip("/") not in known:
+                print("== %s/%s: %d ready, but %s is not a root folder in %s - "
+                      "add it or they stay invisible"
+                      % (svc, kind, len(promote), target_arr, svc), file=sys.stderr)
+                continue
+
+            print("== %s/%s: reconciling %d that Tdarr has already moved"
+                  % (svc, kind, len(promote)))
+            for it in promote:
+                print("   ->     %s" % (it.get("title") or it.get("path")))
+            if args.dry_run:
+                continue
+
+            # moveFiles=false: the file is ALREADY at the target. Asking the
+            # application to move it would fail on a source that no longer exists.
+            payload = {cfg["ids"]: [it["id"] for it in promote],
+                       "rootFolderPath": target_arr, "moveFiles": False}
+            if arr(svc, "PUT", cfg["editor"], payload, keys) is None:
+                print("   %s editor call failed - nothing changed" % svc, file=sys.stderr)
+                continue
+            rescan_needed = True
+            promoted_any = True
+
+        # One rescan per application, after all its kinds - it is a full-library
+        # command, so calling it per kind would just repeat the same work.
+        if rescan_needed and not args.dry_run:
+            arr(svc, "POST", "command", {"name": cfg["rescan"]}, keys)
 
     if promoted_any and not args.dry_run:
         jkey = keys.get("JELLYFIN_API_KEY", "")
