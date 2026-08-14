@@ -169,6 +169,40 @@ make it so, both of which are easy to get wrong:
 takes precedence over the ownership that would otherwise grant you access, and once applied only the
 Organization Owner can replace it.
 
+**THE BUCKET POLICY IS ONLY HALF OF IT. Scaleway ANDs the IAM policy with the bucket policy**, and
+the application needs an IAM policy of its own or nothing works. This is the step that is easy to
+miss, because the bucket policy looks complete and self-contained. The symptom is restic failing
+before it does anything at all:
+
+```
+Stat(<config/>) failed: Stat: Access Denied.
+Fatal: unable to open config file: Stat: Access Denied.
+```
+
+That is a *read* of the repository's own `config` object being refused, not a write - so a policy
+granting only `ObjectStorageObjectsWrite` produces it, which is the obvious thing to grant something
+called "append-only". The two layers do different jobs, and the split is the whole design:
+
+| Layer | What it can express | What it is for here |
+|---|---|---|
+| IAM policy | which *kinds* of operation, per project. **No prefix scoping.** | making read, write and delete possible at all |
+| bucket policy | per-principal, per-*prefix* | narrowing delete to `locks/*` |
+
+The rule therefore needs all four of these, scoped to the project holding the bucket:
+
+| Permission set | Why |
+|---|---|
+| `ObjectStorageObjectsRead` | read `config`, the indexes and the packs. Without it nothing opens. |
+| `ObjectStorageObjectsWrite` | upload packs |
+| `ObjectStorageBucketsRead` | list objects under a prefix |
+| `ObjectStorageObjectsDelete` | **release its own lock.** `restic copy` locks the destination and cannot finish without deleting that lock afterwards. |
+
+**Granting delete at the IAM layer does not give away the append-only property**, and this is the
+part worth understanding rather than pattern-matching. IAM cannot say "delete only under `locks/`";
+the bucket policy can, and does. Delete outside `locks/` is denied there by omission. So the
+guarantee rests on the bucket policy, which is exactly what the check below exists to prove -
+and it is a real check rather than a restatement, because the two layers can disagree.
+
 **Verify the restriction rather than trusting it.** A policy that silently does nothing looks exactly
 like one that works, and this one has no `Deny` to eyeball - it relies on an absence:
 
@@ -856,6 +890,14 @@ Conclusions from auditing the running host. Do not rediscover these:
     changed no kernel package, only `linux-firmware` 20260622 -> 20260810, and `/boot` went 171 MB ->
     **26 MB** free until the old deployment was unpinned and `rpm-ostree cleanup -r` run. So
     unpinning after verifying is not tidying, it is what lets the next update write its kernel.
+    Reproduced exactly on the 2026-08-14 reboot: 171 -> 26 -> 171 MB.
+  - **A low `/boot` WITH something pinned is a different finding from a low `/boot` on its own**, and
+    `verify-host.sh` now distinguishes them: the first is a WARN naming the remedy, the second is a
+    FAIL. Conflating them cost a false alarm on the first scripted reboot - the pin the script had
+    just set tripped the check, and the script concluded the new deployment was bad and recommended
+    a rollback. **`bin/reboot-host.sh` gates on `verify-host.sh --greenboot`, not the full battery**,
+    for the same reason: containers, backups and the checkout can all be unhealthy for reasons a
+    rollback would not fix.
 - **`ExecMainExitTimestamp` is runtime state and a reboot wipes it**, so "this nightly job has never
   run" and "it has not run in the twenty minutes since boot" look identical. `bin/verify-host.sh`
   therefore only treats a missing run as a finding once uptime exceeds the timer's period -
