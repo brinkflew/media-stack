@@ -54,6 +54,41 @@ bad()  { fails+=("$1"); [ -n "$QUIET" ] || printf '  \033[31mFAIL\033[0m  %s\n' 
 warn() { warns+=("$1"); [ -n "$QUIET" ] || printf '  \033[33mWARN\033[0m  %s\n' "$1"; }
 note() { notes+=("$1"); }
 
+uptime_s=$(cut -d. -f1 /proc/uptime)
+
+# Did a nightly oneshot run, and did it succeed?  Shared by the OS updater and
+# the container one, because the failure mode is identical: a timer that stopped
+# firing looks exactly like a quiet upstream, and the silence hides everything.
+#
+# ExecMainExitTimestamp is RUNTIME state and is wiped by a reboot, so "never
+# run" and "not run since we booted twenty minutes ago" are indistinguishable
+# from the unit alone. Warning on the second one means every reboot produces a
+# false alarm for up to a day, which is exactly how a person learns to ignore
+# this line. So it is only a finding once the machine has been up longer than
+# the timer's period.
+check_timer_run() {  # <label> <period-seconds> <unit> [--user]
+	local label="$1" period="$2" unit="$3" scope="${4:-}"
+	local run rc age
+	run=$(systemctl $scope show "$unit" -p ExecMainExitTimestamp --value 2>/dev/null)
+	rc=$(systemctl $scope show "$unit" -p ExecMainStatus --value 2>/dev/null)
+	if [ -z "$run" ]; then
+		if [ "$uptime_s" -lt "$period" ]; then
+			ok "$label has not run since boot ($((uptime_s / 60))m ago) - not yet due"
+		else
+			bad "$label has never run, and this machine has been up $((uptime_s / 3600))h"
+		fi
+		return
+	fi
+	age=$(( ( $(date +%s) - $(date -d "$run" +%s) ) / 3600 ))
+	if [ "${rc:-1}" != 0 ]; then
+		bad "the last $label run FAILED (exit $rc, ${age}h ago) - nothing is updating"
+	elif [ "$age" -gt 48 ]; then
+		bad "the last $label run was ${age}h ago - the timer has stopped firing"
+	else
+		ok "last $label run ${age}h ago, exit 0"
+	fi
+}
+
 # ------------------------------------------------------------------------------
 # The address, first. The router's 9122 -> 22 forward points at a fixed address,
 # so if it moved you want to know inside the session you already have rather
@@ -126,20 +161,7 @@ if [ "$(systemctl is-enabled rpm-ostreed-automatic.timer 2>/dev/null)" = enabled
 else
 	bad "rpm-ostreed-automatic.timer is not enabled - nothing checks for updates"
 fi
-last_run=$(systemctl show rpm-ostreed-automatic.service -p ExecMainExitTimestamp --value 2>/dev/null)
-last_rc=$(systemctl show rpm-ostreed-automatic.service -p ExecMainStatus --value 2>/dev/null)
-if [ -z "$last_run" ]; then
-	warn "the update check has never run"
-else
-	age_h=$(( ( $(date +%s) - $(date -d "$last_run" +%s) ) / 3600 ))
-	if [ "${last_rc:-1}" != 0 ]; then
-		bad "the last update check FAILED (exit $last_rc, ${age_h}h ago) - nothing is staging"
-	elif [ "$age_h" -gt 48 ]; then
-		bad "the last update check was ${age_h}h ago - the timer has stopped firing"
-	else
-		ok "last update check ${age_h}h ago, exit 0"
-	fi
-fi
+check_timer_run "OS update check" 86400 rpm-ostreed-automatic.service
 
 # Only ONE updater may be armed. Two would both write deployments into a /boot
 # that holds two kernels, and the loser fails overnight with nobody watching.
@@ -278,20 +300,7 @@ if [ -z "$GREENBOOT" ]; then
 	else
 		bad "podman-auto-update.timer is not enabled - no container ever updates"
 	fi
-	au_run=$(systemctl --user show podman-auto-update.service -p ExecMainExitTimestamp --value 2>/dev/null)
-	au_rc=$(systemctl --user show podman-auto-update.service -p ExecMainStatus --value 2>/dev/null)
-	if [ -z "$au_run" ]; then
-		warn "podman-auto-update has never run"
-	else
-		au_age=$(( ( $(date +%s) - $(date -d "$au_run" +%s) ) / 3600 ))
-		if [ "${au_rc:-1}" != 0 ]; then
-			bad "the last container update run FAILED (exit $au_rc, ${au_age}h ago)"
-		elif [ "$au_age" -gt 48 ]; then
-			bad "the last container update run was ${au_age}h ago - the timer has stopped"
-		else
-			ok "last container update run ${au_age}h ago, exit 0"
-		fi
-	fi
+	check_timer_run "container update" 86400 podman-auto-update.service --user
 
 	# Caddy is built here, and `local` policy notices a new image without ever
 	# producing one - so if this timer stops, Caddy silently stops updating while

@@ -193,9 +193,13 @@ journey. `bin/verify-host.sh` is what tells you one is waiting, via `/run/motd.d
 rpm-ostree status && df -h /boot              # what is staged, and room to apply it
 systemctl --user list-units --failed; podman ps --filter health=unhealthy
 nvidia-smi --query-gpu=utilization.encoder --format=csv   # 0,0 - nothing mid-encode
-sudo ostree admin pin 0                       # pin the BOOTED one - free, it already has its slot
+# pin the BOOTED deployment - NOT index 0, which is the staged one when one exists
+idx=$(rpm-ostree status --json | jq '[.deployments[]] | map(.booted) | index(true)')
+sudo ostree admin pin "$idx"
 sudo systemctl reboot                         # on a day you could reach the machine
-./bin/verify-host.sh && sudo ostree admin pin 0 --unpin   # a forgotten pin fills /boot
+./bin/verify-host.sh                          # then UNPIN - a pin can cost a whole /boot slot
+idx=$(rpm-ostree status --json | jq '[.deployments[]] | map(.pinned) | index(true)')
+sudo ostree admin pin "$idx" --unpin && sudo rpm-ostree cleanup -r
 ```
 
 **A unit stuck in `activating` is usually a `Restart=always` loop, not slow progress.** Read the
@@ -616,13 +620,24 @@ Conclusions from auditing the running host. Do not rediscover these:
   `nvidia.com/gpu=1` with different library paths, which the resolver **rejects rather than merges**.
   Both Jellyfin and tdarr-node-01 consume that device. Removed 2026-08-13; `bin/verify-host.sh`
   asserts exactly one spec exists and that it names the running driver.
-- **`/boot` costs one slot per DISTINCT KERNEL, not per deployment**, and holds exactly two. Both
-  current deployments share one 146 MB slot because they ship the same kernel; two slots plus GRUB is
-  303 MB of 350 MB. Two rules follow: never hold three distinct kernels, and **pin only the booted
-  deployment** — that is free, since it already occupies the slot you are running from, whereas
-  pinning an older one with a different kernel costs a full slot and leaves ~25 MB. A forgotten pin
-  is the failure mode. **`/boot` cannot be grown**: `nvme0n1p4` is XFS, which cannot be shrunk by any
-  tool, so enlarging it means repartitioning the disk that carries `config/`.
+- **`/boot` costs one slot per distinct KERNEL+INITRAMFS, not per deployment**, holds exactly two
+  (2 × 146 MB + 11 MB GRUB = 303 MB of 350 MB), and **cannot be grown** — `nvme0n1p4` is XFS, which
+  cannot be shrunk by any tool, so enlarging it means repartitioning the disk that carries `config/`.
+  Two corrections learned by doing it wrong on 2026-08-14:
+  - **`ostree admin pin 0` is wrong whenever something is staged.** Index 0 is then the *staged*
+    deployment and the command fails with `Cannot pin staged deployment`. Derive the booted index:
+    `rpm-ostree status --json | jq '[.deployments[]] | map(.booted) | index(true)'`.
+  - **Pinning the booted deployment is free only until you reboot.** It already owns the slot it
+    runs from — but if the deployment you boot into carries a different initramfs, the pin is
+    suddenly holding a second full slot. **A firmware bump alone is enough**: the signed rebase
+    changed no kernel package, only `linux-firmware` 20260622 → 20260810, and `/boot` went 171 MB →
+    **26 MB** free until the old deployment was unpinned and `rpm-ostree cleanup -r` run. So
+    unpinning after verifying is not tidying, it is what lets the next update write its kernel.
+- **`ExecMainExitTimestamp` is runtime state and a reboot wipes it**, so "this nightly job has never
+  run" and "it has not run in the twenty minutes since boot" look identical. `bin/verify-host.sh`
+  therefore only treats a missing run as a finding once uptime exceeds the timer's period —
+  otherwise every reboot produced a day of false warnings, which is precisely how someone learns to
+  ignore the one line that matters.
 - **`/mnt/media` is a single disk with no redundancy**, holding only re-downloadable media. It is
   treated as disposable and is deliberately not backed up. `config/` is the part that matters.
 - **Transcode scratch must stay off the media disk.** `DOCKER_VOLUME_CACHE` points at the SSD

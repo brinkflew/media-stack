@@ -521,19 +521,34 @@ ssh home.local
 df -h /boot                                    # >160M free
 nvidia-smi --query-gpu=utilization.encoder --format=csv,noheader   # 0% - nothing mid-encode
 
-sudo ostree admin pin 0                        # pin the BOOTED deployment - see below
+# PIN THE BOOTED ONE, WHICH IS NOT INDEX 0 WHEN SOMETHING IS STAGED.
+# `ostree admin pin 0` fails outright with "Cannot pin staged deployment".
+idx=$(rpm-ostree status --json | jq '[.deployments[]] | map(.booted) | index(true)')
+sudo ostree admin pin "$idx"
 sudo systemctl reboot
 
 until ssh -o ConnectTimeout=5 home.local true 2>/dev/null; do sleep 5; done
 /var/media-stack/bin/verify-host.sh            # must pass before you walk away
-sudo ostree admin pin 0 --unpin                # a forgotten pin is a /boot bomb
+
+# UNPIN. This is not tidying - see below.
+idx=$(rpm-ostree status --json | jq '[.deployments[]] | map(.pinned) | index(true)')
+sudo ostree admin pin "$idx" --unpin && sudo rpm-ostree cleanup -r
 ```
 
-**Pinning the booted deployment is free; pinning an older one is not.** `/boot` costs one slot per
-*distinct kernel*, not per deployment, and holds exactly two — the booted deployment already
-occupies the slot it runs from, so pinning it consumes nothing. Pinning an older deployment with a
-different kernel costs a full 146 MB slot and leaves ~25 MB, at which point the next staged update
-has nowhere to write. `/boot` cannot be grown: `nvme0n1p4` is XFS, which cannot be shrunk.
+**"Pinning the booted deployment is free" is only true until you reboot.** `/boot` costs one slot
+per *distinct kernel+initramfs*, not per deployment, and holds exactly two. At the moment you pin
+it, the booted deployment already occupies the slot it runs from, so the pin costs nothing — but if
+the deployment you then boot into carries a different initramfs, the pin is suddenly holding a
+second full slot.
+
+**And a firmware bump is enough to change the initramfs.** Measured on 2026-08-14: the signed rebase
+changed no kernel package at all, only `linux-firmware` 20260622 → 20260810, and that alone produced
+a new 146 MB slot. `/boot` went from 171 MB free to **26 MB** — a FAIL — until the old deployment was
+unpinned and `rpm-ostree cleanup -r` run, which put it straight back to 171 MB.
+
+So unpinning after verifying is not housekeeping, it is what keeps the *next* update able to write
+its kernel at all. `bin/verify-host.sh` warns whenever anything is pinned for exactly this reason.
+`/boot` cannot be grown: `nvme0n1p4` is XFS, which cannot be shrunk by any tool.
 
 **An OS update changes the NVIDIA driver**, which ships inside the uCore image. The CDI spec names
 that version in dozens of paths, so `verify-host.sh` asserts the spec matches the running driver —
