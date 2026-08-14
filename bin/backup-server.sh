@@ -151,13 +151,26 @@ local_id=$(restic snapshots --latest 1 --json 2>/dev/null | jq -r '.[0].short_id
 # ------------------------------------------------------------------------------
 # 5. Off-site copy
 # ------------------------------------------------------------------------------
-# Not configured is not a failure: the local leg above is already worth having,
-# and this lets the timer be useful before the Scaleway key exists. Staleness is
-# caught by bin/verify-host.sh, which fails when the off-site copy is older than
-# 72h - so a key that stops working surfaces there rather than here.
+# NOT CONFIGURED and CONFIGURED BUT BROKEN are different, and the difference has
+# to be in the guard rather than in the error. "No credentials at all" is the
+# state between adding these variables and creating the Scaleway key, and
+# failing the unit nightly for it teaches someone to ignore a red unit. A key
+# that is present and rejected is a real failure and must be loud.
+#
+# So the test covers the ACCESS KEY, not just the repository. Getting this wrong
+# is what made the first run fail: the repository and password were in sops and
+# the key was still empty, so it tried and 403'd.
+#
+# Either way, staleness is the real backstop: bin/verify-host.sh FAILS when the
+# off-site copy is more than 72h old, so a skip that goes on too long surfaces
+# there whatever this script decides.
 offsite_id=""
-if [ -z "${BACKUP_OFFSITE_REPOSITORY:-}" ] || [ -z "${BACKUP_OFFSITE_PASSWORD:-}" ]; then
-	printf '\n\033[33m  off-site is not configured - skipping\033[0m\n'
+offsite_failed=""
+if [ -z "${BACKUP_OFFSITE_REPOSITORY:-}" ] || [ -z "${BACKUP_OFFSITE_PASSWORD:-}" ] \
+	|| [ -z "${BACKUP_OFFSITE_ACCESS_KEY:-}" ] || [ -z "${BACKUP_OFFSITE_SECRET_KEY:-}" ]; then
+	printf '\n\033[33m  off-site is not configured yet - skipping\033[0m\n'
+	printf '  Create the append-only Scaleway key and add it to secrets/env.sops.env.\n'
+	printf '  bin/verify-host.sh will FAIL on this in 72h regardless.\n'
 elif [ -n "$DRY" ]; then
 	printf '\n  (dry run - not copying off-site)\n'
 else
@@ -172,12 +185,19 @@ else
 	#
 	# NO forget, NO prune, NO init. The key cannot delete, and it should not be
 	# able to; retention happens on the workstation.
-	restic -r "$BACKUP_OFFSITE_REPOSITORY" --password-file "$PWDIR/offsite" \
-		copy --from-repo "$RESTIC_REPOSITORY" --from-password-file "$PWDIR/local" \
-		|| die "off-site copy failed"
-
-	offsite_id=$(restic -r "$BACKUP_OFFSITE_REPOSITORY" --password-file "$PWDIR/offsite" \
-		snapshots --latest 1 --json 2>/dev/null | jq -r '.[0].short_id // empty')
+	# NOT `|| die`. A failed off-site leg must not discard the record of a
+	# successful local one: the first run did exactly that, and verify-host.sh
+	# would then have reported "no local backup has EVER been recorded" while a
+	# perfectly good 5.4 GiB snapshot sat in /var/backups. Note the failure,
+	# write the marker, exit non-zero at the end.
+	if restic -r "$BACKUP_OFFSITE_REPOSITORY" --password-file "$PWDIR/offsite" \
+		copy --from-repo "$RESTIC_REPOSITORY" --from-password-file "$PWDIR/local"; then
+		offsite_id=$(restic -r "$BACKUP_OFFSITE_REPOSITORY" --password-file "$PWDIR/offsite" \
+			snapshots --latest 1 --json 2>/dev/null | jq -r '.[0].short_id // empty')
+	else
+		offsite_failed=1
+		printf '\033[31m  off-site copy FAILED - the local snapshot is still good\033[0m\n'
+	fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -207,3 +227,7 @@ fi
 
 say "snapshots"
 restic snapshots --compact 2>/dev/null | tail -4
+
+# Exit non-zero only AFTER the marker is written, so the unit goes red and the
+# MOTD still knows the local copy is current.
+[ -z "$offsite_failed" ] || die "the off-site copy failed - the local one is current"
