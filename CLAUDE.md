@@ -268,9 +268,26 @@ backup that looks complete and is not:
 `bin/verify-restore.sh` restores the latest snapshot to a scratch directory and asserts what came
 out. Before 2026-08-14 this had never been done on the current config tree: the only restore ever
 performed was during the migration, from a backup that predated Caddy, Pocket ID and Tinyauth, so
-every claim about restoring TLS and sign-on was inference. It now passes - 23 databases through
-`PRAGMA integrity_check`, 11 certificates, the ACME account, and every named database including
-Pocket ID's passkey store.
+every claim about restoring TLS and sign-on was inference.
+
+**All three copies have now been restored end to end**, on 2026-08-14, each passing the same
+assertions: 23 databases through `PRAGMA integrity_check`, 11 certificates, the ACME account, and
+every named database including Pocket ID's passkey store.
+
+| Copy | Proven by |
+|---|---|
+| server local | `TMPDIR=/var/tmp bin/verify-restore.sh` on the server, against `/var/backups/media-stack` |
+| workstation pull | `bin/verify-restore.sh` |
+| **off-site** | `bin/verify-restore.sh --repo offsite` - 5.6 GB pulled back from Scaleway |
+
+The off-site one is the test that mattered, because it is the only copy that survives `nvme0n1`, and
+it restored the snapshot **the server itself wrote** rather than a copy of the workstation's chain.
+
+**Restoring 5.5 GB needs somewhere to put it, and `/tmp` is not it.** On the workstation `/tmp` is
+tmpfs with 7.6 GB free out of 15 GB of RAM, so the obvious default would unpack the tree into memory
+and run out partway through, after downloading several gigabytes. `verify-restore.sh` defaults to
+disk-backed storage and refuses up front if the scratch filesystem is `tmpfs` or too small, naming
+the `TMPDIR` override in the error.
 
 **It checks the exclusions BEFORE it opens any database, and that ordering is load-bearing.**
 Opening a WAL-mode SQLite file creates a `-shm` and a `-wal` beside it *even read-only*, so checking
