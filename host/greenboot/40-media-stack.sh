@@ -52,7 +52,7 @@ LIMIT="${MEDIA_STACK_GREENBOOT_TIMEOUT:-120}"
 # ------------------------------------------------------------------------------
 # Same shape as the backup state file: key=value, ISO-8601 UTC, written to a
 # temporary and moved into place so a reader never sees a half-written file.
-# rollback_at is preserved rather than rewritten - it is set by the red.d hook
+# red_boot_at is preserved rather than rewritten - it is set by the red.d hook
 # and cleared by a human, and this run has nothing to say about it.
 record() {  # <green|red|timeout|missing>
 	local now booted_ver booted_sum status_json
@@ -69,7 +69,7 @@ record() {  # <green|red|timeout|missing>
 		echo "greenboot_checked_at=$now"
 		echo "booted_version=${booted_ver:-?}"
 		echo "booted_checksum=${booted_sum:-?}"
-		grep -E '^rollback_at=' "$STATE" 2>/dev/null
+		grep -E '^red_boot_at=' "$STATE" 2>/dev/null
 	} >"$STATE.tmp"
 	mv "$STATE.tmp" "$STATE"
 }

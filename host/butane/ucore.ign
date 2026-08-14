@@ -72,6 +72,14 @@
         "mode": 420
       },
       {
+        "path": "/boot/grub2/custom.cfg",
+        "contents": {
+          "compression": "gzip",
+          "source": "data:;base64,H4sIAAAAAAAC/2yPwQqDMBBE7/sVQ+g1oOeSL5EiNm5oQDfgrl6K/17aiih4ffNm2M2iY+mRJU48shjlhAZe4G7vZynWxjKL8bQ6+G6HOsfIqqtDgKscHnfYi4WAnIDmovz3fLmOfH3cAJQNPaduHizUOzn2gv9yHpR/cc/b/SeJgJQJ0G7hlmU5hynTvro9FCo6uxunTwAAAP//8wLsZycBAAA="
+        },
+        "mode": 384
+      },
+      {
         "overwrite": true,
         "path": "/etc/rpm-ostreed.conf",
         "contents": {
@@ -141,8 +149,12 @@
         "target": "/var/media-stack/stacks/infra"
       },
       {
-        "path": "/etc/greenboot/check/wanted.d/40-media-stack.sh",
+        "path": "/etc/greenboot/check/required.d/40-media-stack.sh",
         "target": "/var/media-stack/host/greenboot/40-media-stack.sh"
+      },
+      {
+        "path": "/etc/greenboot/red.d/50-record-red-boot.sh",
+        "target": "/var/media-stack/host/greenboot/50-record-red-boot.sh"
       }
     ]
   },

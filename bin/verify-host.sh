@@ -348,11 +348,11 @@ if [ -z "$GREENBOOT" ]; then
 	# the deployment, so the binary answers the question honestly.
 	gb_bin="${MEDIA_STACK_GREENBOOT_BIN:-/usr/libexec/greenboot/greenboot}"
 
-	# The loudest thing here. A rollback means a staged deployment was bad, and
-	# it is also what stops bin/reboot-when-staged.sh rebooting into the same
-	# image again tonight - so it has to be cleared by a person, not aged out.
-	gb_rollback=$(sed -n 's/^rollback_at=//p' "$boot_state" 2>/dev/null | tail -1)
-	[ -z "$gb_rollback" ] || bad "greenboot ROLLED BACK a deployment at $gb_rollback - unattended reboots are held; clear rollback_at in $boot_state once understood"
+	# The loudest thing here. A red boot means a deployment was rejected, and
+	# this mark is also what stops bin/reboot-when-staged.sh rebooting into the
+	# same image tonight - so it is cleared by a person, not aged out.
+	gb_red=$(sed -n 's/^red_boot_at=//p' "$boot_state" 2>/dev/null | tail -1)
+	[ -z "$gb_red" ] || bad "greenboot REJECTED a boot at $gb_red - unattended reboots are held; clear red_boot_at in $boot_state once understood"
 
 	if [ ! -x "$gb_bin" ]; then
 		warn "greenboot is not installed - a bad deployment cannot roll itself back"

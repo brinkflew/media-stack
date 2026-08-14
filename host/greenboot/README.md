@@ -15,9 +15,10 @@ no copy step. Nothing here is picked up automatically; each link is made once.
 
 | Tracked here | Installed at | What it is |
 |---|---|---|
-| `40-media-stack.sh` | `/etc/greenboot/check/wanted.d/40-media-stack.sh` | the check wrapper, **symlinked** |
+| `40-media-stack.sh` | `/etc/greenboot/check/required.d/40-media-stack.sh` | the check wrapper, **symlinked** |
+| `50-record-red-boot.sh` | `/etc/greenboot/red.d/50-record-red-boot.sh` | the loop-breaker, **symlinked** |
 | (inline in `ucore.bu`) | `/etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf` | ordering and timeout, **a real file** |
-| `custom.cfg` | `/boot/grub2/custom.cfg` | GRUB boot counting - **phase 2, copied not symlinked** |
+| `custom.cfg` | `/boot/grub2/custom.cfg` | GRUB boot counting, **copied not symlinked** |
 
 ```bash
 sudo rpm-ostree install greenboot      # NOT greenboot-default-health-checks - see below
@@ -151,6 +152,35 @@ rollback_at=...        # set by red.d, cleared by a human
 missing checkout or a slow `rpm-ostreed`, and a health check that reverts the OS for either
 would be doing harm confidently. Only a confirmed FAIL is allowed to mean "bad deployment" -
 the same rule the off-site policy probe follows.
+
+## greenboot does not reboot on a red boot, and that is the whole shape of it
+
+**Measured on the installed 0.16, and it is not what the name suggests.** There is no
+`OnFailure=` on `greenboot-healthcheck.service`, no `redboot.target`, and nothing depends on
+`boot-complete.target` except `greenboot-success.target`. So an unhealthy boot leaves the
+machine **up, on the bad deployment, with `boot_success=0`** - and then waits.
+
+The counter only moves when a boot happens, because GRUB is what decrements it. So:
+
+```
+boot 1   new deployment. ConditionNeedsUpdate fires, boot_counter=3 is armed.
+         check fails -> red.d records red_boot_at. NOTHING REBOOTS.
+boot 2   (only if something reboots)  GRUB 3 -> 2
+boot 3                                GRUB 2 -> 1
+boot 4                                GRUB 1 -> 0, sets default=1 and boot_counter=-1
+         -> the previous deployment boots, greenboot notices the fallback and makes it
+            permanent with `rpm-ostree rollback`
+```
+
+**So greenboot on its own gives detection, not recovery.** Recovery needs something to reboot,
+and that is a deliberate decision rather than a default - a reboot-on-red is bounded by the
+counter, but it is still a machine with no console rebooting itself because a check failed.
+
+`greenboot-set-rollback-trigger.service` is worth reading for the same reason: it runs
+`ExecStart` **at boot**, not `ExecStop` at shutdown as most write-ups claim, and it is gated by
+`ConditionNeedsUpdate=|/etc`. That is a useful safety property - the counter is only ever armed
+on the first boot into a **new** deployment, which is exactly when a rollback target exists. It
+is why arming this with a single deployment on disk cannot strand the machine.
 
 ## Two traps worth knowing before arming this
 
