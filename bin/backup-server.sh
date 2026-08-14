@@ -28,6 +28,13 @@
 # denied everywhere except the locks/ prefix restic needs to release its own
 # lock. A compromised server can therefore ADD data and never destroy history.
 #
+# AND IT PROVES THAT EVERY NIGHT rather than trusting it. The restriction rests
+# on an absence - there is no Deny statement, only nothing granting delete
+# outside locks/ - so a policy that has quietly stopped constraining anything is
+# indistinguishable from one that works. The probe writes a 0-byte object and
+# tries to delete it, expecting AccessDenied, and records the result where
+# bin/verify-host.sh can see it go stale. See section 5.
+#
 # Which is why this script never prunes the off-site repository. It could not
 # anyway - the calls would 403 - but the retention has to happen somewhere, so
 # it happens on the workstation, which holds the admin key. See
@@ -98,7 +105,9 @@ rsync -a --delete --delete-excluded --info=stats1 \
 certs=$(find "$STAGING/config/caddy" -name '*.crt' 2>/dev/null | wc -l)
 keys=$(find "$STAGING/config/caddy" -name '*.key' 2>/dev/null | wc -l)
 echo "    $certs certificates, $keys private keys"
-[ "$certs" -gt 0 ] && [ "$keys" -gt 0 ] || die "no Caddy certificates captured"
+if [ "$certs" -eq 0 ] || [ "$keys" -eq 0 ]; then
+	die "no Caddy certificates captured"
+fi
 
 # ------------------------------------------------------------------------------
 # 3. Consistent database snapshots, laid over the file copy
@@ -178,6 +187,8 @@ local_id=$(snapshot_id)
 # there whatever this script decides.
 offsite_id=""
 offsite_failed=""
+policy_ok=""
+policy_broken=""
 if [ -z "${BACKUP_OFFSITE_REPOSITORY:-}" ] || [ -z "${BACKUP_OFFSITE_PASSWORD:-}" ] \
 	|| [ -z "${BACKUP_OFFSITE_ACCESS_KEY:-}" ] || [ -z "${BACKUP_OFFSITE_SECRET_KEY:-}" ]; then
 	printf '\n\033[33m  off-site is not configured yet - skipping\033[0m\n'
@@ -209,6 +220,99 @@ else
 		offsite_failed=1
 		printf '\033[31m  off-site copy FAILED - the local snapshot is still good\033[0m\n'
 	fi
+
+	# --------------------------------------------------------------------------
+	# The append-only guarantee, asserted rather than remembered
+	# --------------------------------------------------------------------------
+	# Driving the backup from the server spends part of the old security model -
+	# the credential now lives on the machine being backed up - so what is left
+	# has to be enforced rather than assumed: the Scaleway key may write, and may
+	# delete ONLY under locks/, which restic needs to release its own lock.
+	#
+	# That restriction rests on an ABSENCE. There is no Deny statement to read;
+	# delete outside locks/ is impossible because nothing grants it. A policy
+	# that has silently stopped constraining anything therefore looks exactly
+	# like one that works, and it lives outside this repository and outside every
+	# backup - a console edit, a key rotation that reattaches a broader IAM
+	# policy, or a Scaleway-side policy migration would all widen it with nothing
+	# here noticing.
+	#
+	# AUTHORIZATION IS EVALUATED BEFORE OBJECT EXISTENCE, which is what makes
+	# this cheap: a DeleteObject refused by policy is 403, an allowed one is 204,
+	# and the two are distinguishable without destroying anything. The
+	# alternative - `restic forget --keep-last 1 --prune`, which is what
+	# CLAUDE.md documents - proves the same thing by pruning the off-site
+	# repository to a single snapshot on its way to telling you.
+	#
+	# THE PUT IS NOT OPTIONAL. `rclone deletefile` stats the object first, so
+	# against a key that does not exist it fails at the HEAD and never issues the
+	# DELETE - a probe that passes for ever while testing nothing. One small
+	# object therefore lives at the probe key, overwritten each night. It sits at
+	# the top level, where restic reads only `config`, rather than in one of the
+	# prefixes it enumerates.
+	#
+	# Two rclone details, both found by the probe failing rather than by reading
+	# the manual, and both of which made the PUT fail while looking like a
+	# credentials problem:
+	#
+	#   --s3-no-check-bucket  rclone otherwise issues CreateBucket before its
+	#                         first upload. The append-only key cannot create
+	#                         buckets - correctly - so every write failed with
+	#                         `operation error S3: CreateBucket`, which reads
+	#                         like the key is broken rather than like rclone
+	#                         asking for something it does not need.
+	#   a NON-EMPTY body      `rclone rcat` refuses empty stdin outright with
+	#                         "nothing to read from standard input", so the
+	#                         obvious </dev/null writes nothing at all.
+	#
+	# rclone rather than a hand-rolled SigV4 request because uCore already ships
+	# it, and the credentials go in through RCLONE_S3_* rather than argv for the
+	# same reason the restic passwords go into files: anything on a command line
+	# is readable out of the process table. The leading colon in `:s3:` means an
+	# ad-hoc backend, so no rclone config file is consulted or needed.
+	say "off-site delete denial"
+	if ! command -v rclone >/dev/null 2>&1; then
+		printf '\033[33m  inconclusive: rclone is not installed\033[0m\n'
+	else
+		# s3:https://s3.fr-par.scw.cloud/home-server-backup -> endpoint + bucket
+		repo_url=${BACKUP_OFFSITE_REPOSITORY#s3:}
+		repo_rest=${repo_url#*://}
+		probe_host=${repo_rest%%/*}
+		probe_bucket=${repo_rest#*/}
+		export RCLONE_CONFIG=""          # no config file exists or is wanted
+		export RCLONE_S3_PROVIDER=Scaleway
+		export RCLONE_S3_NO_CHECK_BUCKET=true
+		export RCLONE_S3_ACCESS_KEY_ID="$BACKUP_OFFSITE_ACCESS_KEY"
+		export RCLONE_S3_SECRET_ACCESS_KEY="$BACKUP_OFFSITE_SECRET_KEY"
+		export RCLONE_S3_ENDPOINT="${repo_url%%://*}://$probe_host"
+		# Scaleway signs with the region named in the endpoint host.
+		probe_region=$(printf '%s' "$probe_host" | awk -F. '/^s3\./ { print $2 }')
+		[ -z "$probe_region" ] || export RCLONE_S3_REGION="$probe_region"
+
+		probe=":s3:$probe_bucket/${MEDIA_STACK_DELETE_PROBE_KEY:-media-stack-delete-probe}"
+		if ! printf 'delete-denial probe\n' \
+			| rclone rcat "$probe" >/dev/null 2>"$PWDIR/probe.err"; then
+			# Cannot even write, so nothing was tested. Not a finding on its own:
+			# the copy above would have failed too, and does say so.
+			printf '\033[33m  inconclusive: could not write the probe object\033[0m\n'
+			sed 's/^/    /' "$PWDIR/probe.err" >&2
+		elif rclone deletefile --retries 1 --low-level-retries 1 \
+			"$probe" >/dev/null 2>"$PWDIR/probe.err"; then
+			policy_broken=1
+			printf '\033[31m  THE OFF-SITE KEY CAN DELETE outside locks/\033[0m\n'
+			printf '\033[31m  The append-only guarantee is GONE. Check the bucket policy\033[0m\n'
+			printf '\033[31m  AND the IAM policy - Scaleway ANDs the two.\033[0m\n'
+		elif grep -qiE 'accessdenied|forbidden|403' "$PWDIR/probe.err"; then
+			policy_ok=1
+			echo "    delete refused with AccessDenied - the restriction holds"
+		else
+			# A network blip must not read as a broken policy, so anything that
+			# is not an explicit refusal is inconclusive and leaves the previous
+			# marker in place to age out on its own.
+			printf '\033[33m  inconclusive: the delete failed for another reason\033[0m\n'
+			sed 's/^/    /' "$PWDIR/probe.err" >&2
+		fi
+	fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -231,6 +335,15 @@ if [ -z "$DRY" ]; then
 			# so one failed night reads as "stale" and not as "never ran".
 			grep -E '^offsite_(snapshot|at)=' "$STATE" 2>/dev/null
 		fi
+		# Written only on a CONFIRMED refusal. An inconclusive probe preserves
+		# the old timestamp rather than dropping it, so one unreachable night
+		# reads as "stale" in verify-host.sh and not as "never checked" - and a
+		# genuine drift still surfaces once the value ages past the ceiling.
+		if [ -n "$policy_ok" ]; then
+			echo "offsite_policy_ok_at=$now"
+		else
+			grep -E '^offsite_policy_ok_at=' "$STATE" 2>/dev/null
+		fi
 		grep -E '^offsite_pruned_at=' "$STATE" 2>/dev/null
 	} >"$STATE.tmp"
 	mv "$STATE.tmp" "$STATE"
@@ -240,5 +353,9 @@ say "snapshots"
 restic snapshots --compact 2>/dev/null | tail -4
 
 # Exit non-zero only AFTER the marker is written, so the unit goes red and the
-# MOTD still knows the local copy is current.
+# MOTD still knows the local copy is current. The backups themselves have all
+# completed by here: a policy regression is a security failure, not a reason to
+# lose a night's backup, so it is reported at the end rather than up front.
+[ -z "$policy_broken" ] \
+	|| die "the off-site key CAN DELETE outside locks/ - the append-only guarantee is gone"
 [ -z "$offsite_failed" ] || die "the off-site copy failed - the local one is current"

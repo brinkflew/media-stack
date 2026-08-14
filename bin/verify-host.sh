@@ -67,10 +67,15 @@ uptime_s=$(cut -d. -f1 /proc/uptime)
 # this line. So it is only a finding once the machine has been up longer than
 # the timer's period.
 check_timer_run() {  # <label> <period-seconds> <unit> [--user]
-	local label="$1" period="$2" unit="$3" scope="${4:-}"
+	local label="$1" period="$2" unit="$3"
 	local run rc age
-	run=$(systemctl $scope show "$unit" -p ExecMainExitTimestamp --value 2>/dev/null)
-	rc=$(systemctl $scope show "$unit" -p ExecMainStatus --value 2>/dev/null)
+	# An array rather than a bare $scope: the argument is absent for system
+	# units, and an unquoted empty variable is the one spelling that both
+	# disappears and splits on whitespace when it does not.
+	local scope=()
+	[ -z "${4:-}" ] || scope=("$4")
+	run=$(systemctl "${scope[@]}" show "$unit" -p ExecMainExitTimestamp --value 2>/dev/null)
+	rc=$(systemctl "${scope[@]}" show "$unit" -p ExecMainStatus --value 2>/dev/null)
 	if [ -z "$run" ]; then
 		if [ "$uptime_s" -lt "$period" ]; then
 			ok "$label has not run since boot ($((uptime_s / 60))m ago) - not yet due"
@@ -299,8 +304,8 @@ else
 	bad "io is NOT delegated - every IOWeight= and IOReadBandwidthMax= is inert"
 fi
 
-sysfailed=$(systemctl list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}')
-if [ -z "$sysfailed" ]; then ok "no failed system units"; else bad "failed system units: $(echo $sysfailed)"; fi
+sysfailed=$(systemctl list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ' -)
+if [ -z "$sysfailed" ]; then ok "no failed system units"; else bad "failed system units: $sysfailed"; fi
 
 # ==============================================================================
 # Everything below is the APPLICATION stack, and greenboot must not see it. A
@@ -390,6 +395,16 @@ if [ -z "$GREENBOOT" ]; then
 	# off-site repository and it grows until the workstation runs
 	# bin/backup-offsite.sh. Slow, but unbounded if nobody ever does.
 	check_backup_age "off-site prune" offsite_pruned_at 720 warn
+	# "Cannot delete" is the whole reason the server is allowed to hold a backup
+	# credential at all, and it is enforced by an ABSENCE - nothing grants delete
+	# outside locks/, so there is no Deny statement to eyeball and a policy that
+	# has silently widened looks exactly like one that works. It also lives
+	# outside this repository, in Scaleway's bucket and IAM policies, where a
+	# console edit or a key rotation can change it with nothing here noticing.
+	# backup-server.sh therefore re-proves it nightly and writes this marker only
+	# on a confirmed refusal; 48h matches the local ceiling, so one unreachable
+	# night is tolerated and a real drift surfaces on the second.
+	check_backup_age "off-site delete denial" offsite_policy_ok_at 48 bad
 
 	# ------------------------------------------------------------------------------
 	say "Checkout"
@@ -422,13 +437,13 @@ if [ -z "$GREENBOOT" ]; then
 
 	say "Containers"
 
-	userfailed=$(systemctl --user list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}')
-	if [ -z "$userfailed" ]; then ok "no failed user units"; else bad "failed user units: $(echo $userfailed)"; fi
+	userfailed=$(systemctl --user list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ' -)
+	if [ -z "$userfailed" ]; then ok "no failed user units"; else bad "failed user units: $userfailed"; fi
 
 	running=$(podman ps --format '{{.Names}}' 2>/dev/null | wc -l)
-	unhealthy=$(podman ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null)
+	unhealthy=$(podman ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | paste -sd' ' -)
 	if [ -z "$unhealthy" ]; then ok "$running containers up, none unhealthy"
-	else bad "unhealthy: $(echo $unhealthy)"; fi
+	else bad "unhealthy: $unhealthy"; fi
 
 	# duckdns, unpackerr and the pod's infra container define no healthcheck.
 	# A check that assumes all of them do reports those three broken for ever.
