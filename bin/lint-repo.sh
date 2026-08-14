@@ -55,7 +55,7 @@ say "Executable bits"
 noexec=""
 while IFS= read -r f; do
 	[ -x "$f" ] || noexec="$noexec $f"
-done < <(git ls-files 'bin/*.sh' 'bin/*.py' 'apps/*/scripts/*')
+done < <(git ls-files 'bin/*.sh' 'bin/*.py' 'apps/*/scripts/*' 'host/greenboot/*.sh')
 if [ -z "$noexec" ]; then
 	ok "every script is executable"
 else
@@ -69,7 +69,7 @@ fi
 say "ShellCheck"
 # ------------------------------------------------------------------------------
 if command -v shellcheck >/dev/null 2>&1; then
-	out=$(git ls-files 'bin/*.sh' 'apps/*/scripts/*.sh' | xargs -r shellcheck -x 2>&1)
+	out=$(git ls-files 'bin/*.sh' 'apps/*/scripts/*.sh' 'host/greenboot/*.sh' | xargs -r shellcheck -x 2>&1)
 	if [ -z "$out" ]; then
 		ok "clean"
 	else

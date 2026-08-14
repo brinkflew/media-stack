@@ -264,6 +264,26 @@ storage:
       user: { name: core }
       group: { name: core }
 
+    # ------------------------------------------------------------------------
+    # greenboot: roll a bad deployment back without anyone present
+    # ------------------------------------------------------------------------
+    # THESE TWO LINKS ARE NOT SUFFICIENT ON THEIR OWN. greenboot is not shipped
+    # by FCOS or by uCore and has to be layered, which Ignition cannot do:
+    #
+    #   sudo rpm-ostree install greenboot     # NOT greenboot-default-health-checks
+    #
+    # See host/greenboot/README.md, which also covers the part that is easy to
+    # miss - /boot/grub2/custom.cfg, without which greenboot arms a boot counter
+    # that nothing counts down, and rollback silently cannot happen.
+    #
+    # The check is in wanted.d, so today it only logs. Moving it to required.d
+    # is what gives it the power to revert the OS, and that is a deliberate step
+    # taken after the negative control in the README has been run.
+    - path: /etc/greenboot/check/wanted.d/40-media-stack.sh
+      target: /var/media-stack/host/greenboot/40-media-stack.sh
+    - path: /etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf
+      target: /var/media-stack/host/greenboot/10-media-stack.conf
+
 systemd:
   units:
     # ------------------------------------------------------------------------

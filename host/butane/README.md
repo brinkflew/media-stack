@@ -33,7 +33,13 @@ here, or the next reinstall loses it.
 
 The applied config predates two of the units below - `firewall-stack-ports.service` and
 `selinux-container-devices.service` were created by hand on 2026-08-13 to close that gap, along with
-`/etc/rpm-ostreed.conf` and the updater masks.
+`/etc/rpm-ostreed.conf` and the updater masks. The greenboot links were added on 2026-08-14 and
+applied by hand the same way.
+
+**Ignition cannot install a package, and greenboot is layered.** The two `links:` entries for it are
+inert until `rpm-ostree install greenboot` has been run, so a rebuild from this file produces a host
+that looks configured for automatic rollback and has none. That step, and the `/boot/grub2/custom.cfg`
+that the rollback actually depends on, are in [`../greenboot/README.md`](../greenboot/README.md).
 
 ## `live.bu`
 

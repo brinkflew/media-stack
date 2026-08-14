@@ -323,6 +323,78 @@ if [ -z "$sysfailed" ]; then ok "no failed system units"; else bad "failed syste
 # rollback triggered by a slow Tdarr start would be both wrong and invisible.
 # ==============================================================================
 if [ -z "$GREENBOOT" ]; then
+	# ----------------------------------------------------------------------
+	# What greenboot made of the last boot.
+	# ----------------------------------------------------------------------
+	# Deliberately OUTSIDE --greenboot, even though the subject is host-level:
+	# this reads what the greenboot check wrote, so asserting it there would be
+	# the check grading its own previous run.
+	#
+	# Every part of this fails quietly, which is the reason to assert it. A
+	# check that has stopped running, a symlink that was never made, and a
+	# rollback path that cannot fire all look exactly like a host that keeps
+	# booting cleanly.
+	say "Boot health"
+	# Overridable so this section's own branches can be exercised without a
+	# reboot. "Armed" is the claim here that fails silently, so being able to
+	# test the logic that reports it is worth three variables.
+	boot_state="${MEDIA_STACK_BOOT_STATE:-/var/lib/media-stack/boot-state}"
+	gb_etc="${MEDIA_STACK_GREENBOOT_ETC:-/etc/greenboot}"
+	gb_cfg="${MEDIA_STACK_GRUB_CUSTOM:-/boot/grub2/custom.cfg}"
+
+	# The loudest thing here. A rollback means a staged deployment was bad, and
+	# it is also what stops bin/reboot-when-staged.sh rebooting into the same
+	# image again tonight - so it has to be cleared by a person, not aged out.
+	gb_rollback=$(sed -n 's/^rollback_at=//p' "$boot_state" 2>/dev/null | tail -1)
+	[ -z "$gb_rollback" ] || bad "greenboot ROLLED BACK a deployment at $gb_rollback - unattended reboots are held; clear rollback_at in $boot_state once understood"
+
+	if [ ! -d "$gb_etc" ]; then
+		warn "greenboot is not installed - a bad deployment cannot roll itself back"
+	elif [ ! -r "$boot_state" ]; then
+		bad "greenboot is installed but has recorded no verdict - is the check symlinked into /etc/greenboot/check/?"
+	else
+		gb_result=$(sed -n 's/^greenboot_result=//p' "$boot_state" | tail -1)
+		gb_at=$(sed -n 's/^greenboot_checked_at=//p' "$boot_state" | tail -1)
+		gb_epoch=$(date -d "${gb_at:-@0}" +%s 2>/dev/null || echo 0)
+
+		# Did it run THIS boot? A verdict older than the current boot means the
+		# check silently stopped running, which is indistinguishable from a
+		# healthy host unless the timestamps are compared. The uptime guard is
+		# the same one check_timer_run uses: greenboot runs during the
+		# multi-user transaction, so anything under five minutes is a race
+		# against ourselves rather than a finding.
+		if [ "$uptime_s" -gt 300 ] && [ "$gb_epoch" -lt "$(( $(date +%s) - uptime_s ))" ]; then
+			bad "greenboot recorded no verdict for this boot (last was ${gb_at:-never}) - the check is not running"
+		else
+			case "$gb_result" in
+				green)   ok "greenboot verified this boot healthy" ;;
+				red)     bad "greenboot FAILED this boot's health check" ;;
+				timeout) warn "greenboot's health check timed out - inconclusive, nothing was rolled back" ;;
+				missing) warn "greenboot found no checkout to run - nothing was verified this boot" ;;
+				*)       warn "greenboot recorded an unrecognised verdict '${gb_result:-none}'" ;;
+			esac
+		fi
+
+		# ARMED IS TWO THINGS, AND EITHER MISSING IS SILENT. The check must be
+		# in required.d - wanted.d only logs - AND the GRUB counter must exist,
+		# because without the GRUB custom.cfg greenboot arms a boot_counter
+		# that nothing counts down. Neither absence shows up anywhere else.
+		if   [ -e "$gb_etc/check/required.d/40-media-stack.sh" ]; then gb_dir=required
+		elif [ -e "$gb_etc/check/wanted.d/40-media-stack.sh" ];   then gb_dir=wanted
+		else gb_dir=absent
+		fi
+		gb_grub=no
+		[ -f "$gb_cfg" ] && gb_grub=yes
+
+		if [ "$gb_dir" = absent ]; then
+			bad "the media-stack check is in neither required.d nor wanted.d - greenboot is not checking this host"
+		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ]; then
+			ok "greenboot is armed - a failed check reverts the deployment"
+		else
+			warn "greenboot is observe-only (${gb_dir}.d, GRUB counter: ${gb_grub}) - a bad deployment will NOT roll back"
+		fi
+	fi
+
 	say "Container updates"
 
 	# The same argument as rpm-ostreed-automatic above: a timer that has stopped
