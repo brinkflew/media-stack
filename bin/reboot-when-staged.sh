@@ -50,7 +50,16 @@ note()   { printf 'reboot-when-staged: %s\n' "$1"; }
 # ------------------------------------------------------------------------------
 # Exit 0 rather than 1: "nothing staged" is the normal state on most nights and
 # a timer that goes red on a quiet week is a timer people stop reading.
-status_json=$(rpm-ostree status --json 2>/dev/null)
+# MEDIA_STACK_STATUS_JSON exists so the refusals below can be exercised without
+# waiting for a real deployment to stage. This script is nothing BUT refusals,
+# and every gate past the first is unreachable on a host with nothing staged -
+# which is most nights. An untestable refusal is the same shape as a check that
+# cannot fail, and this repository has found enough of those.
+if [ -n "${MEDIA_STACK_STATUS_JSON:-}" ]; then
+	status_json=$(cat "$MEDIA_STACK_STATUS_JSON" 2>/dev/null)
+else
+	status_json=$(rpm-ostree status --json 2>/dev/null)
+fi
 [ -n "$status_json" ] || refuse "rpm-ostree status returned nothing"
 
 staged=$(jq -r '.deployments[] | select(.staged) | .version // empty' <<<"$status_json")
