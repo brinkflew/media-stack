@@ -13,9 +13,16 @@
 # SQLite's own backup API exists for exactly this: it takes a read lock, copies
 # pages, and restarts if a writer interferes, producing a single file that is
 # consistent as of one instant and needs no -wal alongside it. This walks
-# config/, identifies databases by magic bytes rather than by extension - Tdarr
-# and Jellyfin both use .db for things that are not SQLite - and snapshots each
+# config/, identifies databases by magic bytes rather than by extension - both
+# Tdarr and Jellyfin use .db for things that are not SQLite - and snapshots each
 # one into a shadow tree that the backup then overlays on top of the file copy.
+#
+# NOTE, because the sentence above used to read as though Tdarr had no SQLite at
+# all: Tdarr 2.86 migrated off NeDB, and its real database is now a single
+# genuine SQLite file at config/tdarr/server/Tdarr/DB2/SQL/database.db with a
+# 15 MB -wal beside it. The magic-byte walk already picks it up, which is exactly
+# why the test is on bytes and not on the extension - the non-SQLite .db files
+# are still there alongside it.
 #
 # The shadow tree is deliberately NOT deleted between runs, so the pages restic
 # already knows about stay stable and each run only transfers what changed.

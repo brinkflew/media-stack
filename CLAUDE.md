@@ -42,6 +42,16 @@ reachable over passwordless SSH as `home` (WAN, via the router's `9122 -> 22` fo
 `home.local` (direct, `192.168.0.100`). **Prefer `home.local`** - the WAN route depends on NAT
 hairpinning and on the forward still pointing at the right address.
 
+**The same applies in the BROWSER, and it costs more than it does over SSH.** Every public hostname
+here is a CNAME to `avanserv.duckdns.org`, which resolves to the server's own WAN address
+(`91.86.121.124`), so a LAN machine loading `watch.avanserv.com` sends every request out through the
+router and back in through NAT loopback. Measured against `/web/index.html`: **12-16 ms direct
+against 74-79 ms proxied, about 5x per request** - and a Jellyfin page is ~29 JS bundles plus 30-60
+images, so a full load went 283-684 ms direct against 898-1612 ms proxied. Nothing is misconfigured;
+the packets are simply taking a long way round. The fix is split-horizon DNS pointing the public
+names at `192.168.0.100` for LAN clients, which keeps TLS, the certificate and sign-on working
+unchanged because Caddy listens on that address too.
+
 `~/.config/containers/systemd/{common,torrent,media,infra}` are symlinks into `stacks/`, so
 `git pull && systemctl --user daemon-reload` is the entire deploy - there is no copy step.
 
@@ -583,6 +593,63 @@ reporting "12 still in queued/, 0 moved by Tdarr". *Flow* and *The Hobbit* sat u
 months as a result. If a reconciler here looks like it is working, check that it has actually done
 something.
 
+**It now names a STALL rather than reporting it as patience.** `gone=False, arrived=False` used to
+be counted as "waiting on Tdarr", which is also what a live transcode looks like - so a file the
+flow had abandoned was indistinguishable from one still being worked on, for ever. The script now
+also reads Tdarr's `FileJSONDB` and prints `STUCK:` when a file still sitting in `queued/` already
+carries a finished verdict (`Not required` or `Transcode success`). The Tdarr call is best-effort:
+if it fails the set comes back empty and the script behaves exactly as it did before, because a
+diagnostic must never be able to break the reconciliation it annotates.
+
+## The flow trap: an unwired output silently eats the file
+
+**A classic plugin's "nothing to do" answer is a SEPARATE flow output, and it must be wired.**
+`runClassicTranscodePlugin` **2.0.0** returns `outputNumber: 1` when it transcoded and
+**`outputNumber: 2` when the file was already compliant**. `avsOnePass1` wired only output 1, so
+every source that was already HEVC under the 8 Mbps threshold hit a dead end: Tdarr recorded
+`Not required`, the flow ended before `aMoveDone`, and the file stayed in `queued/` where Jellyfin
+does not look - while Radarr, Tdarr and Jellyfin were each individually correct and
+`promote-transcoded.py` printed "1 waiting on Tdarr" every ten minutes. *The Hobbit: The Battle of
+the Five Armies* and *The Punisher: One Last Kill* both went this way inside two days.
+
+Version 1.0.0 returned `outputNumber: 1` on that branch, so the dangling edge was harmless until the
+stack moved 2.55.01 -> 2.71.01. **A plugin version bump can make an unwired output load-bearing**,
+and nothing warns you: the job report says the run finished, and the file simply does not move.
+
+Output 2 now goes to **`aMoveKeep`, a second `moveToDirectory` node that nothing follows**, skipping
+`aStats`, `aSize` and `aHealth` deliberately - there is no new output to recompute statistics for,
+comparing a file's size against itself is meaningless, and `aHealth` is a full-file decode that on
+this branch would run against the source **on the spindle**, since nothing was ever staged to the
+NVMe cache. That is the operation that took the whole host down once already.
+
+**Wiring output 2 into the existing `aMoveDone` does NOT work, and the reason is worth keeping.**
+`aMoveDone` is followed by `aDelete`, configured `fileToDelete: originalFile`. On the transcoded
+branch the original and the working file are different, so that is correct. On the compliant branch
+**they are the same file**, so the move leaves nothing behind and `aDelete` fails with
+`ENOENT ... unlink`, which Tdarr treats as `Flow has failed` and records as `transcodeError`. No data
+is lost - a rename within one filesystem preserves the inode and its hardlink to `downloads/`,
+verified with `stat` - but every compliant file would be filed as an error for ever. Tried on *The
+Hobbit*, corrected, then confirmed clean on *The Punisher: One Last Kill*. **A flow can move the file
+correctly and still record an error on a later node**, so check the verdict as well as the file.
+
+## Tdarr's file tables are the QUEUE, not a history
+
+**"Transcode success" and "Not required" are views over the current library file table**
+(`filejsondb`), which this pipeline drains to zero on purpose: every library watches
+`/media/library/queued/<type>` only, and the flow moves output to `transcoded/<type>`, outside every
+watched folder - so the folder watcher reaps each file from the table as it is promoted.
+`scanOnStart=True` makes the sweep run at every container start, which is why it looks like a reboot
+wiped something.
+
+**Nothing is lost, and there is nothing to fix.** `/app/server` is a host bind mount, and Tdarr 2.86
+has migrated off NeDB to one SQLite file at `Tdarr/DB2/SQL/database.db`. The durable history is
+`jobsjsondb` - 2,659 rows as of 2026-08-14, surfaced in the UI on the **Jobs tab**. That is where to
+look; a short Transcode-success table means the queue is empty, which is the goal.
+
+**The 27% lifetime error rate is history, not a live fault.** 689 of 710 `Transcode error` rows are
+from March 2025 - the destructive community flow documented above - and the five in August 2026
+predate the repointing to `avsOnePass1`. Check the month distribution before investigating.
+
 ## All four Tdarr libraries, and what differs between them
 
 Movies, Documentaries, Series and Anime all run `avsOnePass1` with `processLibrary=true` and
@@ -776,6 +843,21 @@ had, now used for all of them:
 | `apps/tdarr/plugins/` | `config/tdarr/server/Tdarr/Plugins/Local/` | `cp -a` |
 | `apps/sonarr/scripts/` | `config/sonarr/scripts/` | `cp -a` |
 | `apps/jellyfin/custom.css` | `config/jellyfin/branding.xml` | `bin/render-jellyfin-branding.py` |
+| `apps/tdarr/flows/` | nowhere - **a record, not a deployment** | by hand; see that directory's README |
+
+**Two things are tracked that nothing deploys, and the distinction matters.** `apps/tdarr/flows/`
+holds an export of `avsOnePass1`; Tdarr has no import-from-disk mechanism, so the flow that actually
+runs lives in its SQLite database and is edited in Tdarr's own flow editor. It is tracked so a flow
+is reviewable and diffable at all - it decides what happens to every file in the library and was
+previously recoverable from nothing but a backup of gitignored state. **Re-export it after any
+edit**, or the copy in git silently becomes fiction.
+
+**The same gap is still open for Jellyfin.** `config/jellyfin/system.xml`, `encoding.xml` and
+`network.xml` hold real decisions - whether trickplay uses the GPU, which codecs decode in hardware,
+which proxies are trusted - and none of them is in git, so a `git grep` does not find them and a
+restore brings back whatever was there. Only the Custom CSS half of Jellyfin's configuration is
+under this contract. Treat those three files the way the Sonarr download-client settings are
+treated: check them through the API rather than assuming.
 
 **Git is authoritative, so editing the copy on the server is pointless** - it is overwritten on the
 next start. Two consequences that are easy to be surprised by:
@@ -783,6 +865,19 @@ next start. Two consequences that are easy to be surprised by:
 - **A Custom CSS edit made in Jellyfin's own UI reverts.** It survives until the next restart, and
   `podman-auto-update` restarts Jellyfin nightly, so it will look like it worked and quietly undo
   itself overnight. Edit `apps/jellyfin/custom.css`.
+- **That CSS is VENDORED, and two of its stylesheets were deleted on purpose.** It used to be 16
+  `@import` URLs into `CTalvio/Ultrachromic` at HEAD - an unpinned dependency on someone else's
+  repository, on a page behind sign-on, plus 16 render-blocking fetches before first paint. It is
+  inlined now (37 KB, ASCII, one remaining `@import` for a Google Font, which **must stay on the
+  first line** - CSS ignores an `@import` that follows any rule, so moving it silently drops the
+  font). `effects/glassy.css` and `effects/pan-animation.css` were **not** inlined: the first put
+  `will-change: backdrop-filter` on 11 selectors including `.indicator` and `.cardOverlayButtonIcon`,
+  which are on *every card*, so a 100-card page became 100+ composited layers each re-sampling what
+  was behind it; the second ran an infinite `backgroundScroll` animation on the full-viewport
+  backdrop, so it was never static. Together they re-blurred a moving full-screen image every frame
+  and re-sampled it through a hundred layers, which is what made the UI "barely usable" while every
+  other app was fine. **Do not add them back.** One narrow `backdrop-filter` survives on the three
+  `.itemProgressBar` selectors; it is the next thing to remove if scrolling still stutters.
 - **Sonarr's script path is recorded in `sonarr.db`, not here.** The "Clean Anime Extra Files"
   Custom Script connection stores `/config/scripts/anime-extra-files.sh`. Where the file lives in
   git is free; where it lands in the container is not, and a mismatch fails silently because that
@@ -1018,6 +1113,33 @@ Conclusions from auditing the running host. Do not rediscover these:
 - **Tdarr's spindle reads are a burst at job ingest, not a sustained load.** Sampled mid-transcode,
   `tdarr-node-01` read **0.00 MB/s from `sda`** and 16.8 MB/s from the NVMe: it stages the source
   into its cache work directory and then works entirely from SSD. Limit concurrency, not bandwidth.
+- **JELLYFIN is the stack's largest CPU consumer, and it is not serving anybody.** **Trickplay has
+  its OWN hardware-acceleration switches, independent of playback's**, and all three shipped off:
+  `EnableHwAcceleration`, `EnableHwEncoding` and `EnableKeyFrameOnlyExtraction` were `false` in
+  `config/jellyfin/system.xml` (with `ProcessThreads=1`), so every frame of every file was decoded
+  on the CPU - `ffmpeg -loglevel error -threads 1` with no `-hwaccel` anywhere. One file took ~20
+  minutes; 223 of 485 were done, leaving **~87 hours** still to run. `cpu.stat` showed `nice_usec` at
+  **92.5% of all Jellyfin CPU**, and systemd logged 9h37m of CPU over 15h38m wall. It runs at
+  `nice 10` so it does not directly delay the UI, but it streams whole files off the spindle
+  continuously. **`podman stats` showing Jellyfin near the top is this, not usage.**
+  `EnableKeyFrameOnlyExtraction` is the big lever - it stops decoding every frame.
+- **Playback hardware decoding was NEVER off, and the way that was misdiagnosed is the lesson.**
+  `grep -E 'HardwareDecodingCodecs' encoding.xml` prints the opening and closing tags on adjacent
+  lines and hides the seven `<string>` children between them, so it reads as an empty element. It is
+  not: h264, hevc, vc1, av1, vp9, vp8 and mpeg2video are all enabled, confirmed against
+  `/System/Configuration/encoding`. **Read a config through the API, or with `sed -n '/<tag>/,/<\/tag>/p'`
+  - a line-matching grep cannot show you an XML element's contents.**
+- **Jellyfin sits AT its `MemoryHigh` and is in continuous reclaim.** `memory.current` 3.00G against
+  `MemoryHigh=3G`, `MemoryPeak` **2 MB above the watermark**, and `memory.events` `high` climbing
+  750 -> 1948 inside twenty minutes with `NRestarts=0`; Sonarr and Radarr are at `high 0`. Same
+  signature as `tdarr-node-01`, which was raised 3G/4G -> 6G/8G for it. **Much of that is page cache
+  from the trickplay backlog above**, charged to Jellyfin's cgroup, so fix the decoding first and
+  re-measure before raising the ceiling - the two findings are coupled.
+- **Jellyfin 10.11's own queries are slow, and it is not this stack's fault.** The real home-screen
+  query takes **29-79 ms in-container** for a 522-item library and a 26 KB response, against ~1 ms
+  for Sonarr's equivalent, and the log carries EF Core's `Compiling a query which loads related
+  collections for more than one collection navigation` warning. Inherent to the 10.11 EF Core
+  rewrite. Recorded so nobody re-investigates it as a configuration problem.
 - **Two NVENC sessions already pin the encoder block at 100%** while the SM sits at 10%. A third GPU
   worker cannot encode faster; it only adds cache and spindle pressure. Worker limits are therefore
   `transcodegpu:2, transcodecpu:0, healthcheckgpu:0, healthcheckcpu:0`. `transcodecpu` is 0 because
