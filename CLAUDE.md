@@ -343,11 +343,31 @@ to, Tdarr transcodes, and Jellyfin serves *only* `library/transcoded/<type>`. `<
 request into three paths that did not exist, so nothing requested through it could import at all.
 **Check a new root folder against the disk, not against what looks plausible.**
 
-**Nothing in Tdarr promotes a file between the two.** Tdarr transcodes *in place* and leaves the file
-in `queued/`, so for a long time the pipeline had no middle: correctly downloaded, correctly
-imported, correctly transcoded films were invisible in Jellyfin for ever, with Radarr reporting them
-present and neither application wrong. `bin/promote-transcoded.py` is the missing step, run every 10
-minutes by `media-stack-promote.timer`.
+**Tdarr's flow DOES promote the file; what was missing is telling the \*arr apps.** The old five-flow
+chain transcoded in place and left everything in `queued/`, which is where the "correctly downloaded,
+correctly imported, correctly transcoded, invisible in Jellyfin" failure came from. `avsOnePass1`
+ends in a `moveToDirectory` node reading `{{{args.userVariables.library.output_dir_done}}}`, and
+**every library defines that** — `/media/library/transcoded/<type>`. So the file moves itself.
+
+**Those variables live in the `variablesjsondb` table, keyed `library:<id>`, not on the library
+document.** `LibrarySettingsJSONDB` reports `userVariables: null` for all four libraries, which makes
+the flow look broken when it is not. Read them with:
+
+```bash
+podman exec tdarr-server curl -sf -X POST -H 'Content-Type: application/json' \
+  -d '{"data":{"collection":"VariablesJSONDB","mode":"getAll"}}' \
+  http://localhost:8266/api/v2/cruddb | jq -r 'sort_by(.type,.key)[]|"\(.type) \(.key)=\(.value)"'
+```
+
+`bin/promote-transcoded.py` therefore reconciles rather than promotes: it tells Radarr and Sonarr
+where Tdarr already put the file. Run every 10 minutes by `media-stack-promote.timer`.
+
+**It covers all four types, and each needs BOTH root folders to exist.** Radarr owns
+`movies` + `documentaries`, Sonarr owns `series` + `anime`. It used to handle one type per
+application, so a transcoded documentary moved to `transcoded/documentaries` and Radarr was never
+told — the same failure, in a folder nobody watches. The script now refuses per type, loudly, when
+the target is not a configured root folder, because the *arr editor call silently rejects a path the
+application does not know.
 
 It runs **on the host, not in a container**, and that is the design rather than an accident:
 `net-transcode` is `isolate=true` and holds only Caddy and the three Tdarr containers, so Tdarr
@@ -369,6 +389,47 @@ true, and **the script never promoted a single file in its entire existence** wh
 reporting "12 still in queued/, 0 moved by Tdarr". *Flow* and *The Hobbit* sat unmapped for nine
 months as a result. If a reconciler here looks like it is working, check that it has actually done
 something.
+
+## All four Tdarr libraries, and what differs between them
+
+Movies, Documentaries, Series and Anime all run `avsOnePass1` with `processLibrary=true` and
+`processHealthChecks=false` — the flow health-checks each output while it is still on the NVMe
+cache, so a library-wide check would only add full-file decodes off the spindle, which is what
+wedged the host once already.
+
+Until 2026-08-14 the other three pointed at **`htpX8Ypt1`, the destructive community flow**, with
+processing off. Enabling them without repointing would have been actively harmful, not merely
+useless.
+
+**The one thing that genuinely differs per library is the audio whitelist**, and it differs because
+of anime. The transcode node reads
+`audioLanguages = {{{args.userVariables.library.audio_languages}}}`:
+
+| Library | `audio_languages` |
+|---|---|
+| Movies, Documentaries, Series | `eng,fra,fre,und` |
+| Anime | `jpn,chi,zho,kor,eng,fra,fre,und` |
+
+**Anime VO is not always Japanese** — donghua is Chinese, aeni Korean — so the list covers all three
+plus English and French, which are wanted when a release carries them *alongside* the VO. Without
+this the default whitelist would have dropped a Japanese track on any release that also had English,
+since the plugin's "keep everything" safety net only fires when **nothing** matches. That is the
+exact bug class the plugin exists to prevent, and it would have been silent.
+
+Subtitles stay at the plugin default `eng,fra,fre` for every library.
+
+**Radarr and Sonarr both hold two types**, so each needs four root folders in total; `transcoded/`
+counterparts for documentaries and anime were missing entirely and were added the same day. Jellyfin
+already had a library per type, each reading `transcoded/<type>`.
+
+**Sonarr's anime scoring is a preference, not a rule.** `Lang: Dual Audio` scores 100 in the one
+quality profile, so a dual-audio release wins between otherwise-equal candidates — but
+`minFormatScore` and `cutoffFormatScore` are both **0**, so a subbed VO-only release is perfectly
+acceptable and Sonarr will not hunt for an upgrade purely to get a dub. Note the profile's other
+formats (the TRaSH `Anime_10_*` set) score up to **4000**, so any cutoff low enough to be reachable
+is satisfied by the first release that arrives: expressing "keep looking until dual audio" would
+mean rescoring the whole profile, not moving the cutoff. The enabled `Anime` release profile ignores
+`\bdub(bed)?\b`, which is what stops a dub-only release replacing the VO.
 
 ## The transcode policy
 
