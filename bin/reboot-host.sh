@@ -105,11 +105,25 @@ fi
 # ------------------------------------------------------------------------------
 say "Confirm"
 # ------------------------------------------------------------------------------
+# ASK THE HOST, rather than state a fact that ages. This line used to say "there
+# is no greenboot yet", which was true when it was written and is the kind of
+# claim that quietly stops being true. greenboot is a safety net only when BOTH
+# halves are present - the check in required.d, and the GRUB counter in
+# custom.cfg - and either can go missing without anything else noticing.
+if sshq 'test -x /usr/libexec/greenboot/greenboot &&
+         test -e /etc/greenboot/check/required.d/40-media-stack.sh &&
+         test -f /boot/grub2/custom.cfg' >/dev/null 2>&1; then
+	rollback_note="greenboot is ARMED: a deployment that fails its health check rolls
+  itself back. That is a net, not a guarantee - verify anyway."
+else
+	rollback_note="greenboot is NOT armed: nothing will roll a bad deployment back
+  on its own."
+fi
+
 cat <<EOF
 
   This reboots $HOST. It has no console and no BMC, so if it does not come
-  back you are driving to it. There is no greenboot yet: nothing will roll a
-  bad deployment back on its own.
+  back you are driving to it. $rollback_note
 
   Do this on a day you could physically reach the machine.
 

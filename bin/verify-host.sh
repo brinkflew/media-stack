@@ -357,7 +357,21 @@ if [ -z "$GREENBOOT" ]; then
 	if [ ! -x "$gb_bin" ]; then
 		warn "greenboot is not installed - a bad deployment cannot roll itself back"
 	elif [ ! -r "$boot_state" ]; then
-		bad "greenboot is installed but has recorded no verdict - is the check symlinked into /etc/greenboot/check/?"
+		# NO VERDICT IS TWO DIFFERENT THINGS, and conflating them deadlocks.
+		# If greenboot ran this boot and recorded nothing, the check is broken
+		# and that is a finding. If it has not run at all - the state for the
+		# whole of the boot in which greenboot was installed or enabled, since
+		# that boot predates it - then there is simply nothing to report yet.
+		#
+		# Failing on the second one is a trap with no exit: bin/reboot-host.sh
+		# refuses to reboot a host the battery calls unhealthy, and only a
+		# reboot can produce the verdict whose absence made it unhealthy. Found
+		# exactly that way, by the pre-flight correctly refusing.
+		if [ -n "$(systemctl show greenboot-healthcheck.service -p ExecMainExitTimestamp --value 2>/dev/null)" ]; then
+			bad "greenboot ran but recorded no verdict - is the check symlinked into /etc/greenboot/check/?"
+		else
+			warn "greenboot has not run since this boot - the next reboot is its first"
+		fi
 	else
 		gb_result=$(sed -n 's/^greenboot_result=//p' "$boot_state" | tail -1)
 		gb_at=$(sed -n 's/^greenboot_checked_at=//p' "$boot_state" | tail -1)
