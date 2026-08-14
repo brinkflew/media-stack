@@ -44,4 +44,8 @@ chmod 600 "$tmp"
 mv "$tmp" "$dst"
 trap - EXIT
 
-echo "render-env: wrote $dst ($(grep -c '=' "$dst") variables)"
+# Count ASSIGNMENTS, not lines containing '='. The bare grep also counted the
+# `# ====` separator comments, so the render always claimed two variables more
+# than it wrote - which is a small lie in exactly the place someone checks after
+# removing one.
+echo "render-env: wrote $dst ($(grep -cE '^[A-Z_][A-Z0-9_]*=' "$dst") variables)"
