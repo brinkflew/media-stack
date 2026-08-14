@@ -341,6 +341,12 @@ if [ -z "$GREENBOOT" ]; then
 	boot_state="${MEDIA_STACK_BOOT_STATE:-/var/lib/media-stack/boot-state}"
 	gb_etc="${MEDIA_STACK_GREENBOOT_ETC:-/etc/greenboot}"
 	gb_cfg="${MEDIA_STACK_GRUB_CUSTOM:-/boot/grub2/custom.cfg}"
+	# THE BINARY, NOT /etc/greenboot, IS WHAT "INSTALLED" MEANS. /etc is
+	# merged forward across deployments and can be created by hand, so it
+	# survives a rollback to a deployment that has no greenboot in it - and
+	# would then report an armed rollback that cannot happen. /usr is part of
+	# the deployment, so the binary answers the question honestly.
+	gb_bin="${MEDIA_STACK_GREENBOOT_BIN:-/usr/libexec/greenboot/greenboot}"
 
 	# The loudest thing here. A rollback means a staged deployment was bad, and
 	# it is also what stops bin/reboot-when-staged.sh rebooting into the same
@@ -348,7 +354,7 @@ if [ -z "$GREENBOOT" ]; then
 	gb_rollback=$(sed -n 's/^rollback_at=//p' "$boot_state" 2>/dev/null | tail -1)
 	[ -z "$gb_rollback" ] || bad "greenboot ROLLED BACK a deployment at $gb_rollback - unattended reboots are held; clear rollback_at in $boot_state once understood"
 
-	if [ ! -d "$gb_etc" ]; then
+	if [ ! -x "$gb_bin" ]; then
 		warn "greenboot is not installed - a bad deployment cannot roll itself back"
 	elif [ ! -r "$boot_state" ]; then
 		bad "greenboot is installed but has recorded no verdict - is the check symlinked into /etc/greenboot/check/?"
