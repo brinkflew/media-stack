@@ -79,7 +79,7 @@ uptime_s=$(cut -d. -f1 /proc/uptime)
 # the timer's period.
 check_timer_run() {  # <label> <period-seconds> <unit> [--user]
 	local label="$1" period="$2" unit="$3"
-	local run rc age
+	local run rc age stale_h
 	# An array rather than a bare $scope: the argument is absent for system
 	# units, and an unquoted empty variable is the one spelling that both
 	# disappears and splits on whitespace when it does not.
@@ -96,12 +96,18 @@ check_timer_run() {  # <label> <period-seconds> <unit> [--user]
 		return
 	fi
 	age=$(( ( $(date +%s) - $(date -d "$run" +%s) ) / 3600 ))
+	# Stale at two periods, DERIVED rather than hardcoded. It used to be a flat
+	# 48h, which happens to be two periods for the three nightly callers and is
+	# wrong for anything else: pointed at the weekly reboot window it would have
+	# gone red every Tuesday, so the period argument was half-used and the helper
+	# could not express the timer it was most needed for.
+	stale_h=$(( period * 2 / 3600 ))
 	if [ "${rc:-1}" != 0 ]; then
 		# No "- nothing is updating" tail here: this helper is shared with the
 		# backup, and a failed backup run reporting that nothing is updating
 		# sends you to look at entirely the wrong subsystem.
 		bad "the last $label run FAILED (exit $rc, ${age}h ago)"
-	elif [ "$age" -gt 48 ]; then
+	elif [ "$age" -gt "$stale_h" ]; then
 		bad "the last $label run was ${age}h ago - the timer has stopped firing"
 	else
 		ok "last $label run ${age}h ago, exit 0"
@@ -451,6 +457,60 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 	fi
 
+	# --------------------------------------------------------------------------
+	# The reboot window. greenboot judges a deployment AFTER the reboot; this is
+	# what decides there is one at all, so it belongs directly after greenboot's
+	# verdict and before anything about containers.
+	#
+	# Its failure is silent by construction: if the timer stops, greenboot stays
+	# armed, every container stays healthy, the battery stays green, and
+	# deployments simply pile up unapplied - which is the exact failure greenboot
+	# was layered to fix. Every other timer here already has this check; this one
+	# was the only one without it.
+	# --------------------------------------------------------------------------
+	say "Reboot window"
+
+	# Initialised unconditionally: the MOTD below reads it, that block also runs
+	# under --greenboot, and `set -u` is on.
+	reboot_next=""
+	if [ "$(systemctl --user is-enabled media-stack-reboot.timer 2>/dev/null)" = enabled ]; then
+		ok "media-stack-reboot.timer enabled"
+		# Computed HERE rather than in the MOTD block, because that block also
+		# runs under --greenboot - as root, at boot, where there is no
+		# XDG_RUNTIME_DIR and `systemctl --user` cannot answer at all.
+		reboot_next=$(systemctl --user list-timers media-stack-reboot.timer \
+			--no-legend --no-pager 2>/dev/null | awk 'NR==1 {print $1, $2, $3, $4}')
+	else
+		bad "media-stack-reboot.timer is not enabled - a staged deployment would never be applied"
+	fi
+
+	# A WEEK, not a night. The unit fires five times on a Sunday morning and in
+	# the ordinary case refuses on all five, because nothing is staged; what this
+	# asserts is that the group ran at all. Possible only since check_timer_run
+	# started deriving its staleness threshold from the period it is given.
+	check_timer_run "unattended reboot window" 604800 media-stack-reboot.service --user
+
+	# THE MARKER FINALLY EARNING ITS KEEP. bin/reboot-when-staged.sh writes this
+	# immediately before rebooting, because afterwards there is no process left
+	# to write anything - and until now nothing read it, so "the window applied
+	# an update on Sunday" and "the window has not fired since March" still
+	# looked identical from this side. It is also the only thing that
+	# distinguishes an unattended reboot from a power cut.
+	unatt=$(sed -n 's/^unattended_reboot_at=//p' "$boot_state" 2>/dev/null | tail -1)
+	if [ -z "$unatt" ]; then
+		ok "the reboot window has not applied a deployment yet"
+	else
+		unatt_epoch=$(date -d "$unatt" +%s 2>/dev/null || echo 0)
+		boot_epoch=$(( $(date +%s) - uptime_s ))
+		# A window rather than an equality: the mark is written seconds before
+		# `systemctl reboot` and the boot that follows takes as long as it takes.
+		if [ "$unatt_epoch" -le "$boot_epoch" ] && [ "$unatt_epoch" -gt "$(( boot_epoch - 600 ))" ]; then
+			ok "this boot was applied by the unattended window at $unatt"
+		else
+			ok "the reboot window last applied a deployment at $unatt"
+		fi
+	fi
+
 	say "Container updates"
 
 	# The same argument as rpm-ostreed-automatic above: a timer that has stopped
@@ -631,7 +691,20 @@ motd=/run/motd.d/40-media-stack.motd
 		[ "$staged_ver" = "${booted_ver:-}" ] && [ -n "$staged_dig" ] && label="$staged_ver @$staged_dig"
 		case "$staged_signed" in ostree-image-signed:*) label="$label signed" ;; esac
 		printf '  \033[33mOS UPDATE STAGED\033[0m  %s%s\n' "$label" "$staged_age"
-		printf '      sudo systemctl reboot   - attended: be able to reach the machine\n'
+		# NAME THE UNATTENDED ROUTE FIRST, because it is now the one that
+		# usually applies this. Saying only "sudo systemctl reboot - attended"
+		# reads as "nothing will happen until you do this", which stopped being
+		# true when media-stack-reboot.timer was armed.
+		#
+		# gb_red is empty under --greenboot (that section does not run), so the
+		# held branch simply never fires there - correct, since the MOTD it
+		# would be writing belongs to a boot that is still being judged.
+		if [ -n "${gb_red:-}" ]; then
+			printf '      HELD - a deployment was rejected at %s; the window will not fire until that is cleared\n' "$gb_red"
+		elif [ -n "${reboot_next:-}" ]; then
+			printf '      unattended: %s   (Sun 05:00-09:00, if nothing is transcoding)\n' "$reboot_next"
+		fi
+		printf '      sudo systemctl reboot   - or attended, now: be able to reach the machine\n'
 	fi
 	for f in ${fails+"${fails[@]}"}; do printf '  \033[31mFAIL\033[0m  %s\n' "$f"; done
 	for w in ${warns+"${warns[@]}"}; do printf '  \033[33mWARN\033[0m  %s\n' "$w"; done

@@ -167,8 +167,21 @@ greenboot_result=green|red|timeout|missing
 greenboot_checked_at=2026-08-14T09:53:11Z
 booted_version=44.20260720.3.1
 booted_checksum=25319705c9ff
-rollback_at=...        # set by red.d, cleared by a human
+red_boot_at=...            # set by red.d, cleared by a human, never aged out
+unattended_reboot_at=...   # set by bin/reboot-when-staged.sh just before it reboots
 ```
+
+**The key is `red_boot_at`, not `rollback_at`** - this file said the latter until 2026-08-14
+and no code ever wrote it. That is worse than a stale name: it is the exact string someone
+greps for at the one moment it matters, which is an incident where the window is held and they
+need to know what to clear. `50-record-red-boot.sh` explains why red rather than rollback -
+red is what actually happened and is observed directly, while whether a rollback followed
+depends on the GRUB counter and on there being somewhere to roll back to.
+
+`unattended_reboot_at` is what tells an unattended reboot from a power cut. It is written
+before `systemctl reboot` because afterwards there is no process left to write anything, and
+`bin/verify-host.sh` reports it against the current boot time - so the boot the window
+produced says so, rather than looking like any other boot.
 
 `timeout` and `missing` are recorded as **inconclusive and exit 0**. A rollback cannot fix a
 missing checkout or a slow `rpm-ostreed`, and a health check that reverts the OS for either
@@ -215,8 +228,10 @@ rpm-ostree status --json | jq '.deployments | length'    # must be 2 before armi
 **A rollback with nothing else changed re-applies the same image.** FCOS's own documentation
 flags it: after reverting, the updater stages the same digest again, so an armed greenboot
 plus an unattended reboot is a loop that reverts and re-applies a bad deployment nightly.
-The `red.d` hook writes `rollback_at`, and `bin/reboot-when-staged.sh` refuses to reboot
-while that marker is unacknowledged.
+The `red.d` hook writes `red_boot_at`, and `bin/reboot-when-staged.sh` refuses to reboot
+while that marker is unacknowledged. `bin/verify-host.sh` FAILs on it and the MOTD's staged
+line says `HELD` rather than naming the next window, so the held state is visible without
+anyone knowing to look for the file.
 
 **Rollback needs somewhere to roll back to.** `/boot` holds exactly two kernel slots and
 cannot be grown. That is enough, because slots are counted per distinct kernel+initramfs and

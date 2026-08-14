@@ -21,9 +21,17 @@
 [Unit]
 Description=Apply a staged OS deployment if it is safe to
 Documentation=file:/var/media-stack/bin/reboot-when-staged.sh
-# Ordering only, never Wants=. The backup runs at 03:00 with a 45 minute
-# timeout, and rebooting out from under restic would leave a partial snapshot
-# and a lock in the off-site repository that the append-only key cannot remove.
+# Ordering only, never Wants=.
+#
+# AND ORDERING IS LESS THAN IT LOOKS. This line used to claim it stopped the
+# reboot landing on a running restic. It does not: systemd orders units within a
+# job transaction, and a backup started hours earlier by its own timer is not in
+# this service's transaction, so nothing here waits for it. What the line buys is
+# only the case where both are pulled into one transaction, which is not the case
+# that was worrying. The real gate is in the script, which refuses while
+# media-stack-backup.service is active - that is where it can actually be
+# enforced, and rebooting through restic leaves a partial snapshot and a lock in
+# the off-site repository that the append-only key cannot remove.
 After=media-stack-backup.service
 After=network-online.target
 

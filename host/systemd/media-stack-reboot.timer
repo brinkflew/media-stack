@@ -1,5 +1,5 @@
 # ==============================================================================
-# Weekly, Sunday 05:00 - and weekly rather than nightly on purpose
+# Weekly, Sunday - five attempts across the morning
 # ------------------------------------------------------------------------------
 # The OS stages a deployment nightly. Applying one nightly would mean the machine
 # reboots most nights of the week, which is a lot of reboots on a box with no
@@ -7,15 +7,26 @@
 # sits unapplied for more than seven days, which was the actual problem: the host
 # ran a superseded image for as long as nobody was at a keyboard.
 #
-# 05:00 Sunday is clear of everything else that runs here:
+# FIVE ATTEMPTS RATHER THAN ONE, because the likeliest refusal is transient and a
+# single instant turned an hour-long inconvenience into a week-long one. Every
+# check in bin/reboot-when-staged.sh is a reason not to reboot; the one that
+# actually fires in normal operation is "the encoder is busy", and Tdarr jobs run
+# for tens of minutes. A transcode finishing at 05:30 should not cost the
+# deployment seven days. Refusals are still refusals - they simply get another
+# look at 06:00. Four of the five are ordinarily no-ops that exit at the first
+# gate, which costs nothing.
+#
+# 05:00-09:00 Sunday is clear of everything else that runs here:
 #
 #   00:00  podman-auto-update, +15min jitter, restarting containers as it goes
 #   00:00  rpm-ostreed-automatic, staging the deployment this may apply
 #   03:00  media-stack-backup, +5min jitter, TimeoutStartSec=45min
 #   22:00  media-stack-caddy-build, Saturdays
 #
-# So the backup has finished with an hour to spare, and the reboot lands on the
-# morning most likely to be noticed if it goes wrong.
+# So the backup has finished with an hour to spare even at its 45 minute timeout,
+# and the reboot lands on the morning most likely to be noticed if it goes wrong.
+# The script gates on that margin as well rather than trusting it: an After= in
+# the service orders nothing against a backup that is already running.
 #
 # Persistent=false, which is the opposite of the backup timer and for the
 # opposite reason. A missed backup is a hole and must be caught up; a missed
@@ -28,7 +39,9 @@
 Description=Weekly window for applying a staged OS deployment
 
 [Timer]
-OnCalendar=Sun *-*-* 05:00
+# The jitter is well inside the hourly gap, so the five attempts cannot collide
+# or reorder.
+OnCalendar=Sun *-*-* 05..09:00
 Persistent=false
 RandomizedDelaySec=10min
 AccuracySec=1min

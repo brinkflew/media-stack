@@ -375,8 +375,11 @@ outlive the machine they are talking about:
 **Updates are automatic, in two independent tracks.** Containers: `podman-auto-update.timer`
 nightly, following tags, rolling back on a failed start. Host: `rpm-ostreed-automatic.timer`
 nightly, which **stages and never reboots**. Applying it is either a deliberate human act via
-`bin/reboot-host.sh`, or `media-stack-reboot.timer` on Sundays at 05:00 - which applies a staged
-deployment only when greenboot is armed to undo it and refuses on anything else. A deployment that
+`bin/reboot-host.sh`, or `media-stack-reboot.timer` hourly from 05:00 to 09:00 on Sundays - which
+applies a staged deployment only when greenboot is armed to undo it and refuses on anything else.
+**Five attempts rather than one, because the refusal that actually fires is transient**: the
+encoder gate means a Tdarr job running at 05:08 used to cost the deployment a whole week. A
+deployment that
 boots but breaks sshd now rolls itself back rather than being a car journey; `bin/verify-host.sh`
 still tells you one is waiting, via `/run/motd.d/`.
 
@@ -1254,8 +1257,21 @@ Remaining, in order:
 2. ~~greenboot, and only then an unattended reboot window.~~ **Done, 2026-08-14.** See
    `host/greenboot/README.md`. greenboot is layered - the one package on this host, and a
    deliberate exception to the rule below - and a rejected deployment rolls itself back. The
-   reboot window is `media-stack-reboot.timer`, Sundays at 05:00, driven by
-   `bin/reboot-when-staged.sh`, which is nothing but refusals.
+   reboot window is `media-stack-reboot.timer`, hourly from 05:00 to 09:00 on Sundays, driven by
+   `bin/reboot-when-staged.sh`, which is nothing but refusals - with one deliberate exception.
+
+   **A gate that is correct every time can still be wrong in aggregate, and the encoder gate
+   was.** It refuses while a transcode is running, which is right, but the window was a single
+   instant and Tdarr jobs run for tens of minutes - so one busy minute cost the deployment a
+   whole week, and a queue that stayed busy could do that indefinitely while every individual
+   refusal remained defensible. Two changes, both needed: **five attempts across the morning**,
+   so a transcode finishing at 05:30 does not cost seven days; and **an escalation** - past 14
+   days staged or 30 days of uptime, the encoder stops being a veto and the transcode is killed.
+   The trade is named rather than implied: a killed transcode is a *cost* of one hour of GPU
+   time against a source that is hardlinked in `downloads/` and untouched, while another month
+   on an unapplied image is a *risk*. Two clauses because they fail differently - the staged
+   age resets whenever a new image supersedes the old one, so on a weekly release stream it
+   could never reach 14, and only uptime cannot be starved.
 
    **The rollback is proven, not assumed**, by layering `tree` to make a second deployment and
    rejecting it: four red boots, then `Rollback successful`, then a clean boot on the deployment
