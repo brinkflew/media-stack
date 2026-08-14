@@ -37,6 +37,10 @@ set -uo pipefail
 HOST="${MEDIA_STACK_HOST:-home.local}"
 BOOT_MIN_MB=160
 WAIT_MAX=600
+# How long the stack gets to become healthy after it answers ssh. Generous on
+# purpose: the cost of waiting is minutes, the cost of declaring a good boot bad
+# is an unnecessary rollback.
+VERIFY_MAX=600
 DRY=""
 [ "${1:-}" = "--dry-run" ] && DRY=1
 
@@ -149,11 +153,30 @@ done
 # ------------------------------------------------------------------------------
 say "Verifying the new deployment"
 # ------------------------------------------------------------------------------
-# Containers take a while: Caddy may rebuild, and every unit with Notify=healthy
-# blocks on its healthcheck. Give the stack a chance before judging it.
-sleep 60
-if sshq '/var/media-stack/bin/verify-host.sh'; then
-	ok "the new deployment is healthy"
+# POLL, do not sleep once and judge. Eighteen containers come up in dependency
+# order, every unit with a healthcheck carries Notify=healthy so its start blocks
+# until the check passes, and gluetun has to build a tunnel before the three pod
+# members can follow it. A single 60s sleep would report a perfectly good boot as
+# a failure - and this script's failure path deliberately leaves a pin behind and
+# tells you to roll back, which is an expensive thing to get wrong.
+#
+# media-stack-verify.timer also has OnBootSec=10min for the same reason.
+verify_out=""
+verified=""
+started=$(date +%s)
+printf '  waiting for the stack to settle'
+while [ $(( $(date +%s) - started )) -lt "$VERIFY_MAX" ]; do
+	sleep 20
+	if verify_out=$(sshq '/var/media-stack/bin/verify-host.sh' 2>&1); then
+		verified=1
+		break
+	fi
+	printf '.'
+done
+printf '\n'
+echo "$verify_out" | sed 's/^/  /'
+if [ -n "$verified" ]; then
+	ok "the new deployment is healthy after $(( $(date +%s) - started ))s"
 else
 	cat <<EOF
 
