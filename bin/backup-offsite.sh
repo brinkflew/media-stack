@@ -6,16 +6,32 @@
 # repository rather than backing up again, so the server is touched not at all
 # and the two repositories hold identical, verifiable snapshots.
 #
-# THIS IS THE ONLY THING THAT SURVIVES LOSING THE WORKSTATION. Everything else
-# lives here: the restic repository, both age private keys, the restic
-# passwords. bin/backup-config.sh covers the server's disk dying; this covers
-# the laptop being stolen, dropped, or encrypted by something unpleasant.
+# SINCE 2026-08-14 THIS IS NOT WHAT KEEPS THE OFF-SITE COPY FRESH. The server
+# pushes its own snapshots nightly - see bin/backup-server.sh - because a copy
+# that only happens when someone is at home is not a schedule. What this script
+# is now for is the two things the server deliberately cannot do:
 #
-# The credentials deliberately do NOT go in sops or anywhere the server can
-# read. The server has no route to the backups and no credentials for them, and
-# that is what stops a compromised server from reaching them - the same reason
-# bin/backup-config.sh pulls instead of pushing. Adding these to secrets/ would
-# undo it.
+#   PRUNE. The server's Scaleway key is append-only, so `forget` there 403s.
+#   This is therefore the ONLY thing stopping the off-site repository growing
+#   for ever, and bin/verify-host.sh warns when it has not run in 30 days.
+#
+#   A THIRD COPY, on a different machine with a different password, which is
+#   what survives the server being compromised outright rather than merely
+#   losing its disk.
+#
+# THE ADMIN CREDENTIALS THIS USES MUST NOT GO IN SOPS. That rule got narrower
+# rather than weaker: the server now holds an APPEND-ONLY key and the repository
+# passwords, because it needs them to write and they cannot destroy anything.
+# The key used here can delete, which is exactly why it stays on this machine.
+# Putting it in secrets/ would hand the delete authority to the machine the
+# append-only scoping exists to contain.
+#
+# NOTE THAT THE OFF-SITE REPOSITORY HOLDS TWO SNAPSHOT CHAINS, because the
+# server stages at /var/backups/staging/config and this machine at
+# ~/.cache/media-stack/staging/config. `restic forget` groups by host AND paths,
+# so the retention policy below is applied to each chain separately - 7 daily of
+# each, not 7 in total. That is more copies than the policy reads like, and it
+# is fine at this size; it is not a bug to "fix" by unifying the paths.
 #
 # `restic copy` re-encrypts blob by blob, so the destination has its OWN
 # password. Compromising one credential loses one copy. It does mean the two
@@ -112,6 +128,27 @@ restic -r "$DST_REPO" --password-file "$DST_PW" copy \
 say "pruning"
 restic -r "$DST_REPO" --password-file "$DST_PW" forget --prune \
   --keep-daily 7 --keep-weekly 4 --keep-monthly 12
+
+# ------------------------------------------------------------------------------
+# 4. Tell the server the prune happened
+# ------------------------------------------------------------------------------
+# THE SERVER CANNOT PRUNE AND MUST NOT BE ABLE TO - its key is append-only, so
+# `forget` there would 403. That makes this script the only thing that keeps the
+# off-site repository from growing for ever, and it runs by hand, whenever
+# somebody is home. So the one thing that must not happen is it being forgotten
+# silently.
+#
+# bin/verify-host.sh warns when this is more than 30 days old. The timestamp is
+# all that crosses; the credentials that did the pruning stay here.
+if ssh "${MEDIA_STACK_HOST:-home.local}" \
+  'f=~/.cache/media-stack/backup-state; mkdir -p "$(dirname "$f")"; touch "$f";
+   grep -v "^offsite_pruned_at=" "$f" > "$f.tmp";
+   echo "offsite_pruned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f.tmp";
+   mv "$f.tmp" "$f"' 2>/dev/null; then
+  echo "  recorded the prune on the server"
+else
+  echo "  (could not reach the server to record the prune - harmless)"
+fi
 
 if [ -n "$CHECK" ]; then
   say "verifying"

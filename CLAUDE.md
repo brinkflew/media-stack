@@ -167,7 +167,13 @@ what prunes, and handing them to the server would undo the paragraph above.
 **Retention happens on the workstation**, for the same reason. `bin/backup-server.sh` prunes the
 local repository and deliberately never touches the off-site one - the calls would 403 anyway - so
 without `bin/backup-offsite.sh` being run occasionally the off-site repository grows for ever.
-`verify-host.sh` warns when it has not been pruned in 30 days.
+It records `offsite_pruned_at` on the server when it does, and `verify-host.sh` warns after 30 days.
+
+**The off-site repository holds two snapshot chains**, and that is expected rather than a fault. The
+server stages at `/var/backups/staging/config` and the workstation at
+`~/.cache/media-stack/staging/config`; `restic forget` groups by host **and paths**, so the retention
+policy applies to each chain separately - 7 daily of each, not 7 in total. More copies than the
+policy reads like, which is fine at this size. Do not "fix" it by forcing the paths to match.
 
 **The bucket has versioning OFF, deliberately.** `forget --prune` deletes and rewrites pack files;
 with versioning on, every deletion is retained as a noncurrent version, so pruning frees nothing
