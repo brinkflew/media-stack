@@ -27,11 +27,22 @@
 # as root before the user session exists, and more importantly a greenboot check
 # that fails rolls the whole deployment back: a slow Tdarr start must never be
 # able to do that. It answers "did the OS come up correctly", nothing more.
+#
+# It is silent on success and prints its FAILs to stderr, which is what puts the
+# reason for a rollback in the journal rather than only in the MOTD.
 # ==============================================================================
 
 set -uo pipefail
 
-export PATH="$HOME/.local/bin:$PATH"
+# ${HOME:-/root} rather than $HOME, and that fallback is load-bearing rather than
+# defensive. systemd gives a system service LANG and PATH and nothing else - HOME
+# is NOT in the default environment - so under `set -u` a bare $HOME aborts bash
+# on this line, before a single check runs. greenboot would then read exit 1 as a
+# failed health check and roll back a perfectly good deployment, and because
+# --greenboot implies --quiet it would do so with nothing in the journal saying
+# why. It has never bitten because the only caller today is bin/reboot-host.sh,
+# over ssh as `core`, where HOME is set.
+export PATH="${HOME:-/root}/.local/bin:$PATH"
 
 QUIET="" ROUTES="" GREENBOOT=""
 while [ $# -gt 0 ]; do
@@ -363,7 +374,10 @@ if [ -z "$GREENBOOT" ]; then
 	fi
 	check_timer_run "backup" 86400 media-stack-backup.service --user
 
-	backup_state="$HOME/.cache/media-stack/backup-state"
+	# Same ${HOME:-} guard as line 42. This branch only runs as `core`, where
+	# HOME is always set, but an unbound expansion aborts the whole script
+	# under `set -u` and that is too sharp an edge to leave lying around.
+	backup_state="${HOME:-/root}/.cache/media-stack/backup-state"
 	# <label> <key> <max-hours> <severity>
 	check_backup_age() {
 		local label="$1" key="$2" max="$3" sev="$4" at age
@@ -503,6 +517,15 @@ motd=/run/motd.d/40-media-stack.motd
 } | priv tee "$motd" >/dev/null 2>&1 || true
 
 if [ ${#fails[@]} -gt 0 ]; then
+	# UNDER --greenboot, SAY WHY ON STDERR. greenboot captures the check's
+	# output into the journal, and --greenboot implies --quiet - so without
+	# this a red boot is recorded as "exited 1" and the reason exists only in
+	# a MOTD that, if the rollback fires, belongs to a deployment nobody is
+	# running any more. Colour is deliberately omitted: this goes to the
+	# journal, not a terminal.
+	if [ -n "$GREENBOOT" ]; then
+		for f in "${fails[@]}"; do printf 'verify-host: FAIL %s\n' "$f" >&2; done
+	fi
 	[ -n "$QUIET" ] || printf '\n\033[31m%d check(s) FAILED\033[0m\n' "${#fails[@]}"
 	exit 1
 fi
