@@ -135,29 +135,58 @@ than assumed: the Scaleway application key is scoped to `PutObject`/`GetObject`/
 {
   "Version": "2023-04-17",
   "Statement": [
-    { "Sid": "ReadWriteNoDelete",
+    { "Sid": "AdminKeepsFullAccess",
+      "Effect": "Allow",
+      "Principal": { "SCW": "user_id:<your own user id>" },
+      "Action": ["s3:*"],
+      "Resource": ["home-server-backup", "home-server-backup/*"] },
+    { "Sid": "ServerMayReadAndWrite",
       "Effect": "Allow",
       "Principal": { "SCW": "application_id:<the append-only application>" },
       "Action": ["s3:ListBucket", "s3:GetObject", "s3:PutObject"],
       "Resource": ["home-server-backup", "home-server-backup/*"] },
-    { "Sid": "DenyDeleteExceptLocks",
-      "Effect": "Deny",
+    { "Sid": "ServerMayReleaseItsOwnLocks",
+      "Effect": "Allow",
       "Principal": { "SCW": "application_id:<the append-only application>" },
       "Action": ["s3:DeleteObject"],
-      "Resource": ["home-server-backup/*"],
-      "Condition": { "StringNotLike": { "s3:prefix": ["locks/*"] } } }
+      "Resource": ["home-server-backup/locks/*"] }
   ]
 }
 ```
 
-**Verify the deny rather than trusting it.** A policy that silently does nothing looks exactly like
-one that works:
+**There is no `Deny` statement, and that is the correct shape rather than a shortcut.** Two things
+make it so, both of which are easy to get wrong:
+
+- **Anything not explicitly allowed is already denied.** Granting `DeleteObject` only on `locks/*`
+  is what makes every other deletion impossible. An explicit `Deny` on `home-server-backup/*` would
+  additionally override the `locks/*` allow, because deny always wins - so the "obvious" belt-and-
+  braces version breaks `restic copy`, which cannot then release its own lock.
+- **`s3:prefix` is a condition key for `ListBucket`, not for `DeleteObject`.** Scoping a delete by
+  prefix is done with the resource path, not a condition. A policy written the other way looks
+  plausible and silently fails to constrain anything.
+
+**Include your own principal, or you can lock yourself out of the bucket.** A Scaleway bucket policy
+takes precedence over the ownership that would otherwise grant you access, and once applied only the
+Organization Owner can replace it.
+
+**Verify the restriction rather than trusting it.** A policy that silently does nothing looks exactly
+like one that works, and this one has no `Deny` to eyeball - it relies on an absence:
 
 ```bash
 ssh home.local 'cd /var/media-stack && set -a && . .env && set +a &&
-  restic -r "$BACKUP_OFFSITE_REPOSITORY" --password-command "printenv BACKUP_OFFSITE_PASSWORD" \
-    forget --prune --keep-last 1'      # MUST fail on permissions
+  AWS_ACCESS_KEY_ID="$BACKUP_OFFSITE_ACCESS_KEY" \
+  AWS_SECRET_ACCESS_KEY="$BACKUP_OFFSITE_SECRET_KEY" \
+  ~/.local/bin/restic -r "$BACKUP_OFFSITE_REPOSITORY" \
+    --password-command "printenv BACKUP_OFFSITE_PASSWORD" \
+    forget --keep-last 1 --prune'      # MUST fail with AccessDenied
 ```
+
+**Note what this costs if the policy is wrong**, because it is not a free test: succeeding means the
+key CAN delete, and it will have pruned the off-site repository to one snapshot on its way to telling
+you so. That is recoverable - the workstation holds the full chain and `bin/backup-offsite.sh`
+re-copies it - and it is worth knowing at a moment you chose rather than during an incident. Note
+also that the nightly run exercises the *allowed* half every night: `restic copy` cannot finish
+without creating and then deleting a lock under `locks/`.
 
 **Which narrows the sops rule rather than reversing it.** The **append-only** key and the repository
 passwords are in `secrets/env.sops.env`, because the server needs them and they cannot destroy

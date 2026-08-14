@@ -179,6 +179,21 @@ done
 boot_free=$(df -Pm /boot | awk 'NR==2 {print $4}')
 if [ "$boot_free" -ge 160 ]; then
 	ok "/boot ${boot_free}M free, ${depl_count:-?} deployment(s)"
+elif [ "${pinned_count:-0}" -gt 0 ]; then
+	# A PIN IS THE USUAL CAUSE, AND IT IS NOT THE SAME PROBLEM. Pinning the
+	# booted deployment is free until you reboot; after that, if the deployment
+	# you booted into carries a different initramfs, the pin is suddenly holding
+	# a second full slot. A firmware bump alone is enough for that.
+	#
+	# Measured twice now, both times immediately after an attended reboot:
+	# 171M free before, 26M after, and 171M again the moment the old deployment
+	# was unpinned and `rpm-ostree cleanup -r` run.
+	#
+	# So this is self-inflicted, temporary, and fixed by the step that comes
+	# next anyway - which makes it a WARN with the remedy attached, not a FAIL.
+	# As a FAIL it told bin/reboot-host.sh that a perfectly good deployment was
+	# bad, and that script's failure path advises a rollback.
+	warn "/boot only ${boot_free}M free, but ${pinned_count} deployment(s) pinned - unpin and 'sudo rpm-ostree cleanup -r' reclaims it"
 else
 	bad "/boot only ${boot_free}M free - the next staged update cannot write its kernel"
 fi
