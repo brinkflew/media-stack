@@ -165,26 +165,50 @@ say "Verifying the new deployment"
 # tells you to roll back, which is an expensive thing to get wrong.
 #
 # media-stack-verify.timer also has OnBootSec=10min for the same reason.
-verify_out=""
+# GATE ON --greenboot, NOT ON THE WHOLE BATTERY. The question this step asks is
+# "did this deployment boot correctly", and only the host-level checks answer it.
+# The full battery also covers containers, the backup and the checkout, none of
+# which a rollback would fix - so gating on it means an expired object-storage
+# credential, or a Tdarr node that is slow to start, recommends reverting a
+# perfectly good OS update.
+#
+# That is not hypothetical: the first real run of this script hit exactly that,
+# twice. Once on /boot free space, which the pin ITSELF had caused, and once on
+# a failed backup unit whose credentials had nothing to do with the reboot.
+#
+# --greenboot is already defined for this exact distinction, and its own comment
+# in verify-host.sh says why: "a slow Tdarr start must never be able to" roll a
+# deployment back. The full battery is still printed below, for information.
 verified=""
 started=$(date +%s)
-printf '  waiting for the stack to settle'
+printf '  waiting for the host to settle'
 while [ $(( $(date +%s) - started )) -lt "$VERIFY_MAX" ]; do
 	sleep 20
-	if verify_out=$(sshq '/var/media-stack/bin/verify-host.sh' 2>&1); then
+	if sshq '/var/media-stack/bin/verify-host.sh --greenboot' >/dev/null 2>&1; then
 		verified=1
 		break
 	fi
 	printf '.'
 done
 printf '\n'
-echo "$verify_out" | sed 's/^/  /'
 if [ -n "$verified" ]; then
-	ok "the new deployment is healthy after $(( $(date +%s) - started ))s"
+	ok "host-level checks pass after $(( $(date +%s) - started ))s"
+	# Informational, and deliberately not a gate. Anything failing here is worth
+	# reading and is not a reason to roll the OS back.
+	say "Full battery (not a gate)"
+	sshq '/var/media-stack/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
 else
+	sshq '/var/media-stack/bin/verify-host.sh --quiet' >/dev/null 2>&1 || true
+	sshq '/var/media-stack/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
 	cat <<EOF
 
-  VERIFICATION FAILED, and the pin has deliberately been left in place.
+  THE HOST-LEVEL CHECKS DID NOT PASS, and the pin has deliberately been left
+  in place. The pin is the rollback.
+
+  Read the battery above first. These checks are host-level only - the
+  network, the deployment, /boot, the mount, the GPU and CDI, firewalld,
+  lingering and cgroup delegation - so a failure here really is about the
+  deployment you just booted into, not about a container or a backup.
 
   Roll back with:
       ssh $HOST 'sudo rpm-ostree rollback --reboot'

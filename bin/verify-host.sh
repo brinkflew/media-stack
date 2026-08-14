@@ -81,7 +81,10 @@ check_timer_run() {  # <label> <period-seconds> <unit> [--user]
 	fi
 	age=$(( ( $(date +%s) - $(date -d "$run" +%s) ) / 3600 ))
 	if [ "${rc:-1}" != 0 ]; then
-		bad "the last $label run FAILED (exit $rc, ${age}h ago) - nothing is updating"
+		# No "- nothing is updating" tail here: this helper is shared with the
+		# backup, and a failed backup run reporting that nothing is updating
+		# sends you to look at entirely the wrong subsystem.
+		bad "the last $label run FAILED (exit $rc, ${age}h ago)"
 	elif [ "$age" -gt 48 ]; then
 		bad "the last $label run was ${age}h ago - the timer has stopped firing"
 	else
