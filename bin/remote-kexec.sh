@@ -188,8 +188,27 @@ EOF
 read -r -p "  Type 'kexec' to proceed: " reply
 [ "$reply" = "kexec" ] || die "aborted"
 
+# `systemctl kexec` below does a clean shutdown that stops these anyway. Doing it
+# explicitly first means each container gets its own stop timeout rather than
+# competing with the shutdown's, which is what the *arr databases want.
+#
+# This used to be `docker compose down`, and had been dead since the migration on
+# 2026-08-12 - silenced by a `|| echo`, so every run reported success while
+# stopping nothing at all.
+#
+# The unit names are DERIVED from the quadlet files rather than listed, because a
+# list here would drift the moment a service is added and would fail silently in
+# exactly the same way. `foo.container` generates `foo.service`; a `.pod`
+# generates `<name>-pod.service`, and its infra container stops with it.
+# NOT `systemctl --user stop '*.service'`, which would take the user manager's
+# own units down with it.
 say "stopping the stack"
-ssh "$HOST" 'cd /var/media-stack && docker compose down' || echo "  (compose down failed; continuing)"
+ssh "$HOST" '
+  cd ~/.config/containers/systemd 2>/dev/null || exit 0
+  units=$(ls */*.container 2>/dev/null | xargs -r -n1 basename | sed "s/\.container$/.service/")
+  [ -n "$units" ] || exit 0
+  systemctl --user stop $units
+' || echo "  (could not stop the stack; continuing - the shutdown will)"
 
 say "loading the kernel"
 ssh -t "$HOST" "sudo kexec -l /var/tmp/fcos/kernel \

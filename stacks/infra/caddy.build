@@ -9,10 +9,12 @@
 # someone has to remember: caddy.container references this image, so systemd
 # builds it before starting the proxy.
 #
-# Reproducible like everything else here: ingress/Dockerfile pins both of its
-# FROM lines by digest, so this builds the same proxy on the new host as the one
-# running today. That is the point - this unit runs on first boot of a machine
-# nobody has used yet, and Caddy is the only path to every service on it.
+# NOT pinned by digest. apps/caddy/Dockerfile tracks the major tags of both its
+# FROM lines, deliberately - see the comment there. A rebuild is therefore not
+# byte-reproducible, and that is the trade: nothing maintained the digests, so
+# pinning them meant a proxy that never picked up a fix. What makes this safe is
+# that the build runs BEFORE anything is restarted, so an upstream release that
+# will not compile against caddy-dns/gandi fails here rather than in production.
 # ==============================================================================
 
 [Unit]
@@ -20,8 +22,8 @@ Description=Build Caddy with caddy-dns/gandi
 
 [Build]
 ImageTag=localhost/media-stack/caddy:latest
-File=/var/media-stack/ingress/Dockerfile
-SetWorkingDirectory=/var/media-stack/ingress
+File=/var/media-stack/apps/caddy/Dockerfile
+SetWorkingDirectory=/var/media-stack/apps/caddy
 
 # WITHOUT THIS THE WEEKLY REBUILD IS DECORATIVE. podman build's default pull
 # policy is `missing`: once docker.io/library/caddy:2 exists in local storage

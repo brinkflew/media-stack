@@ -1,0 +1,34 @@
+{
+  // Extensions worth having for THIS repository, checked against Open VSX,
+  // which is the registry VSCodium uses. The gap they close is that all 26
+  // quadlets and 6 plain systemd units otherwise open as unhighlighted text.
+  //
+  // Butane (.bu) and Ignition (.ign) have no extension in the registry at all -
+  // they are handled by file association in .vscode/settings.json instead.
+  //
+  // DELIBERATELY ABSENT: a SOPS extension. Several exist, and the ones that
+  // decrypt transparently add a path by which a plaintext secret can be written
+  // to disk in a PUBLIC repository. `sops secrets/env.sops.env` opens it in
+  // $EDITOR and re-encrypts on save, which is the whole workflow, without ever
+  // putting plaintext on disk.
+  "recommendations": [
+    // .container .network .pod .build .service .timer - every unit type here.
+    // Its own description names Podman Quadlet, which is why it is this one and
+    // not one of the other systemd extensions.
+    "hangxingliu.vscode-systemd-support",
+
+    // apps/caddy/Caddyfile. Matches the bare filename.
+    "matthewpi.caddyfile-support",
+
+    // Eight shell scripts, all `set -euo pipefail`, several of which do
+    // irreversible things to a machine with no console.
+    "timonwong.shellcheck",
+
+    // Butane, once .bu is associated with YAML below.
+    "redhat.vscode-yaml",
+
+    // Honours the .editorconfig at the repo root - notably tabs in the shell
+    // scripts and spaces everywhere else.
+    "editorconfig.editorconfig"
+  ]
+}

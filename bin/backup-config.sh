@@ -13,8 +13,12 @@
 # account, the *arr databases, Jellyfin's users and watch state, qBittorrent's
 # torrent state.
 #
-# It also matters right now for a specific reason: config/ lives on nvme0n1p3,
-# which the uCore install wipes. This is what makes that install recoverable.
+# SINCE 2026-08-14 THIS IS NO LONGER THE PRIMARY BACKUP. bin/backup-server.sh
+# runs on the server nightly and covers both the local and the off-site copy,
+# because a backup that only runs when someone is at home is not a schedule. This
+# script is the THIRD copy: a different machine, a different repository, a
+# different password, which is what survives the server being compromised
+# outright. Run it when you are home; nothing depends on it being frequent.
 #
 # THREE THINGS THIS DOES THAT A PLAIN rsync DOES NOT, each of which otherwise
 # produces a backup that looks complete and is not:

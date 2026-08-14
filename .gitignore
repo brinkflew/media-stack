@@ -1,19 +1,15 @@
 # Everything under config/ is runtime state living on the server - application
 # databases, Jellyfin metadata, TLS private keys, session stores. None of it is
-# reproducible from this repository, so it is ignored wholesale and specific
-# paths are re-included by exception.
+# reproducible from this repository, so it is ignored wholesale.
 #
-# Adding a config file that should be tracked means adding a matching ! rule,
-# and each level has to be un-ignored in turn: git will not descend into an
-# ignored directory to find an exception inside it.
-config/*
-!config/sonarr/
-
-config/sonarr/*
-!config/sonarr/scripts/
-
-# Reverse proxy configuration used to live here as SWAG nginx confs. It is now
-# ingress/Caddyfile, which is a normal tracked file outside config/.
+# Nothing is re-included by exception any more, and nothing should be. Files
+# that need to reach a container's config tree live in apps/<service>/ and are
+# copied in by an ExecStartPre= on that service's quadlet - Tdarr's plugin,
+# Sonarr's scripts, Jellyfin's custom CSS. That keeps git authoritative without
+# tracking a path inside an ignored tree, which needed a four-rule un-ignore
+# chain because git will not descend into an ignored directory to find an
+# exception inside it.
+config/
 
 # Ignore the environment file containing sensitive values.
 # The wildcard matters as much as the exact name: editing .env tends to leave
@@ -37,3 +33,8 @@ keys.txt
 
 # Transcode scratch (DOCKER_VOLUME_CACHE), regenerable and large.
 cache/
+
+# Python bytecode. bin/promote-transcoded.py is executed directly, so this is
+# only ever produced by importing it - but a .pyc was committed once already.
+__pycache__/
+*.pyc

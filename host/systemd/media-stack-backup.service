@@ -1,0 +1,45 @@
+# ==============================================================================
+# Back up config/ from the server itself
+# ------------------------------------------------------------------------------
+# The backup used to run on the workstation and pull, which kept every backup
+# credential off the server - but it also meant the backup only happened when
+# someone was at home. Two days of Tdarr and Radarr configuration existed in
+# exactly one place on 2026-08-14 because of it.
+#
+# So this runs here, and the security property is preserved differently: the
+# off-site key is scoped so it cannot delete. See bin/backup-server.sh.
+#
+# A plain systemd user unit rather than a quadlet, because it runs ON the host -
+# it reads config/ directly and snapshots the SQLite databases in place. Nothing
+# about it belongs in a container.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Back up config/ locally and off-site
+Documentation=file:/var/media-stack/bin/backup-server.sh
+# Ordering only, never Wants=. The backup is worth taking whether or not the
+# stack is up, and a Wants= here would start containers at 03:00 that somebody
+# had deliberately stopped.
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/var/media-stack/.env
+ExecStart=/var/media-stack/bin/backup-server.sh
+# It rsyncs 5.6 GB locally and copies to object storage. Ten minutes is
+# generous; the point is that a hung network call cannot leave this running
+# until the next timer fires.
+TimeoutStartSec=45min
+
+# The whole job is I/O against the disk that also holds every application's
+# database. Yield to them: a backup that takes an extra ten minutes costs
+# nothing, a backup that makes Sonarr time out costs an evening.
+IOWeight=20
+CPUWeight=20
+Nice=10
+
+# A ceiling, not a tuning knob. restic's memory use scales with the index.
+MemoryHigh=1G
+MemoryMax=2G

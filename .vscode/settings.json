@@ -1,0 +1,41 @@
+{
+  // File types this repository uses that no extension claims on its own.
+  //
+  // The quadlets (.container, .network, .pod, .build) and the plain units
+  // (.service, .timer) are NOT listed here: hangxingliu.vscode-systemd-support
+  // already claims all six by extension. Adding them would only fight it.
+  "files.associations": {
+    // Butane is YAML. There is no Butane extension and no published schema, so
+    // this buys syntax and indentation, not validation - which is most of the
+    // value, since the failure mode of a .bu file is a typo'd key that butane
+    // rejects at transpile time anyway.
+    "*.bu": "yaml",
+
+    // Ignition is JSON, generated from the .bu. It is checked in for the
+    // console install path in host/RUNBOOK.md, and should never be hand-edited.
+    "*.ign": "json",
+
+    // dotenv. `properties` is the built-in language that gets KEY=value and #
+    // comments right. secrets/env.sops.env is the encrypted original, and it
+    // stays legible on purpose so a diff still shows which credential changed.
+    "*.sops.env": "properties",
+    ".env.sample": "properties"
+  },
+
+  // config/ is gitignored runtime state on the server - application databases,
+  // Jellyfin metadata, TLS private keys. It is not in this checkout, but if
+  // someone rsyncs a restore into place to inspect it, searching it is never
+  // what you want and indexing 5.6 GB of SQLite is actively unpleasant.
+  "search.exclude": {
+    "**/config": true,
+    "**/cache": true
+  },
+
+  // The prose here is wrapped at 100 and the tables assume it.
+  "editor.rulers": [100],
+
+  // A quadlet is whitespace-sensitive in one place that matters: Environment=
+  // splits on spaces, so a trailing space can silently truncate a value.
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true
+}

@@ -69,6 +69,23 @@ Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
+
+# The web UI's Custom CSS is TRACKED IN GIT at apps/jellyfin/custom.css and
+# rendered into config/jellyfin/branding.xml on every start. Same contract as
+# Tdarr's plugins and Sonarr's scripts: git is authoritative.
+#
+# WHICH MEANS A CUSTOM CSS EDIT MADE IN JELLYFIN'S UI IS TEMPORARY. It survives
+# until the next restart, and podman-auto-update restarts this nightly, so it
+# will silently revert. Edit the file in git instead.
+#
+# The renderer replaces ONLY the CustomCss element and preserves the rest of the
+# document, because LoginDisclaimer and SplashscreenEnabled live there too and
+# are genuinely the UI's to own.
+#
+# Leading `-` so a failure cannot stop Jellyfin. This is cosmetics; it must
+# never be able to take the media server down. It logs to the journal instead.
+ExecStartPre=-/var/media-stack/bin/render-jellyfin-branding.py
+
 Restart=always
 RestartSec=5
 # Must clear the startup check's 300s ceiling - see sonarr.container.

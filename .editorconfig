@@ -1,0 +1,48 @@
+# ==============================================================================
+# Editor conventions
+# ------------------------------------------------------------------------------
+# There is no build and no formatter here, so this plus bin/lint-repo.sh is the
+# whole of the mechanical enforcement. The rule that actually matters is
+# charset = utf-8 combined with the ASCII check in lint-repo.sh: typographic
+# characters arrive by copy-paste, are invisible in review, and end up inside
+# printf format strings that a terminal may not render. 402 of them had
+# accumulated by 2026-08-14.
+# ==============================================================================
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+max_line_length = 100
+
+# Tabs, because that is what these already use and a mixed file is worse than
+# either convention. bin/verify-host.sh is the one to match.
+[*.sh]
+indent_style = tab
+
+[*.py]
+indent_size = 4
+
+# systemd does not care about indentation, but it DOES split Environment= on
+# whitespace, so trailing whitespace is not cosmetic here - it can truncate a
+# value silently. That is caught by trim_trailing_whitespace above.
+[*.{container,network,pod,build,service,timer}]
+indent_style = space
+indent_size = 2
+
+# Markdown uses trailing double-space for hard line breaks in some dialects.
+# None of the prose here relies on it, so trimming stays on; this only relaxes
+# the line length, since the tables run long.
+[*.md]
+max_line_length = off
+
+# Generated from ucore.bu by butane. Do not hand-edit; the formatting is the
+# transpiler's.
+[*.ign]
+trim_trailing_whitespace = false
+insert_final_newline = false

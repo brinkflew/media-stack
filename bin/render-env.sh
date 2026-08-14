@@ -7,8 +7,9 @@
 # run this. Editing .env directly works right up until the next render silently
 # discards it.
 #
-# Run this before any `docker compose` command that needs a value which changed.
-# Compose reads .env from disk; it has no idea this file exists.
+# Run this before restarting any unit that needs a value which changed. The
+# quadlets read .env from disk through EnvironmentFile=; they have no idea the
+# encrypted original exists.
 #
 # Decryption needs the age private key at ~/.config/sops/age/keys.txt - sops'
 # default lookup path. See .sops.yaml for which keys can decrypt.

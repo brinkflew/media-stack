@@ -4,7 +4,7 @@ Butane source for the uCore install (Stage 2). `ucore.bu` is transpiled to Ignit
 `coreos-installer`; the machine is then declaratively defined by this file rather than by whatever
 was typed into it over its lifetime.
 
-**Do not run the install from this file alone — follow [`../RUNBOOK.md`](../RUNBOOK.md).** Ignition
+**Do not run the install from this file alone - follow [`../RUNBOOK.md`](../RUNBOOK.md).** Ignition
 provisions the host, but it cannot restore the age key, the secrets or `config/`, and the order in
 which those happen afterwards is what makes the difference between a working stack and a subtly
 broken one.
@@ -13,7 +13,7 @@ broken one.
 podman run --rm -i quay.io/coreos/butane:release --pretty --strict < ucore.bu > ucore.ign
 ```
 
-**The install target is `nvme0n1`. `sda` is the 8 TB media disk and must not be touched** — it is
+**The install target is `nvme0n1`. `sda` is the 8 TB media disk and must not be touched** - it is
 the one thing here that is not reproducible from this repository, and it holds the library.
 
 Four of the entries in `ucore.bu` exist because a rootless Podman stack does not work without them,
@@ -31,7 +31,7 @@ machine as first created, not necessarily as it stands: editing it changes nothi
 host. Anything added here must also be applied by hand, and anything applied by hand must be added
 here, or the next reinstall loses it.
 
-The applied config predates two of the units below — `firewall-stack-ports.service` and
+The applied config predates two of the units below - `firewall-stack-ports.service` and
 `selinux-container-devices.service` were created by hand on 2026-08-13 to close that gap, along with
 `/etc/rpm-ostreed.conf` and the updater masks.
 
@@ -41,6 +41,6 @@ A second, much smaller config for the **live** environment that `bin/remote-kexe
 It authorises SSH and nothing else; the live system exists only to be logged into so that
 `coreos-installer` can be run from something that is not the disk being written.
 
-Its networking deliberately does **not** live here — it comes from kernel arguments, so dracut
+Its networking deliberately does **not** live here - it comes from kernel arguments, so dracut
 applies it in the initramfs rather than NetworkManager applying it after switch-root. On a machine
 with no console, an ordering bug there is indistinguishable from one that never booted.

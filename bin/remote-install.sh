@@ -130,7 +130,7 @@ fi
 
 cat <<EOF
 
-  ────────────────────────────────────────────────────────────────────────
+  ------------------------------------------------------------------------
    This writes Fedora CoreOS over $INSTALL_DEV.
 
    DESTROYED    /var/media-stack (checkout, .env, config/)
@@ -143,7 +143,7 @@ cat <<EOF
    RECOVERY     only the disk image, restored from this live environment.
                 There is no console on this machine.
                 $IMAGE_STATUS
-  ────────────────────────────────────────────────────────────────────────
+  ------------------------------------------------------------------------
 
 EOF
 read -r -p "  Type 'install uCore' to proceed: " reply

@@ -2,7 +2,7 @@
 # Rebuild Caddy, so that the one built image is not the one that never updates
 # ------------------------------------------------------------------------------
 # Every other image in the stack is pulled, carries AutoUpdate=registry, and
-# moves on its own. Caddy is built here from ingress/Dockerfile, and TWO things
+# moves on its own. Caddy is built here from apps/caddy/Dockerfile, and TWO things
 # would otherwise conspire to freeze it for ever:
 #
 #   - a quadlet .build unit only runs when its image is ABSENT. Once
@@ -24,7 +24,7 @@
 
 [Unit]
 Description=Rebuild the Caddy image against current upstream
-Documentation=file:/var/media-stack/ingress/Dockerfile
+Documentation=file:/var/media-stack/apps/caddy/Dockerfile
 
 [Service]
 Type=oneshot

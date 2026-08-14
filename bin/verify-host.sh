@@ -320,6 +320,88 @@ if [ -z "$GREENBOOT" ]; then
 		bad "only ${au_count:-0} containers carry an auto-update policy, expected 17"
 	fi
 
+	# ------------------------------------------------------------------------------
+	say "Backups"
+	# ------------------------------------------------------------------------------
+	# config/ is the only thing here that cannot be rebuilt from git, and until
+	# 2026-08-14 the backup ran on the workstation by hand - so a fortnight away
+	# was a fortnight with no backups, and nothing said so. It now runs here
+	# nightly, which means the failure mode moved rather than disappearing: a
+	# timer that stopped firing, or an off-site key that stopped working, looks
+	# exactly like everything being fine.
+	#
+	# bin/backup-server.sh writes the marker below after each leg. Reading the
+	# repositories directly would be better, except the off-site one is a network
+	# call with credentials, and this runs every hour.
+	if [ "$(systemctl --user is-enabled media-stack-backup.timer 2>/dev/null)" = enabled ]; then
+		ok "media-stack-backup.timer enabled"
+	else
+		bad "media-stack-backup.timer is not enabled - config/ is not being backed up"
+	fi
+	check_timer_run "backup" 86400 media-stack-backup.service --user
+
+	backup_state="$HOME/.cache/media-stack/backup-state"
+	# <label> <key> <max-hours> <severity>
+	check_backup_age() {
+		local label="$1" key="$2" max="$3" sev="$4" at age
+		at=$(sed -n "s/^${key}=//p" "$backup_state" 2>/dev/null | tail -1)
+		if [ -z "$at" ]; then
+			# Same argument as check_timer_run: on a host that has just been
+			# rebuilt this is true and uninteresting, and a finding nobody can
+			# act on is how someone learns to ignore this whole block.
+			if [ "$uptime_s" -lt 86400 ]; then
+				ok "no $label recorded yet (up $((uptime_s / 60))m) - not yet due"
+			else
+				bad "no $label has EVER been recorded"
+			fi
+			return
+		fi
+		age=$(( ( $(date +%s) - $(date -d "$at" +%s) ) / 3600 ))
+		if [ "$age" -le "$max" ]; then
+			ok "$label ${age}h ago"
+		else
+			"$sev" "the $label is ${age}h old (limit ${max}h)"
+		fi
+	}
+	# The local copy is on the same disk as config/, so it is the weaker of the
+	# two: it covers a bad change, not a dead disk. The off-site one is the copy
+	# that survives nvme0n1, which is why its ceiling is tight as well.
+	check_backup_age "local backup"    local_at   48 bad
+	check_backup_age "off-site backup" offsite_at 72 bad
+	# The server's key cannot delete, deliberately - so nothing here prunes the
+	# off-site repository and it grows until the workstation runs
+	# bin/backup-offsite.sh. Slow, but unbounded if nobody ever does.
+	check_backup_age "off-site prune" offsite_pruned_at 720 warn
+
+	# ------------------------------------------------------------------------------
+	say "Checkout"
+	# ------------------------------------------------------------------------------
+	# Containers update themselves nightly and the OS stages itself nightly, but
+	# the unit definitions only move when a human types `git pull` - so this is
+	# the one part of the system with no automation and no feedback. The remote
+	# has drifted from git before, and an edit made over ssh is invisible until
+	# the next pull refuses with "local changes would be overwritten".
+	repo=/var/media-stack
+	dirty=$(git -C "$repo" status --porcelain 2>/dev/null)
+	if [ -z "$dirty" ]; then
+		ok "checkout is clean"
+	else
+		bad "LOCAL CHANGES on the server: $(echo "$dirty" | awk '{print $2}' | tr '\n' ' ')"
+	fi
+
+	# ls-remote rather than fetch: it writes nothing into .git, so this script
+	# stays read-only apart from the MOTD. The cost is that it cannot tell ahead
+	# from behind - only that the two differ, which is the thing worth saying.
+	local_head=$(git -C "$repo" rev-parse HEAD 2>/dev/null)
+	remote_head=$(git -C "$repo" ls-remote origin HEAD 2>/dev/null | awk '{print $1}')
+	if [ -z "$remote_head" ]; then
+		note "could not reach origin - not a health problem"
+	elif [ "$local_head" = "$remote_head" ]; then
+		ok "checkout matches origin"
+	else
+		warn "checkout is not at origin (local ${local_head:0:7}, origin ${remote_head:0:7})"
+	fi
+
 	say "Containers"
 
 	userfailed=$(systemctl --user list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}')
@@ -362,7 +444,7 @@ fi
 # ------------------------------------------------------------------------------
 motd=/run/motd.d/40-media-stack.motd
 {
-	printf '  \033[1m── media-stack ─────────────────────────────────────────────────\033[0m\n'
+	printf '  \033[1m-- media-stack -------------------------------------------------\033[0m\n'
 	if [ -n "${staged_ver:-}" ]; then
 		staged_age=""
 		if [ -e /run/ostree/staged-deployment ]; then
@@ -374,15 +456,15 @@ motd=/run/motd.d/40-media-stack.motd
 		[ "$staged_ver" = "${booted_ver:-}" ] && [ -n "$staged_dig" ] && label="$staged_ver @$staged_dig"
 		case "$staged_signed" in ostree-image-signed:*) label="$label signed" ;; esac
 		printf '  \033[33mOS UPDATE STAGED\033[0m  %s%s\n' "$label" "$staged_age"
-		printf '      sudo systemctl reboot   — attended: be able to reach the machine\n'
+		printf '      sudo systemctl reboot   - attended: be able to reach the machine\n'
 	fi
 	for f in ${fails+"${fails[@]}"}; do printf '  \033[31mFAIL\033[0m  %s\n' "$f"; done
 	for w in ${warns+"${warns[@]}"}; do printf '  \033[33mWARN\033[0m  %s\n' "$w"; done
-	printf '  %s · /boot %sM free · %s deployment(s)%s\n' \
+	printf '  %s -- /boot %sM free -- %s deployment(s)%s\n' \
 		"${booted_ver:-?}" "${boot_free:-?}" "${depl_count:-?}" \
-		"$([ "${pinned_count:-0}" -gt 0 ] && echo " · ${pinned_count} PINNED")"
+		"$([ "${pinned_count:-0}" -gt 0 ] && echo " -- ${pinned_count} PINNED")"
 	if [ -z "$GREENBOOT" ]; then
-		printf '  %s containers up · driver %s\n' "${running:-?}" "${live_drv:-?}"
+		printf '  %s containers up -- driver %s\n' "${running:-?}" "${live_drv:-?}"
 	fi
 	printf '  \033[2mlast checked %s\033[0m\n\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
 } | priv tee "$motd" >/dev/null 2>&1 || true

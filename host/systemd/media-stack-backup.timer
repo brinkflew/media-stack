@@ -1,0 +1,29 @@
+# ==============================================================================
+# Back up nightly, at 03:00
+# ------------------------------------------------------------------------------
+# Clear of the other two nightly jobs rather than arbitrary. podman-auto-update
+# runs at midnight with up to 15 minutes of jitter and restarts containers as it
+# goes; rpm-ostreed-automatic stages an OS update in the same window. Backing up
+# at 03:00 means the snapshot is taken of a stack that has settled, and that
+# three jobs are not competing for the same spindle.
+#
+# Persistent=true so a machine that was off overnight backs up when it comes
+# back rather than skipping the day. That matters more here than for the other
+# timers: a skipped update is picked up tomorrow, a skipped backup is a hole.
+#
+# RandomizedDelaySec is small deliberately. There is nothing to spread load
+# against - this is one machine - and a predictable window makes "the backup ran
+# at 03:0x" a thing an operator can recognise in the journal.
+# ==============================================================================
+
+[Unit]
+Description=Back up config/ nightly
+
+[Timer]
+OnCalendar=*-*-* 03:00
+Persistent=true
+RandomizedDelaySec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

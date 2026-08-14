@@ -61,6 +61,21 @@ Notify=healthy
 
 [Service]
 EnvironmentFile=/var/media-stack/.env
+
+# Custom scripts are TRACKED IN GIT at apps/sonarr/scripts/ and copied in on
+# every start, the same contract as Tdarr's plugins: config/ is gitignored
+# runtime state, so git is authoritative and editing the copy on the server is
+# pointless, it is overwritten here. The trailing /. copies the directory
+# CONTENTS - systemd runs this without a shell, so a glob would not expand.
+#
+# THE CONTAINER-SIDE PATH IS LOAD-BEARING. Sonarr's "Clean Anime Extra Files"
+# Custom Script connection stores /config/scripts/anime-extra-files.sh in
+# sonarr.db, which is not in this repository - so a `git grep` does not find it
+# and a restore brings the old value back. Where the file lands in the container
+# must not change; where it lives in git is free.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/sonarr/scripts
+ExecStartPre=/usr/bin/cp -a /var/media-stack/apps/sonarr/scripts/. ${DOCKER_VOLUME_CONFIG}/sonarr/scripts/
+
 Restart=always
 RestartSec=5
 # Notify=healthy makes the unit's start block on the healthcheck, and the

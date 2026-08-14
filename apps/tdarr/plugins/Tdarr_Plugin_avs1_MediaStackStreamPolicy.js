@@ -15,7 +15,7 @@
 // correct there, and it returns the raw ffmpeg argument string - which is
 // exactly what we want, since the whole point is one hand-verified command.
 //
-// This file is TRACKED IN GIT at tdarr/plugins/ and copied into the server's
+// This file is TRACKED IN GIT at apps/tdarr/plugins/ and copied into the server's
 // Plugins/Local/ by an ExecStartPre= on tdarr-server.container. Do not edit the
 // copy on the server; it is overwritten on every start.
 // ============================================================================
