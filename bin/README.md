@@ -22,6 +22,18 @@ workstation, and anything that has to outlive the machine it is talking about ca
 | `remote-install.sh` | **workstation** | Writes uCore over `nvme0n1`. Irreversible. See `host/RUNBOOK.md` before running it. |
 | `lint-repo.sh` | **either** | ASCII, executable bits, shellcheck, quadlet dry-run. |
 
+**`lint-repo.sh` needs `shellcheck`, and SKIPS rather than FAILS without it** - so a machine that
+does not have it reports `all checks passed` having never looked at a line of shell. That is
+deliberate, because the script has to stay runnable on the server, where `/usr` is read-only. It
+also means the workstation is the only place the check really happens, and it went unnoticed there
+until 2026-08-14: the leg had never run at all. Install it the same way as `sops` and `age`, as a
+static binary in `~/.local/bin`:
+
+```bash
+curl -sfL https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz \
+  | tar -xJ -C /tmp && install -m 755 /tmp/shellcheck-v0.10.0/shellcheck ~/.local/bin/
+```
+
 **Two credentials never cross the boundary**, and that is the point of the split:
 
 - The **admin** Scaleway key and the workstation's restic passwords stay on the workstation. They

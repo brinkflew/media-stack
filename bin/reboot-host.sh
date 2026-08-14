@@ -122,7 +122,9 @@ say "Pinning the booted deployment"
 # ------------------------------------------------------------------------------
 # NOT index 0. When something is staged, index 0 IS the staged deployment.
 idx=$(sshq "rpm-ostree status --json | jq '[.deployments[]] | map(.booted) | index(true)'")
-[ -n "$idx" ] && [ "$idx" != "null" ] || die "could not determine the booted deployment index"
+if [ -z "$idx" ] || [ "$idx" = "null" ]; then
+	die "could not determine the booted deployment index"
+fi
 sshq "sudo ostree admin pin $idx" || die "could not pin index $idx"
 ok "pinned index $idx ($booted) - this is the rollback"
 

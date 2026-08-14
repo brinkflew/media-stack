@@ -224,7 +224,7 @@ ssh -t "$HOST" 'sudo systemctl kexec' || true   # the connection dies mid-comman
 say "waiting for the live environment"
 echo "  polling $TARGET_IP:22 - if this does not answer within ~5 minutes,"
 echo "  power-cycle the machine and Fedora 37 will boot back from disk."
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   sleep 5
   if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
          -o UserKnownHostsFile=/dev/null "core@$TARGET_IP" true 2>/dev/null; then

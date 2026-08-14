@@ -102,7 +102,10 @@ keys=$(find "$STAGING/config/caddy" -name '*.key' | wc -l)
 echo "    $certs certificates, $keys private keys"
 # A backup missing these restores into a server that cannot serve TLS. Fail
 # loudly rather than record a snapshot that looks fine.
-[ "$certs" -gt 0 ] && [ "$keys" -gt 0 ] || { echo "backup: no Caddy certificates captured" >&2; exit 1; }
+if [ "$certs" -eq 0 ] || [ "$keys" -eq 0 ]; then
+	echo "backup: no Caddy certificates captured" >&2
+	exit 1
+fi
 
 # ------------------------------------------------------------------------------
 # 3. Consistent database snapshots, laid over the file copy

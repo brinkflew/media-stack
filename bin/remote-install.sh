@@ -27,6 +27,8 @@ SSHOPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectT
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[31mremote-install: %s\033[0m\n' "$*" >&2; exit 1; }
+# shellcheck disable=SC2029  # "$@" is the CALLER's command, so expanding it
+# here is the point of the wrapper, not an accident.
 live() { ssh "${SSHOPTS[@]}" "core@$TARGET_IP" "$@"; }
 
 # ------------------------------------------------------------------------------

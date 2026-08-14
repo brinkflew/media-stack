@@ -74,7 +74,10 @@ case "$REPO_KIND" in
 	offsite)
 		env_file="${MEDIA_STACK_OFFSITE_ENV:-$HOME/.config/restic/media-stack-offsite.env}"
 		[ -s "$env_file" ] || die "no off-site config at $env_file"
-		set -a; . "$env_file"; set +a
+		set -a
+		# shellcheck source=/dev/null  # a runtime override, not a fixed path
+		. "$env_file"
+		set +a
 		export RESTIC_PASSWORD_FILE="${MEDIA_STACK_OFFSITE_PW:-$HOME/.config/restic/media-stack-offsite.pw}"
 		;;
 	*) die "--repo takes 'local' or 'offsite', not '$REPO_KIND'" ;;
@@ -124,10 +127,17 @@ say "Integrity"
 # and re-hashes them, which is the only thing that detects bit rot or a
 # truncated upload - but it costs bandwidth against object storage.
 if [ -n "$DEEP" ]; then
-	restic check --read-data-subset=5% && ok "repository consistent, 5% of data re-read" \
-		|| bad "restic check FAILED"
+	if restic check --read-data-subset=5%; then
+		ok "repository consistent, 5% of data re-read"
+	else
+		bad "restic check FAILED"
+	fi
 else
-	restic check && ok "repository structure consistent" || bad "restic check FAILED"
+	if restic check; then
+		ok "repository structure consistent"
+	else
+		bad "restic check FAILED"
+	fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -195,7 +205,7 @@ say "Databases"
 #
 # python3's sqlite3 module rather than the sqlite3 CLI, which is not installed
 # on this workstation.
-python3 - "$CONFIG" <<'PY'
+if ! python3 - "$CONFIG" <<'PY'
 import os, sqlite3, sys
 
 config = sys.argv[1]
@@ -258,7 +268,9 @@ for rel, what in WANTED.items():
 
 sys.exit(1 if bad else 0)
 PY
-[ $? -eq 0 ] || fails=$((fails + 1))
+then
+	fails=$((fails + 1))
+fi
 
 echo
 if [ -n "$KEEP" ]; then

@@ -92,7 +92,10 @@ fi
 perms=$(stat -c %a "$DST_ENV")
 [ "$perms" = "600" ] || die "$DST_ENV is mode $perms, expected 600 - it holds API keys"
 
-set -a; . "$DST_ENV"; set +a
+set -a
+# shellcheck source=/dev/null  # a runtime override, not a fixed path
+. "$DST_ENV"
+set +a
 [ -n "${RESTIC_REPOSITORY:-}" ]     || die "$DST_ENV does not set RESTIC_REPOSITORY"
 [ -n "${AWS_ACCESS_KEY_ID:-}" ]     || die "$DST_ENV does not set AWS_ACCESS_KEY_ID"
 [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] || die "$DST_ENV does not set AWS_SECRET_ACCESS_KEY"
