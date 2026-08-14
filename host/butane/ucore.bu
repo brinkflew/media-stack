@@ -195,6 +195,57 @@ storage:
           Delegate=cpu cpuset io memory pids
 
     # ------------------------------------------------------------------------
+    # Order greenboot's health check after what it asserts
+    # ------------------------------------------------------------------------
+    # AN ORDINARY FILE, NOT A SYMLINK INTO /var/media-stack, AND THAT IS NOT A
+    # STYLE CHOICE. SELinux is Enforcing and PID 1 cannot read or exec var_t, so
+    # a drop-in symlinked into the checkout is silently ignored: `systemctl cat`
+    # still prints it, because the client reads it unconfined, while
+    # `systemctl show -p After` shows none of it and `systemctl is-enabled`
+    # answers "Access denied". Measured, not inferred - the ordering below was
+    # symlinked first, and NONE of it applied.
+    #
+    # The check script next door IS a symlink, and correctly so: greenboot execs
+    # that itself from /usr/libexec, so it runs as unconfined_service_t and may
+    # read the checkout. The rule is that whatever SYSTEMD launches or parses
+    # must be labelled, and anything a running process then reaches is free.
+    #
+    # WHY THE ORDERING AT ALL. greenboot-healthcheck.service is
+    # WantedBy=multi-user.target, so it runs INSIDE that transaction rather than
+    # after it. Without this, verify-host.sh --greenboot asserts the LAN address
+    # before NetworkManager has configured it, firewalld's ports before
+    # firewall-stack-ports.service has added them, lingering before logind, the
+    # media mount before it is mounted, and the CDI spec before
+    # nvidia-cdi-refresh has written it. Every one of those would FAIL for a
+    # reason that has nothing to do with the deployment - and once the check is
+    # in required.d, a FAIL reverts the OS.
+    #
+    # Ordering only, never Wants=, except network-online.target which is the
+    # documented way to ask for it. A Wants= on any of the others would silently
+    # ENABLE a unit that is deliberately not enabled.
+    - path: /etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf
+      mode: 0644
+      contents:
+        inline: |
+          [Unit]
+          Wants=network-online.target
+          After=network-online.target
+          After=firewalld.service
+          After=systemd-logind.service
+          After=var-mnt-media.mount
+          After=rpm-ostreed.service
+          After=nvidia-cdi-refresh.service
+          After=firewall-stack-ports.service
+
+          [Service]
+          # The unit ships no TimeoutStartSec= and Type=oneshot inherits
+          # infinity, which is the wrong shape for something a boot waits on.
+          # This is the budget for every check in required.d and wanted.d
+          # combined - greenboot has no per-script timeout - and the wrapper
+          # bounds its own run at 120s.
+          TimeoutStartSec=5min
+
+    # ------------------------------------------------------------------------
     # OS updates: download and deploy nightly, NEVER reboot unattended
     # ------------------------------------------------------------------------
     # `stage` means rpm-ostreed-automatic fetches the new image, writes the
@@ -279,10 +330,14 @@ storage:
     # The check is in wanted.d, so today it only logs. Moving it to required.d
     # is what gives it the power to revert the OS, and that is a deliberate step
     # taken after the negative control in the README has been run.
+    #
+    # ONLY THE CHECK IS A SYMLINK, and that asymmetry is SELinux, not taste.
+    # greenboot execs this script itself, from a properly labelled binary, so it
+    # runs as unconfined_service_t and may read and exec under /var/media-stack.
+    # The ordering drop-in is read by PID 1 instead, which may not - so it is an
+    # ordinary file below rather than a link. See the comment there.
     - path: /etc/greenboot/check/wanted.d/40-media-stack.sh
       target: /var/media-stack/host/greenboot/40-media-stack.sh
-    - path: /etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf
-      target: /var/media-stack/host/greenboot/10-media-stack.conf
 
 systemd:
   units:

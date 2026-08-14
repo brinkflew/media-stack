@@ -15,19 +15,53 @@ no copy step. Nothing here is picked up automatically; each link is made once.
 
 | Tracked here | Installed at | What it is |
 |---|---|---|
-| `40-media-stack.sh` | `/etc/greenboot/check/wanted.d/40-media-stack.sh` | the check wrapper |
-| `10-media-stack.conf` | `/etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf` | ordering and timeout |
+| `40-media-stack.sh` | `/etc/greenboot/check/wanted.d/40-media-stack.sh` | the check wrapper, **symlinked** |
+| (inline in `ucore.bu`) | `/etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf` | ordering and timeout, **a real file** |
 | `custom.cfg` | `/boot/grub2/custom.cfg` | GRUB boot counting - **phase 2, copied not symlinked** |
 
 ```bash
 sudo rpm-ostree install greenboot      # NOT greenboot-default-health-checks - see below
-sudo mkdir -p /etc/systemd/system/greenboot-healthcheck.service.d
 sudo ln -sf /var/media-stack/host/greenboot/40-media-stack.sh \
             /etc/greenboot/check/wanted.d/40-media-stack.sh
-sudo ln -sf /var/media-stack/host/greenboot/10-media-stack.conf \
-            /etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf
+# the drop-in is an ordinary file - see host/butane/ucore.bu for its contents
 sudo systemctl daemon-reload
+sudo systemctl enable greenboot-healthcheck.service
 ```
+
+**`rpm-ostree install` does not enable anything.** FCOS ships `99-default-disable.preset`,
+so every greenboot unit lands disabled and **nothing runs at boot** - which looks exactly like
+a host that has never had a bad deployment. This was measured, not assumed: the first boot
+after layering ran no check at all. `bin/verify-host.sh` now asserts the unit is enabled.
+
+## SELinux decides what may be a symlink, and it fails silently
+
+**PID 1 cannot read or execute anything under `/var/media-stack`.** SELinux is Enforcing and the
+checkout is `var_t`. So a *system* unit, or a drop-in for one, symlinked into this repository is
+silently ignored - and it is convincingly silent:
+
+| | symlinked into the checkout |
+|---|---|
+| `systemctl cat` | prints the drop-in, because the client reads it unconfined |
+| `systemctl show -p After` | **none of the ordering is there** |
+| `systemctl is-enabled` | `Access denied` |
+| a unit whose `ExecStart=` points there | `status=203/EXEC`, `Permission denied` |
+| audit log | **no AVC** |
+
+The check script next door *is* a symlink, and correctly so. greenboot execs it itself, from
+`/usr/libexec/greenboot/greenboot`, so it runs as `unconfined_service_t` and may read and exec
+the checkout freely. The rule:
+
+> Whatever **systemd** launches or parses must live somewhere properly labelled. Anything a
+> already-running process then reaches is free.
+
+This is why the user-scope quadlets in `stacks/` can be whole-directory symlinks and host-level
+system units cannot. System drop-ins therefore ship as inline `files:` entries in
+`host/butane/ucore.bu`, the same way `/etc/systemd/system/user@.service.d/10-delegate-io.conf`
+always has.
+
+`verify-host.sh` asserts the drop-in **by its effect** - that `systemctl show -p After` actually
+contains the ordering - rather than by the file existing, because the file existed the whole time
+it was doing nothing.
 
 Layering one package is a deliberate exception to "avoid host-level package dependencies".
 It is the only way to get greenboot on uCore, which does not ship it, and the cost is that

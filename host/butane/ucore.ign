@@ -64,6 +64,14 @@
         "mode": 420
       },
       {
+        "path": "/etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf",
+        "contents": {
+          "compression": "gzip",
+          "source": "data:;base64,H4sIAAAAAAAC/3yQMc7bMAyFd52CQNbKaAt0zNAzJEWHHxkUibaIRKRK0jZ8+6JO08FDN0l8n/Q9ffxg8lv4mdjtzOir6CMKP4lx8KQTevg+Oup/ZyMprun5LIOhLpTx77lt5thKfMpEfBwuSWNjjw0LpaHJzO/rtLco5op4ZHihQinmQlFxVLR6CLxNonnKj9hF3f5FwsfltbqFE1wrwszkYJW6AQtcqaHMfvGkfsF8hsQFrlvHszBaFQfiikpu4QTEIzH59gnWSrkCGXhFWFV4AqupI4yiYNLQK/EECe4iDmsiNxAedgWyN3ify4S+M7igbpAr5gcQg+KvmRTLUHahNbH/2YQTZGl3YiwQYVJE3h+oaS/TUaNlpe7gr14Qd/5lmXpHDSe4y8zFYHdaGXRmSA5fvn62IRz/41sjDr8DAAD//1Ps9F4wAgAA"
+        },
+        "mode": 420
+      },
+      {
         "overwrite": true,
         "path": "/etc/rpm-ostreed.conf",
         "contents": {
@@ -135,10 +143,6 @@
       {
         "path": "/etc/greenboot/check/wanted.d/40-media-stack.sh",
         "target": "/var/media-stack/host/greenboot/40-media-stack.sh"
-      },
-      {
-        "path": "/etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf",
-        "target": "/var/media-stack/host/greenboot/10-media-stack.conf"
       }
     ]
   },

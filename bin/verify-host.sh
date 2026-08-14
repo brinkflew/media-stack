@@ -392,6 +392,27 @@ if [ -z "$GREENBOOT" ]; then
 		gb_grub=no
 		[ -f "$gb_cfg" ] && gb_grub=yes
 
+		# THE ORDERING DROP-IN, ASSERTED BY ITS EFFECT RATHER THAN ITS
+		# PRESENCE. It was first shipped as a symlink into /var/media-stack,
+		# where PID 1 cannot read it under SELinux: `systemctl cat` printed it
+		# and none of it applied. Checking that the file exists would have
+		# passed throughout. Ask systemd what it actually loaded instead.
+		if systemctl show greenboot-healthcheck.service -p After --value 2>/dev/null | grep -q 'firewall-stack-ports.service'; then
+			ok "greenboot's ordering drop-in is loaded"
+		else
+			bad "greenboot's ordering drop-in is NOT loaded - the check races the units it asserts"
+		fi
+
+		# Enabled is separate from installed, and FCOS ships
+		# 99-default-disable.preset - so layering greenboot leaves every one of
+		# its units disabled and nothing runs at boot. Silent, and it looks
+		# exactly like a host that has never had a bad deployment.
+		if [ "$(systemctl is-enabled greenboot-healthcheck.service 2>/dev/null)" = enabled ]; then
+			ok "greenboot-healthcheck.service is enabled"
+		else
+			bad "greenboot-healthcheck.service is not enabled - no check runs at boot"
+		fi
+
 		if [ "$gb_dir" = absent ]; then
 			bad "the media-stack check is in neither required.d nor wanted.d - greenboot is not checking this host"
 		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ]; then
