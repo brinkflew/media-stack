@@ -140,9 +140,22 @@ pinned=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 # The schedule makes this unlikely rather than impossible - 03:00 plus a 45
 # minute timeout against a window that opens at 05:00 - which is exactly the
 # kind of margin that quietly disappears when someone widens a timeout.
-if [ "$(systemctl --user is-active media-stack-backup.service 2>/dev/null)" = active ]; then
-	refuse "the backup is still running - rebooting through restic leaves a partial snapshot and an off-site lock"
-fi
+# AND `is-active` IS THE WRONG QUESTION FOR A ONESHOT. media-stack-backup is
+# Type=oneshot with RemainAfterExit=no, so for the entire time restic is running
+# its ActiveState is `activating` - never `active`. Written the obvious way,
+# `[ "$(systemctl --user is-active ...)" = active ]`, this gate could not fire at
+# any point in the unit's life. It read correctly, it deployed cleanly, and it
+# was dead. Found only by starting a real backup and watching it pass.
+#
+# So the safe states are allowlisted rather than the busy ones denylisted: a
+# state this does not recognise is treated as busy, which is the direction that
+# fails safe. RemainAfterExit=no is what makes `inactive` mean finished rather
+# than never-started, and is worth re-checking if that unit is ever changed.
+backup_state=$(systemctl --user show media-stack-backup.service -p ActiveState --value 2>/dev/null)
+case "$backup_state" in
+	inactive|failed|"") ;;
+	*) refuse "the backup is $backup_state - rebooting through restic leaves a partial snapshot and a lock in the off-site repository" ;;
+esac
 
 # ------------------------------------------------------------------------------
 # Is anything mid-flight that a reboot would destroy?
