@@ -362,14 +362,18 @@ storage:
     # miss - /boot/grub2/custom.cfg, without which greenboot arms a boot counter
     # that nothing counts down, and rollback silently cannot happen.
     #
-    # required.d, so a failed check reds the boot. wanted.d would only log.
+    # wanted.d, so a failed check is LOGGED AND NOTHING MORE. Moving it to
+    # required.d is what arms it, and that must not be done while only one
+    # deployment is on disk: greenboot reboots the machine itself on a red boot,
+    # and GRUB then counts down to a menu entry that would not exist. See
+    # host/greenboot/README.md - this was learned by doing it.
     #
     # THESE ARE SYMLINKS AND THE DROP-IN IS NOT, and that asymmetry is SELinux
     # rather than taste. greenboot execs these itself, from a properly labelled
     # binary, so it runs as unconfined_service_t and may read and exec under
     # /var/media-stack. The ordering drop-in is read by PID 1 instead, which may
     # not - so it is an ordinary file above. See the comment there.
-    - path: /etc/greenboot/check/required.d/40-media-stack.sh
+    - path: /etc/greenboot/check/wanted.d/40-media-stack.sh
       target: /var/media-stack/host/greenboot/40-media-stack.sh
     - path: /etc/greenboot/red.d/50-record-red-boot.sh
       target: /var/media-stack/host/greenboot/50-record-red-boot.sh

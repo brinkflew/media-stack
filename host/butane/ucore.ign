@@ -149,7 +149,7 @@
         "target": "/var/media-stack/stacks/infra"
       },
       {
-        "path": "/etc/greenboot/check/required.d/40-media-stack.sh",
+        "path": "/etc/greenboot/check/wanted.d/40-media-stack.sh",
         "target": "/var/media-stack/host/greenboot/40-media-stack.sh"
       },
       {

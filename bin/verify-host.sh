@@ -429,6 +429,15 @@ if [ -z "$GREENBOOT" ]; then
 
 		if [ "$gb_dir" = absent ]; then
 			bad "the media-stack check is in neither required.d nor wanted.d - greenboot is not checking this host"
+		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ] && [ "${depl_count:-0}" -lt 2 ]; then
+			# ARMED WITH NOWHERE TO GO. greenboot reboots the machine itself on a
+			# red boot - that is inside the binary, not in any unit file - and
+			# GRUB decrements the counter each time until it selects entry 1. On
+			# a host with one deployment there is no entry 1, and the machine has
+			# rebooted several times to reach that discovery with no console
+			# attached. A counter was observed on this host with nothing staged,
+			# so "a counter implies a rollback target" is NOT true.
+			bad "greenboot is armed but there is only ${depl_count:-?} deployment - a red boot would reboot repeatedly toward a menu entry that does not exist"
 		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ]; then
 			ok "greenboot is armed - a failed check reverts the deployment"
 		else
