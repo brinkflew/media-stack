@@ -204,7 +204,30 @@ guarantee rests on the bucket policy, which is exactly what the check below exis
 and it is a real check rather than a restatement, because the two layers can disagree.
 
 **Verify the restriction rather than trusting it.** A policy that silently does nothing looks exactly
-like one that works, and this one has no `Deny` to eyeball - it relies on an absence:
+like one that works, and this one has no `Deny` to eyeball - it relies on an absence. It was verified
+by hand once, with the destructive test below, and **is now re-proved every night** by
+`bin/backup-server.sh` so that it cannot quietly stop being true.
+
+**The nightly probe is non-destructive, and the trick is that authorization is evaluated before
+object existence.** A `DeleteObject` refused by policy returns `403 AccessDenied`; an allowed one
+returns `204 No Content`. So the probe writes a 0-byte object outside `locks/`, tries to delete it,
+and expects to be refused. It records `offsite_policy_ok_at` in `~/.cache/media-stack/backup-state`
+**only on a confirmed refusal**, and `bin/verify-host.sh` FAILS when that marker is more than 48h
+old - so one unreachable night reads as stale rather than as broken, and a real regression surfaces
+on the second. Two details are load-bearing:
+
+- **The write is not optional.** `rclone deletefile` stats the object first, so against a key that
+  does not exist it fails at the `HEAD` and never issues the `DELETE` - a probe that passes for ever
+  while testing nothing.
+- **Only an explicit refusal counts.** Anything else - a timeout, DNS, a 500 - is inconclusive and
+  leaves the previous marker alone. A network blip must not read as a broken policy, and a broken
+  policy must not be able to hide behind one.
+
+It uses `rclone`, which uCore already ships at `/usr/bin/rclone`, with credentials passed through
+`RCLONE_S3_*` rather than argv for the same reason the restic passwords go into files.
+
+**The destructive test still exists and still proves more**, because it exercises the real call
+rather than a probe. Keep it for when the policy itself has been edited:
 
 ```bash
 ssh home.local 'cd /var/media-stack && set -a && . .env && set +a &&
@@ -768,8 +791,17 @@ next start. Two consequences that are easy to be surprised by:
 ## Editing this repository
 
 There is still no build, no lint in the compiler sense and no test suite. What exists is
-`bin/lint-repo.sh`, which asserts the three conventions nothing else enforces: every tracked text
-file is ASCII, every script in `bin/` is executable, and the quadlets generate.
+`bin/lint-repo.sh`, which asserts the four conventions nothing else enforces: every tracked text
+file is ASCII, every script in `bin/` is executable, the shell passes shellcheck, and the quadlets
+generate.
+
+**The shellcheck leg SKIPS rather than FAILS when shellcheck is absent, and it had therefore never
+run.** It was installed on neither machine until 2026-08-14, so the linter reported `all checks
+passed` across 2,224 lines of shell it had not looked at - the exact shape of the problem this
+repository keeps rediscovering, where a check that does nothing is indistinguishable from one that
+works. The skip is still correct, because `/usr` is read-only on the server and the script has to
+stay runnable there; the fix is that `bin/README.md` now names shellcheck as a workstation
+prerequisite and says how to install it. The first real run found 18 issues, all of them minor.
 
 **Prose and output here are ASCII, and that is checked rather than hoped for.** 402 non-ASCII
 characters had accumulated by 2026-08-14 - em dashes, box drawing, arrows, a vulgar fraction. They
@@ -1058,8 +1090,6 @@ not "was this ever right".
 its own password, and both age keys and both restic passwords are in the password manager - which
 was the actual gap, since the alternative was an off-site backup nobody could decrypt.
 
-Remaining, in order:
-
 **Step 5 is done, and it replaced the pinning rather than building on it.** The old wording here
 claimed digest pinning was auto-update's *prerequisite*; that was backwards. `AutoUpdate=registry`
 resolves a tag, so a digest makes it a no-op - the two are alternatives, and the pinning was
@@ -1067,7 +1097,7 @@ abandoned because nothing maintained it. See `stacks/README.md`.
 
 Remaining, in order:
 
-4. **Monitoring**, so a failed unit surfaces without someone running `systemctl --user --failed`.
+1. **Monitoring**, so a failed unit surfaces without someone running `systemctl --user --failed`.
    `bin/verify-host.sh` and its MOTD are the first half and cover the specific things automation
    puts at risk - a staged deployment nobody applies, an update run that silently stopped, a CDI
    spec that no longer matches the driver, a backup that has stopped running, a checkout that has
@@ -1082,7 +1112,7 @@ Remaining, in order:
    last success, not just a unit that exits 0.** `ExecMainExitTimestamp` is wiped by a reboot, and a
    pull-based job leaves no trace on the machine being watched at all. Anything added here should
    write its own timestamp somewhere `verify-host.sh` can read.
-6. **greenboot, and only then an unattended reboot window.** Today nothing detects a bad boot:
+2. **greenboot, and only then an unattended reboot window.** Today nothing detects a bad boot:
    greenboot is not installed, so there is no automatic rollback, and with no console and no BMC a
    deployment that boots but breaks sshd needs a physical visit. That is the whole reason the reboot
    is attended. `bin/verify-host.sh --greenboot` already exists as the health check - host-level
