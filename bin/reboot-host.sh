@@ -48,7 +48,11 @@ say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; }
 die()  { printf '\n\033[31mreboot-host: %s\033[0m\n' "$*" >&2; exit 1; }
-sshq() { ssh -o ConnectTimeout=10 "$HOST" "$@"; }
+# -n matters: without it ssh reads and forwards stdin, so every pre-flight call
+# would eat the confirmation before `read` below ever sees it. Nothing here pipes
+# data INTO the server, so closing stdin costs nothing and makes the script
+# usable non-interactively.
+sshq() { ssh -n -o ConnectTimeout=10 "$HOST" "$@"; }
 
 # ------------------------------------------------------------------------------
 say "Pre-flight on $HOST"
@@ -142,7 +146,7 @@ while :; do
 	# Not just a ping. The box answered ICMP and completed TCP handshakes for the
 	# entire time it was wedged in the 470-health-check incident, while no
 	# userspace process could be scheduled - so the test has to be a real session.
-	if ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" true 2>/dev/null; then
+	if ssh -n -o ConnectTimeout=5 -o BatchMode=yes "$HOST" true 2>/dev/null; then
 		printf '\n'
 		ok "back after ${elapsed}s"
 		break
