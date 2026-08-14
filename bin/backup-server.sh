@@ -146,7 +146,19 @@ if [ -z "$DRY" ]; then
 		--keep-daily 7 --keep-weekly 4 --keep-monthly 12 || die "local prune failed"
 fi
 
-local_id=$(restic snapshots --latest 1 --json 2>/dev/null | jq -r '.[0].short_id // empty')
+# FILTER BY HOST AND PATH, do not just take --latest 1. That flag means "the
+# latest per group", and restic groups by host AND paths - so in a repository
+# holding more than one chain it returns several rows and .[0] is whichever came
+# back first, not the newest. The off-site repository holds two chains (this
+# machine stages at /var/backups/staging/config, the workstation at
+# ~/.cache/media-stack/staging/config), and recording the wrong one made the
+# marker name a two-day-old snapshot from the other chain.
+snapshot_id() {  # <extra restic args...>
+	restic "$@" snapshots --host media-stack --path "$STAGING/config" \
+		--latest 1 --json 2>/dev/null | jq -r '.[0].short_id // empty'
+}
+
+local_id=$(snapshot_id)
 
 # ------------------------------------------------------------------------------
 # 5. Off-site copy
@@ -192,8 +204,7 @@ else
 	# write the marker, exit non-zero at the end.
 	if restic -r "$BACKUP_OFFSITE_REPOSITORY" --password-file "$PWDIR/offsite" \
 		copy --from-repo "$RESTIC_REPOSITORY" --from-password-file "$PWDIR/local"; then
-		offsite_id=$(restic -r "$BACKUP_OFFSITE_REPOSITORY" --password-file "$PWDIR/offsite" \
-			snapshots --latest 1 --json 2>/dev/null | jq -r '.[0].short_id // empty')
+		offsite_id=$(snapshot_id -r "$BACKUP_OFFSITE_REPOSITORY" --password-file "$PWDIR/offsite")
 	else
 		offsite_failed=1
 		printf '\033[31m  off-site copy FAILED - the local snapshot is still good\033[0m\n'
