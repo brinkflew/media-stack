@@ -21,6 +21,7 @@ workstation, and anything that has to outlive the machine it is talking about ca
 | `reboot-host.sh` | **workstation** | The attended reboot. On the workstation because the waiting cannot happen on the machine that is rebooting. |
 | `remote-kexec.sh` | **workstation** | Boots the server into a live Fedora CoreOS in RAM. Touches no disk. |
 | `remote-install.sh` | **workstation** | Writes uCore over `nvme0n1`. Irreversible. See `host/RUNBOOK.md` before running it. |
+| `migrate-rename.sh` | **workstation** | **One-shot.** Renames the project on the server, `media-stack` -> `home-server`: the checkout, the state directories, both symlink roots, the `/etc` drop-ins and the Caddy image tag. On the workstation because it renames the directory it would otherwise run from. Idempotent by derived state, so re-running after a partial failure is the correct response. `--dry-run` asserts everything and changes nothing. Delete it once the migration is done. |
 | `lint-repo.sh` | **either** | ASCII, executable bits, shellcheck, quadlet dry-run. |
 
 **`lint-repo.sh` needs `shellcheck`, and SKIPS rather than FAILS without it** - so a machine that
