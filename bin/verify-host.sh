@@ -1080,14 +1080,24 @@ if [ -z "$GREENBOOT" ]; then
 	# Cardinality is what decides whether this store stays smaller than config/.
 	# The first symptom of an unbounded label is the unit being killed at
 	# MemoryMax, not a slow dashboard, so it is worth seeing it climb.
+	#
+	# 4000 IS DERIVED FROM A MEASUREMENT, not picked. Steady state on
+	# 2026-08-15, with every source running, is ~2650: node-exporter's own ~800,
+	# the collector's ~1050 through the textfile, and Prometheus' self-scrape
+	# ~800. That leaves about 50% headroom for the things that legitimately grow
+	# - another container, another indexer, another filesystem.
+	#
+	# EXPECT A TRANSIENT BREACH AFTER ANY RENAME. A series that stops receiving
+	# samples stays in the head block until it is compacted out, roughly two
+	# hours, so during that window both the old and the new name are counted.
 	series=$(promq prometheus_tsdb_head_series)
 	series=${series%%.*}
 	if [ -z "$series" ]; then
 		warn metrics.series_count "the active series count could not be read"
-	elif [ "$series" -le 3000 ]; then
+	elif [ "$series" -le 4000 ]; then
 		ok metrics.series_count "$series active series"
 	else
-		warn metrics.series_count "$series active series, over the 3000 budget - look for a label carrying a path, a title or an id"
+		warn metrics.series_count "$series active series, over the 4000 budget - look for a label carrying a path, a title, an id or an address"
 	fi
 	fact metrics_series "${series:-}" num
 

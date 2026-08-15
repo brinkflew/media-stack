@@ -277,7 +277,7 @@ while restic reports the repository shrinking - a silent, billable divergence. O
 for the same reason: it makes prune fail outright. The append-only key is what closes the gap those
 would have addressed, without breaking prune.
 
-**Four things the backup does that a plain `rsync` does not**, each of which otherwise produces a
+**Five things the backup does that a plain `rsync` does not**, each of which otherwise produces a
 backup that looks complete and is not:
 
 - **Caddy's certificates are asserted present, never assumed.** Under Docker its `/data` was
@@ -295,6 +295,32 @@ backup that looks complete and is not:
   qBittorrent's Qt lockfile records a pid, hostname and machine id; restored where the hostname
   differs, Qt assumes the lock is held and qBittorrent exits one second after starting, logging
   only `termination initiated`.
+- **The metrics store is snapshotted through Prometheus' admin API**, not copied, and excluded from
+  the rsync that would otherwise copy it. `/api/v1/admin/tsdb/snapshot` makes the snapshot out of
+  **hardlinks**, so it is instant, costs no disk and is consistent at the instant it is taken - the
+  same argument as SQLite's backup API one bullet up. The step deletes its own snapshot and clears
+  stale ones, because Prometheus never reaps `snapshots/` and `--storage.tsdb.retention.size`
+  manages blocks only; a leaked one grows real disk inside the directory `metrics.tsdb_size`
+  measures and gets reported as "retention is not being enforced".
+
+**THE EXCLUDE LIST DID NOT COVER THE TSDB, AND COULD NOT SAY SO.** This is the sharpest instance yet
+of a pattern this repository keeps rediscovering, and it was shipped and caught the same evening:
+
+- Prometheus names its lock file **`lock`**. `lockfile` does not match it, and neither does
+  `*.lock`. Its write-ahead log is a **directory** called `wal/`, which `*-wal` does not match.
+  Verified on the live host: **zero hits for every pattern in the list.** The live store, open WAL
+  and lock included, was being copied whole.
+- **And it does not merely produce a torn copy, it aborts the run.** Prometheus deletes WAL segments
+  at every checkpoint and source blocks after every compaction; `rsync` exits **24** when a file it
+  has already enumerated vanishes, and that line ends in `|| die`. One routine compaction inside the
+  backup window kills the job **before** the certificate assertion, the database snapshots, both
+  restic legs and the marker write - surfacing as `backup.local_age` going stale, three scripts away
+  from the cause. `bin/backup-config.sh` carried the same list under `set -e` with no handler at all.
+- **A pattern list that silently matches nothing looks exactly like one that works** - the same
+  shape as the shellcheck leg that reported `all checks passed` over 2,224 lines it had never
+  looked at. When adding an exclude, check it matches something.
+- `--filter='protect /prometheus/'` is what stops `--delete-excluded` deleting last night's staged
+  copy and forcing a full re-copy nightly. Tested both ways rather than assumed.
 
 ## A backup is not proven until it has been restored
 
@@ -501,6 +527,38 @@ otherwise silent: a container simply missing from every panel.
 **`/` is deliberately not in the filesystem allowlist.** It is the read-only composefs: 8 MB, zero
 bytes free, 100% full by design and for ever. A panel showing the root filesystem full would read as
 an emergency and mean nothing, and `statvfs` returns -1 for its inode counts.
+
+**Application metrics go through `podman exec`, and the credential goes over stdin.** `curl -K -`
+reads its whole configuration from stdin, so an API key never reaches the process list - which
+`podman exec ... -H "X-Api-Key: ..."` cannot avoid, and which matters at 288 polls a day where it
+did not at two. Prowlarr's and Bazarr's keys were read out of `config/prowlarr/config.xml` and
+Bazarr's `config.yaml` rather than fetched from their UIs. **Bazarr's header is `X-API-KEY`, not the
+\*arr apps' `X-Api-Key`** - it is not a Servarr application and does not share their API.
+
+**`home_server_indexer_up` is the metric that justified the Prowlarr key**, and it was non-zero on
+the first run: 7 of 17 indexers disabled by repeated failures, including all three Pirate Bay
+entries and both 1337x ones. That is the shape of the ISP-resolver problem already in Known state -
+every container healthy, nothing found, and no other signal anywhere.
+
+**The Tdarr file table is a GAUGE and the job table is a COUNTER**, and the type carries the
+distinction rather than a comment. `filejsondb` drains to zero by design, so a short table means the
+queue is empty; `jobsjsondb` is the durable history and is deliberately **not** pulled, because
+`getAll` over thousands of rows every five minutes costs more than it tells anyone.
+
+**The VPN's forwarded port has no readable source here.** gluetun writes no port file unless
+`VPN_PORT_FORWARDING_STATUS_FILE` is set, and since v3.40 its control server answers 401 on
+everything except `/v1/publicip/ip`. Nothing is lost: gluetun pushes the port into qBittorrent on
+every reconnect, so `home_server_torrent_listen_port` carries what that push produced, and
+`home_server_torrent_connection_state` reports `firewalled` when the two have drifted - which is the
+consequence the port number was only ever a proxy for.
+
+**The slow tier writes its own textfile, and that is not tidiness.** The file is rewritten whole on
+every run, so 5-minute series living in the 30-second file would blink out for nine ticks in ten and
+render as a sawtooth that looks exactly like a flapping disk. node-exporter globs `*.prom`, so a
+second file is simply served unchanged in between.
+
+**Backing up a live TSDB is the trap this arrangement exists around**, and it is documented under
+Backups rather than here because it breaks the backup rather than the metrics.
 
 ## Commands
 
