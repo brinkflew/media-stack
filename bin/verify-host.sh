@@ -732,7 +732,12 @@ if [ -z "$GREENBOOT" ]; then
 	# the one part of the system with no automation and no feedback. The remote
 	# has drifted from git before, and an edit made over ssh is invisible until
 	# the next pull refuses with "local changes would be overwritten".
-	repo=/var/home-server
+	# DERIVED, not a literal. Every other script here computes its root from
+	# BASH_SOURCE; this one hardcoded the path, so it checked "is the checkout
+	# at /var/<name> clean" rather than "is the checkout I am part of clean".
+	# Those are the same sentence right up until the tree moves, which is
+	# exactly when you want the answer to be about the tree that moved.
+	repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 	dirty=$(git -C "$repo" status --porcelain 2>/dev/null)
 	fact checkout_clean "$([ -z "$dirty" ] && echo true || echo false)" bool
 	if [ -z "$dirty" ]; then
