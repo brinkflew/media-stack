@@ -1057,6 +1057,43 @@ def source_jellyfin(m):
     m.add("home_server_jellyfin_sessions_total", len(sessions), None,
           "Connected sessions, playing or not.")
 
+    # THE FOUR SWITCHES THAT COST 87 HOURS OF CPU DECODE. Trickplay has its OWN
+    # hardware-acceleration settings, independent of playback's, and all three
+    # of them shipped off - so every frame of every file was decoded on the CPU
+    # while playback acceleration looked perfectly healthy. They are on now;
+    # this is what notices if any of them goes off again, which a UI toggle or a
+    # config restore can do silently.
+    encoding = api_get("jellyfin",
+                       "http://localhost:8096/System/Configuration/encoding",
+                       ["X-Emby-Token: " + key])
+    system = api_get("jellyfin", "http://localhost:8096/System/Configuration",
+                     ["X-Emby-Token: " + key])
+    trickplay = (system or {}).get("TrickplayOptions") or {}
+    for feature, value in (
+            ("playback_encode", (encoding or {}).get("EnableHardwareEncoding")),
+            ("trickplay_decode", trickplay.get("EnableHwAcceleration")),
+            ("trickplay_encode", trickplay.get("EnableHwEncoding")),
+            ("trickplay_keyframe_only",
+             trickplay.get("EnableKeyFrameOnlyExtraction"))):
+        if value is not None:
+            m.add("home_server_jellyfin_hwaccel_enabled", 1 if value else 0,
+                  {"feature": feature},
+                  "Hardware acceleration switches. trickplay_* are independent "
+                  "of playback's and all three once shipped off, which is what "
+                  "made Jellyfin the largest CPU consumer on the host while "
+                  "serving nobody. keyframe_only is the big lever.")
+    if isinstance(encoding, dict):
+        m.add("home_server_jellyfin_hwaccel_info", 1,
+              {"type": str(encoding.get("HardwareAccelerationType", ""))},
+              "Which hardware acceleration backend is selected.")
+        codecs = encoding.get("HardwareDecodingCodecs")
+        if isinstance(codecs, list):
+            # A COUNT, not a label per codec. Reading this through a
+            # line-matching grep is what made it look empty once: the opening
+            # and closing tags sit on adjacent lines and hide the children.
+            m.add("home_server_jellyfin_hwdecode_codecs", len(codecs), None,
+                  "Codecs enabled for hardware decoding.")
+
 
 def source_torrent(m):
     """qBittorrent needs NO credential from here, and that is not an oversight.
