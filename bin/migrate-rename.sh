@@ -154,10 +154,16 @@ ok "sudo -n works"
 
 # Renaming a restic repository mid-run leaves a lock in the OFF-SITE repo that
 # the append-only key cannot remove.
-state=$(sshq "systemctl --user show $OLD-backup.service $NEW-backup.service -p ActiveState --value 2>/dev/null" | tr '\n' ' ')
-case "$state" in
-	*active*|*activating*) die "a backup is running ($state) - wait for it, or a lock is left off-site that cannot be cleared" ;;
-esac
+# Match WHOLE WORDS. `case "$state" in *active*)` also matches "inactive",
+# which is the substring trap that makes a refusal fire on a perfectly idle
+# host - and a gate that always refuses is as useless as one that never does.
+state=$(sshq "systemctl --user show $OLD-backup.service $NEW-backup.service -p ActiveState --value 2>/dev/null")
+for s in $state; do
+	case "$s" in
+		active|activating|reloading|deactivating)
+			die "a backup is $s - wait for it, or a lock is left off-site that the append-only key cannot clear" ;;
+	esac
+done
 ok "no backup in flight"
 
 # Both directories at once means the check would run twice.
@@ -227,10 +233,6 @@ for f in "$REPO"/stacks/*/*; do
 done
 note "will stop:$units"
 
-if [ -n "$DRY" ]; then
-	printf '\n\033[1mdry run - nothing was changed\033[0m\n'
-fi
-
 # ------------------------------------------------------------------------------
 if [ -z "$DRY" ]; then
 say "Confirm"
@@ -273,7 +275,9 @@ step "greenboot symlinks removed (they would dangle across the rename)" \
 
 # Fetch now so the merge later is purely local and cannot fail on DNS. A fetch
 # writes only inside .git and touches no working-tree file.
-if sshq "test -d $OLD_ROOT/.git"; then
+if [ -n "$DRY" ]; then
+	printf '  \033[33mWOULD\033[0m  %s\n' "fetch origin"
+elif sshq "test -d $OLD_ROOT/.git"; then
 	sshq "git -C $OLD_ROOT fetch origin" || die "could not fetch origin - fix the network before going further"
 	ok "origin fetched (the merge below is local only)"
 fi
