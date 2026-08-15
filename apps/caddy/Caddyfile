@@ -2,7 +2,7 @@
 # Caddy: reverse proxy and TLS terminator
 # ------------------------------------------------------------------------------
 # One site block per hostname, proxying to a container by name. Caddy joins each
-# of the five segments it needs individually, so a name only resolves where the
+# of the six segments it needs individually, so a name only resolves where the
 # two of them share a network.
 #
 # Adding a service is two steps: a CNAME to the dynamic-DNS name, and a block
@@ -162,6 +162,35 @@ torrent.{$DOMAIN} {
 fakerr.{$DOMAIN} {
 	import protected
 	reverse_proxy torrent:{$PORT_JOAL_WEB}
+}
+
+# ------------------------------------------------------------------------------
+# Observability
+# ------------------------------------------------------------------------------
+# Prometheus has no authentication of its own and no concept of a user, so its
+# query API and its built-in expression browser would be readable by anyone who
+# reached them. It listens only on net-metrics, which makes this block the sole
+# path to it from anywhere.
+# ------------------------------------------------------------------------------
+
+metrics.{$DOMAIN} {
+	import protected
+
+	# THE SIGN-ON IS NOT ENOUGH ON ITS OWN HERE. Prometheus runs with
+	# --web.enable-admin-api because the nightly backup needs
+	# /api/v1/admin/tsdb/snapshot to copy a consistent TSDB - and the same API
+	# carries delete_series, which would let anyone who completed a passkey
+	# prompt destroy the history behind every panel. So the admin path is
+	# closed at the only public entrance, and the snapshot call is made from
+	# the host over the container network instead.
+	#
+	# Two layers doing different jobs, which is the same shape as the off-site
+	# bucket policy and IAM policy: neither is sufficient, and the one that
+	# looks complete on its own is the one that is not.
+	@admin path /api/v1/admin/*
+	respond @admin "not through here" 403
+
+	reverse_proxy prometheus:9090
 }
 
 # ------------------------------------------------------------------------------

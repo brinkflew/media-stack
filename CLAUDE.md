@@ -543,10 +543,20 @@ other by container name (`http://sonarr:8989`), but only where they share a netw
 | `net-media` | caddy, jellyfin, jellyseerr |
 | `net-transcode` | caddy, tdarr-server, tdarr-node-01 |
 | `net-egress` | duckdns |
+| `net-metrics` | caddy, prometheus, node-exporter |
 
 Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individually** - a shared
 "proxy" network holding everything with a UI would re-flatten the topology and buy nothing. It is
 deliberately absent from `net-solver`.
+
+**`net-metrics` is the one segment that could re-create that mistake, and the design inverts it to
+avoid doing so.** The obvious metrics topology puts an exporter for each application on both
+`net-metrics` and that application's own segment - which leaves `net-metrics` adjoining `net-arr`,
+`net-download`, `net-media` and `net-transcode` at once, i.e. exactly the shared proxy network the
+paragraph above rejects, wearing a different name. **Prometheus multi-homes instead; exporters never
+do.** It joins those segments as a pure *client*, with its listener pinned to its `net-metrics`
+address, so nothing on `net-arr` can open a connection to it - one container to harden rather than
+eight, and no exporter holds a credential outside the segment that already holds it.
 
 **Isolation is not free under Podman, and this is the single most important difference from the
 Compose stack.** Docker put every bridge in `DOCKER-ISOLATION-STAGE-2` and dropped traffic between

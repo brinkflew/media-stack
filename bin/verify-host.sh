@@ -651,10 +651,10 @@ if [ -z "$GREENBOOT" ]; then
 	# Every container that can be auto-updated should be. A unit that lost its
 	# policy would simply never appear here again, silently.
 	au_count=$(podman auto-update --dry-run 2>/dev/null | grep -cE 'registry|local' || true)
-	if [ "${au_count:-0}" -ge 17 ]; then
+	if [ "${au_count:-0}" -ge 19 ]; then
 		ok update.policy_count "$au_count containers carry an auto-update policy"
 	else
-		bad update.policy_count "only ${au_count:-0} containers carry an auto-update policy, expected 17"
+		bad update.policy_count "only ${au_count:-0} containers carry an auto-update policy, expected 19"
 	fi
 
 	# ------------------------------------------------------------------------------
@@ -941,6 +941,116 @@ if [ -z "$GREENBOOT" ]; then
 		fact config_log_mb "" num
 		note logs.config_log_size "no config tree at $cfgroot - not measured"
 	fi
+
+	# --------------------------------------------------------------------------
+	# Metrics. Is anything recording, and is it recording the truth?
+	# --------------------------------------------------------------------------
+	# EVERY CHECK HERE IS WARN OR PASS, NEVER FAIL, for exactly the reason the
+	# Logs section above gives: bin/reboot-host.sh and bin/reboot-when-staged.sh
+	# both refuse to act on a host this battery calls unhealthy, so a FAIL here
+	# would let a stopped collector block an OS security update. None of these
+	# findings is fixed by a reboot or by a rollback.
+	#
+	# The host cannot route to a rootless podman bridge, so every query goes in
+	# through `podman exec` - the same escape hatch containers.gpu_* uses, and
+	# the reason net-metrics needs no published port.
+	say metrics "Metrics"
+
+	# Endpoints that need no URL encoding are chosen deliberately. The
+	# label-values API answers "which collectors are running" and the targets
+	# API answers "how many are down" without a PromQL matcher, so this section
+	# carries no percent-encoded query strings for a later edit to break
+	# silently. promq is only for bare metric names.
+	promq() {  # <metric name, no braces or matchers> -> first sample value
+		podman exec prometheus wget -q -O - \
+			"http://127.0.0.1:9090/api/v1/query?query=$1" 2>/dev/null \
+			| jq -r '.data.result[0].value[1] // empty' 2>/dev/null
+	}
+
+	prom_up=
+	if podman exec prometheus wget -q -O /dev/null \
+		http://127.0.0.1:9090/-/healthy 2>/dev/null; then
+		prom_up=1
+		ok metrics.prometheus_up "prometheus is answering"
+	else
+		warn metrics.prometheus_up "prometheus is not answering /-/healthy - nothing is being recorded"
+	fi
+
+	# THE CHECK THIS SECTION EXISTS FOR. A dead exporter does not blank a graph,
+	# it freezes it at the last value it managed to scrape - which renders as a
+	# flat, healthy-looking line. Nothing else here would notice.
+	tgt_json=
+	[ -z "$prom_up" ] || tgt_json=$(podman exec prometheus wget -q -O - \
+		'http://127.0.0.1:9090/api/v1/targets?state=active' 2>/dev/null)
+	tgt_total=$(printf '%s' "$tgt_json" | jq -r '.data.activeTargets|length' 2>/dev/null)
+	tgt_down=$(printf '%s' "$tgt_json" \
+		| jq -r '[.data.activeTargets[]|select(.health!="up")]|length' 2>/dev/null)
+	tgt_names=$(printf '%s' "$tgt_json" \
+		| jq -r '[.data.activeTargets[]|select(.health!="up")|.scrapePool]|unique|join(" ")' 2>/dev/null)
+	if [ -z "${tgt_total:-}" ]; then
+		warn metrics.targets_down "the scrape target list could not be read"
+	elif [ "${tgt_down:-0}" -eq 0 ]; then
+		ok metrics.targets_down "all $tgt_total scrape targets up"
+	else
+		warn metrics.targets_down "$tgt_down of $tgt_total scrape targets down ($tgt_names) - those graphs are frozen, not blank"
+	fi
+	fact metrics_targets_total "${tgt_total:-}" num
+	fact metrics_targets_down "${tgt_down:-}" num
+
+	# node-exporter's namespace-scoped collectors must stay off. /proc/net is a
+	# symlink to self/net, so it resolves in the READER's network namespace and
+	# not in the mounted procfs - a bridge-networked node-exporter therefore
+	# reports its own container's interfaces while looking exactly like it is
+	# reporting the host's. Wrong numbers under the right names, which is the
+	# one failure a dashboard cannot show you.
+	#
+	# Asserted by which collectors are RUNNING, not by which series exist:
+	# bin/collect-metrics.py supplies the real node_network_* through the
+	# textfile collector, so by name the two are indistinguishable.
+	cols=
+	[ -z "$prom_up" ] || cols=$(podman exec prometheus wget -q -O - \
+		'http://127.0.0.1:9090/api/v1/label/collector/values' 2>/dev/null \
+		| jq -r '.data[]?' 2>/dev/null)
+	netns_on=$(printf '%s\n' "$cols" \
+		| grep -xE 'netdev|netstat|netclass|sockstat|softnet|arp|conntrack|udp_queues' \
+		| paste -sd' ' -)
+	if [ -z "$cols" ]; then
+		warn metrics.node_netns_scope "node-exporter's collector list could not be read"
+	elif [ -z "$netns_on" ]; then
+		ok metrics.node_netns_scope "node-exporter's namespace-scoped collectors are off"
+	else
+		warn metrics.node_netns_scope "node-exporter is running namespace-scoped collectors ($netns_on) - those series describe its own container, not the host"
+	fi
+
+	# Cardinality is what decides whether this store stays smaller than config/.
+	# The first symptom of an unbounded label is the unit being killed at
+	# MemoryMax, not a slow dashboard, so it is worth seeing it climb.
+	series=$(promq prometheus_tsdb_head_series)
+	series=${series%%.*}
+	if [ -z "$series" ]; then
+		warn metrics.series_count "the active series count could not be read"
+	elif [ "$series" -le 3000 ]; then
+		ok metrics.series_count "$series active series"
+	else
+		warn metrics.series_count "$series active series, over the 3000 budget - look for a label carrying a path, a title or an id"
+	fi
+	fact metrics_series "${series:-}" num
+
+	# Retention is two limits, whichever is reached first, and this is the
+	# tripwire for neither being enforced. It shares nvme0n1p4 with config/ and
+	# /var/backups, so it is the NVMe this protects rather than the graphs.
+	tsdbroot="${DOCKER_VOLUME_CONFIG:-/var/home-server/config}/prometheus"
+	tsdb_mb=
+	[ ! -d "$tsdbroot" ] || tsdb_mb=$(du -sm "$tsdbroot" 2>/dev/null | cut -f1)
+	tsdb_ceiling_mb=18432
+	if [ -z "$tsdb_mb" ]; then
+		note metrics.tsdb_size "no metrics store at $tsdbroot - not measured"
+	elif [ "$tsdb_mb" -le "$tsdb_ceiling_mb" ]; then
+		ok metrics.tsdb_size "the metrics store is ${tsdb_mb}M"
+	else
+		warn metrics.tsdb_size "the metrics store is ${tsdb_mb}M, over ${tsdb_ceiling_mb}M - retention is not being enforced"
+	fi
+	fact metrics_tsdb_mb "${tsdb_mb:-}" num
 
 	# --------------------------------------------------------------------------
 	# This script's own liveness - and the one question it must NOT ask.

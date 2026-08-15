@@ -19,10 +19,17 @@ QUADLET_UNIT_DIRS="$PWD/stacks/common:$PWD/stacks/torrent:$PWD/stacks/media:$PWD
 
 | Directory | Contents |
 |---|---|
-| `common/` | the seven `.network` units, one per trust boundary |
+| `common/` | the eight `.network` units, one per trust boundary |
 | `torrent/` | `torrent.pod` and its three members: gluetun, qBittorrent, JOAL |
 | `media/` | the media applications |
-| `infra/` | ingress, identity and dynamic DNS |
+| `infra/` | ingress, identity, dynamic DNS and the metrics stack |
+
+**The metrics units are in `infra/` rather than a new `observability/` directory**, and that is a
+decision rather than laziness. A new directory here needs a matching symlink in
+`~/.config/containers/systemd/` that Ignition does not create on an already-provisioned host, and
+needs adding to the hardcoded `QUADLET_UNIT_DIRS` above and in `bin/lint-repo.sh`. Miss any of them
+and the units simply do not exist - which looks exactly like a healthy host. Quadlet flattens the
+directories anyway, so the split buys nothing that would pay for that.
 
 ## Things that were not a mechanical translation of the Compose file
 
@@ -84,6 +91,8 @@ and all three were wrong at first guess:
 | `tinyauth` | `:v5` | `:v3` does not exist; v5.1.3 is what runs. |
 | `gluetun` | `:v3` | It is the kill-switch. A v4 overnight is not worth it. |
 | `prowlarr` | `:develop` | Where it was before pinning. Moving it to the release branch would be a downgrade. |
+| `prometheus` | `:v3` | Checked before choosing the store, and it decided the choice. VictoriaMetrics is lighter and was the obvious candidate, but it publishes **no `:v1` and no `:stable`** - only `:latest` and full triples - so `AutoUpdate=registry` would have tracked `:latest` on the one component holding every byte of history. |
+| `node-exporter` | `:v1` | The busybox variant, so `wget` exists for `HealthCmd=`. Verified by running it, not assumed - the distroless variants of several exporters have no shell at all, which costs them `Notify=healthy`. |
 
 **`Notify=healthy` is what makes the rollback real, and without it the rollback is decorative.**
 `podman auto-update` restores the previous image only if the unit fails to **start**, and by default

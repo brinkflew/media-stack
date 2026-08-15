@@ -40,6 +40,7 @@ Network=net-arr.network
 Network=net-download.network
 Network=net-media.network
 Network=net-transcode.network
+Network=net-metrics.network
 
 # Mounted as a directory, not a single file, so that a `git pull` replacing the
 # Caddyfile does not leave the container holding a stale inode. Shared and

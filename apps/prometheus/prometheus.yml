@@ -1,0 +1,49 @@
+# ==============================================================================
+# Prometheus scrape configuration
+# ------------------------------------------------------------------------------
+# Tracked in git and bind-mounted read-only at /etc/prometheus, as a DIRECTORY
+# rather than a single file, so that a `git pull` replacing this does not leave
+# the container holding a stale inode. The same contract apps/caddy has.
+#
+# Editing the copy on the server is pointless; it is a read-only mount of the
+# checkout. Change it here, commit, `git pull`, then reload without a restart:
+#
+#   systemctl --user reload prometheus
+#
+# PORTS ARE WRITTEN OUT, NOT PARAMETERISED. Prometheus does no environment
+# substitution in this file - ${VAR} is not expanded, and there is no include
+# mechanism - so a variable here would silently be a literal string. See
+# stacks/infra/prometheus.container for the same note from the other side.
+#
+# Targets are addressed by container name over net-metrics. Nothing is scraped
+# through Caddy: that would make every metric depend on the health of the one
+# component you most want metrics about, and would put 2,800 scrapes a day into
+# the access log that exists to show scanners walking the *arr APIs.
+# ==============================================================================
+
+global:
+  # 30s is chosen against the rate of change of the fastest thing measured here,
+  # which is encoder utilisation during a transcode. It is NOT free: halving it
+  # doubles the samples, and the cardinality budget is the thing that keeps this
+  # store smaller than config/. See CLAUDE.md, "Logs and status".
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # Prometheus watching itself is not a liveness check - if it is down, nothing
+  # here runs and nothing is recorded. It is scraped for prometheus_tsdb_*,
+  # which is where the cardinality and on-disk size that bin/verify-host.sh
+  # grades actually come from. Liveness is asserted from outside, by
+  # verify-host.sh and by the MOTD.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['127.0.0.1:9090']
+
+  # Host vitals, plus everything bin/collect-metrics.py writes into the textfile
+  # directory - so home_server_* series arrive under this job too. That is
+  # deliberate: the textfile collector is the delivery path, and it brings
+  # node_textfile_mtime_seconds with it, which is how a stopped collector
+  # becomes visible without the collector having to claim it is running.
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']

@@ -1,0 +1,140 @@
+# ==============================================================================
+# node-exporter: host vitals
+# ------------------------------------------------------------------------------
+# CPU, memory, load, PSI, diskstats, filesystem, hwmon, thermal, vmstat, uname.
+# Off the shelf, so the metric names are the ones every consumer already knows
+# and the parsers are somebody else's problem.
+#
+# SELINUX: this needs no SecurityLabelDisable=, no :z/:Z, and no new boolean,
+# and that was checked against the loaded policy rather than assumed. The host's
+# /proc and /sys carry proc_t and sysfs_t - the same types a container's own
+# /proc and /sys carry - and container_t may read both, so bind-mounting them is
+# a non-event to type enforcement. statfs() on the mountpoints is
+# `filesystem getattr`, allowed for fs_t and for container_file_t (which is what
+# /var/mnt/media is mounted as).
+#
+# What the read-only root bind mount canNOT reach, by two independent
+# mechanisms: container_t -> var_t FILE READ is DENY, as is user_home_t and
+# data_home_t, so .env, secrets/, the age keys and every application database
+# are refused by SELinux - and refused again by DAC, since they are 0600 core
+# and this process runs as nobody. Do NOT "fix" a future permission problem here
+# with :z, which would relabel the source: on / it fails against the read-only
+# ostree /usr and destroys the labels it does reach, and on /var it would make
+# the checkout readable by every container on the host.
+#
+# THE NAMESPACE-SCOPED COLLECTORS ARE OFF, AND THAT IS THE SUBTLE PART.
+# /proc/net is a symlink to self/net, so it resolves in the READER's network
+# namespace - not in the mounted procfs. A bridge-networked node-exporter
+# therefore reports its own container's interfaces while looking exactly like it
+# is reporting the host's. Network=host would fix it, but rootless --network=host
+# reaches the host through pasta at 169.254.1.2, which bypasses firewalld - so
+# every container on the box, flaresolverr included, could then read host
+# telemetry. Cheaper to switch the lying collectors off and let
+# bin/collect-metrics.py supply node_network_* from the host itself.
+# metrics.node_netns_scope in bin/verify-host.sh fails if they ever come back.
+#
+# IT IS ALSO THE DELIVERY PATH FOR EVERYTHING BESPOKE. Prometheus pulls and has
+# no push endpoint, so bin/collect-metrics.py writes Prometheus exposition
+# format into the textfile directory below and this exporter serves it as part
+# of its own scrape. That is the standard mechanism for exactly this, and it
+# pays for itself twice: node_textfile_mtime_seconds dates each file, which
+# makes a stopped collector visible from OUTSIDE the collector, and
+# node_textfile_scrape_error flags a malformed one. Neither is something the
+# collector could honestly assert about itself.
+#
+# Image:  https://quay.io/repository/prometheus/node-exporter
+# See:    https://github.com/prometheus/node_exporter
+# ==============================================================================
+
+[Unit]
+Description=Prometheus node exporter
+
+[Container]
+Image=quay.io/prometheus/node-exporter:v1
+AutoUpdate=registry
+ContainerName=node-exporter
+Network=net-metrics.network
+
+# No :z and no :Z on any of these - see the banner. /proc and /sys are the
+# pseudo-filesystems the collectors read; the root bind is what lets the
+# filesystem collector statfs the real mountpoints rather than the container's.
+Volume=/proc:/host/proc:ro
+Volume=/sys:/host/sys:ro
+Volume=/:/host/root:ro,rslave
+# The one mount here that DOES take a label, and must: bin/collect-metrics.py
+# writes .prom files into it from the host, and a directory under config/ or
+# cache/ is var_t, which container_t may not read. It is a small dedicated
+# directory, so relabelling it is safe - unlike :z on / or /var, which the
+# banner explains would be destructive. Files the host creates inside it inherit
+# container_file_t from the directory, so the host stays able to write and the
+# container stays able to read.
+Volume=${DOCKER_VOLUME_CACHE}/textfile:/textfile:z,ro
+
+Environment=TZ=${TIMEZONE}
+
+# --no-collector.selinux    container_t -> selinuxfs_t read is DENY, verified
+# --no-collector.rapl       /sys/class/powercap/*/energy_uj is 0400 root
+# the eight network ones    wrong by construction here - see the banner
+# the rest                  subsystems this host does not have, kept out so they
+#                           cost no series and no confusion
+Exec=--path.procfs=/host/proc \
+     --path.sysfs=/host/sys \
+     --path.rootfs=/host/root \
+     --web.listen-address=0.0.0.0:9100 \
+     --collector.textfile.directory=/textfile \
+     --no-collector.selinux \
+     --no-collector.rapl \
+     --no-collector.netdev \
+     --no-collector.netstat \
+     --no-collector.netclass \
+     --no-collector.sockstat \
+     --no-collector.softnet \
+     --no-collector.arp \
+     --no-collector.conntrack \
+     --no-collector.udp_queues \
+     --no-collector.bonding \
+     --no-collector.btrfs \
+     --no-collector.fibrechannel \
+     --no-collector.infiniband \
+     --no-collector.ipvs \
+     --no-collector.mdadm \
+     --no-collector.nfs \
+     --no-collector.nfsd \
+     --no-collector.tapestats \
+     --no-collector.zfs
+
+# The image is busybox-based, so wget exists. 9100 is hardcoded here and in
+# apps/prometheus/prometheus.yml because Prometheus does no environment
+# substitution in its config file, so a variable could not reach both - the
+# same reason sonarr:8989 is written out rather than parameterised.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:9100/metrics || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+# See sonarr.container.
+HealthStartupCmd=wget -q -O /dev/null http://127.0.0.1:9100/metrics || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+# Podman does not create a missing bind-mount source directory; Docker did, and
+# with Restart=always the difference is a silent 5-second retry loop. This one
+# is also empty on a fresh host by design - nothing restores it, because its
+# contents are rewritten every 30 seconds.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CACHE}/textfile
+Restart=always
+RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
+
+# A ceiling, not a tuning knob: high enough never to bite in normal use,
+# low enough that a runaway is killed instead of taking the host down.
+MemoryHigh=128M
+MemoryMax=192M
+
+[Install]
+WantedBy=default.target

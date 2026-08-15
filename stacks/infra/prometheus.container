@@ -1,0 +1,130 @@
+# ==============================================================================
+# Prometheus: the metrics store
+# ------------------------------------------------------------------------------
+# The time-series half of the observability work. status.json is a snapshot
+# rewritten hourly and cannot answer "when did that start" about anything; this
+# records the same findings, plus host, container, GPU and application numbers,
+# and serves them over a query API the dashboard reads.
+#
+# :v3, and the major tag is the point. It is the only control left over what
+# lands unattended, and it decided this choice: VictoriaMetrics is the lighter
+# store and the obvious candidate, but it publishes no :v1 and no :stable tag -
+# only :latest and full triples - so AutoUpdate=registry would track :latest on
+# the one component holding every byte of history. Prometheus publishes :v3.
+#
+# It also rules out a second dependency: this is reference PromQL rather than a
+# superset, so a dashboard query cannot come to depend on an extension by
+# accident, and recording and alerting rules are built in for the phase that
+# adds them.
+#
+# WHY THE DATA IS IN config/ AND NOT cache/: this history is wanted after a
+# disk failure, so it is backed up. That is a decision with a cost - a live TSDB
+# cannot be rsynced, because blocks are immutable once written but the head
+# block and the WAL are not. bin/backup-server.sh therefore excludes this
+# directory and lays a snapshot over it, the same shape as the SQLite handling
+# in bin/snapshot-databases.sh. --web.enable-admin-api below is what makes that
+# snapshot possible, and the Caddyfile closes the path it opens.
+#
+# Image:  https://quay.io/repository/prometheus/prometheus
+# See:    https://prometheus.io/docs/prometheus/latest/command-line/prometheus/
+# ==============================================================================
+
+[Unit]
+Description=Prometheus metrics store
+
+[Container]
+Image=quay.io/prometheus/prometheus:v3
+AutoUpdate=registry
+ContainerName=prometheus
+Network=net-metrics.network
+
+# THE IMAGE RUNS AS nobody, WHICH CANNOT WRITE ITS OWN DATA DIRECTORY HERE.
+# Rootless Podman maps container uid 0 to core (1000), the user that owns
+# config/ - but uid 65534 maps into the subuid range at 165533, which has only
+# the `other` bits on a core-owned directory. Prometheus would come up, fail to
+# open /prometheus for writing and never reach healthy. This is the same reason
+# every other unit here sets PUID=0/PGID=0, and it is not a privilege
+# escalation: container root IS core.
+User=0
+
+# Mounted as a directory, not a single file, so that a `git pull` replacing
+# prometheus.yml does not leave the container holding a stale inode - the same
+# reason apps/caddy is mounted this way. Shared and read-only, so :z not :Z.
+Volume=/var/home-server/apps/prometheus:/etc/prometheus:z,ro
+Volume=${DOCKER_VOLUME_CONFIG}/prometheus:/prometheus:Z
+
+Environment=TZ=${TIMEZONE}
+
+# --web.listen-address is 0.0.0.0 only because net-metrics is currently the
+# ONLY network this container joins. When it gains net-arr, net-download,
+# net-media and net-transcode to scrape the application exporters, it must be
+# pinned to its address on net-metrics - the whole argument for multi-homing
+# Prometheus rather than the exporters is that it is a pure CLIENT on those
+# segments and nothing there can open a connection to it. Leaving 0.0.0.0 in
+# place at that point would quietly give that up.
+#
+# --web.enable-lifecycle stays OFF: ReloadSignal=SIGHUP below reloads the
+# config without exposing an HTTP endpoint that can also shut the process down.
+# --web.enable-admin-api is ON, and deliberately: the nightly backup needs
+# /api/v1/admin/tsdb/snapshot to copy a consistent TSDB. It also exposes
+# delete_series, which is why the Caddyfile answers 403 on /api/v1/admin/* -
+# two layers, the same shape as the off-site bucket policy plus IAM policy.
+# 9090 and the retention are written out rather than parameterised, and that is
+# the opposite of the usual rule here for a reason: Prometheus does NO
+# environment substitution in its config file, so a PORT_ variable could not
+# reach apps/prometheus/prometheus.yml and would leave the self-scrape target
+# free to drift from the listener. One source, no drift - the same argument that
+# leaves sonarr:8989 written out. The retention is 13 months: a full
+# year-over-year comparison with a month of margin, which at roughly 2,000
+# series and 30s costs about 4-6 GB against 186 GB free. --retention.size is a
+# ceiling so it can never fill the disk that also carries config/ and
+# /var/backups; whichever limit is reached first wins.
+Exec=--config.file=/etc/prometheus/prometheus.yml \
+     --storage.tsdb.path=/prometheus \
+     --storage.tsdb.retention.time=400d \
+     --storage.tsdb.retention.size=16GB \
+     --web.listen-address=0.0.0.0:9090 \
+     --web.external-url=https://metrics.${DOMAIN} \
+     --web.enable-admin-api
+
+# The image is busybox-based, so wget exists. Checked rather than assumed - the
+# distroless variants of several exporters have no shell at all, which costs
+# them Notify=healthy and makes auto-update's rollback decorative.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:9090/-/healthy || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+# See sonarr.container. Note what this proves and does not: /-/healthy means the
+# process is up and the config parsed, NOT that any target is being scraped.
+# metrics.targets_down in bin/verify-host.sh is what covers that, because a dead
+# exporter does not blank a graph - it freezes it at the last value.
+HealthStartupCmd=wget -q -O /dev/null http://127.0.0.1:9090/-/healthy || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+# Podman does not create a missing bind-mount source directory; Docker did. With
+# Restart=always the difference is a silent 5-second retry loop rather than a
+# visible failure - the Tdarr units reached restart 126 before anyone looked.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/prometheus
+Restart=always
+RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
+# `systemctl --user reload prometheus` rereads prometheus.yml with no restart
+# and no lifecycle endpoint.
+ReloadSignal=SIGHUP
+
+# A ceiling, not a tuning knob: high enough never to bite in normal use, low
+# enough that a runaway is killed instead of taking the host down. Sized from
+# the series budget - roughly 2,000 active series is a ~150-250M resident set,
+# and metrics.series_count warns long before cardinality approaches this.
+MemoryHigh=512M
+MemoryMax=768M
+
+[Install]
+WantedBy=default.target

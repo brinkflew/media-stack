@@ -469,7 +469,7 @@ lingering, so the stack starts without anyone logging in. Confirm that once:
 
 ```bash
 loginctl show-user core | grep Linger        # Linger=yes
-systemctl --user list-units 'net-*' --no-legend  # seven networks, all active
+systemctl --user list-units 'net-*' --no-legend  # eight networks, all active
 ```
 
 ---
