@@ -780,6 +780,177 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 	done
 
+	# --------------------------------------------------------------------------
+	# Logs. The policy, and whether it is actually in force.
+	# --------------------------------------------------------------------------
+	# EVERY CHECK HERE IS WARN OR PASS, NEVER FAIL, and that is a constraint
+	# rather than a preference. bin/reboot-host.sh refuses to reboot a host this
+	# battery calls unhealthy, so a FAIL here would block reboots over a log
+	# directory - and none of these findings is fixed by a reboot or a rollback.
+	# It is the same mistake the /boot pin logic above already documents.
+	#
+	# THE EXPECTED VALUES ARE DECLARED HERE AS WELL AS IN THE DROP-IN, on
+	# purpose. A check that reads its expectation out of the file it is checking
+	# asserts only that the file parses - the same argument as greenboot's
+	# ordering drop-in, which is asserted by its effect rather than its presence.
+	say logs "Logs"
+	jd_want_max=16G jd_want_retention=90d
+	jd_cap_mb=16384 cfg_log_ceiling_mb=500
+
+	# The EFFECT of Storage=persistent, not the setting. Without this directory
+	# the journal is tmpfs, nothing survives a reboot, and every other check in
+	# this section is measuring something that is about to be thrown away.
+	if [ -d /var/log/journal ]; then
+		ok logs.persistent "the journal is persistent"
+	else
+		warn logs.persistent "/var/log/journal does not exist - the journal is tmpfs and a reboot loses all of it"
+	fi
+
+	# Ask systemd what it MERGED, not what is on disk. A drop-in can be present
+	# and not loaded, and `ls` cannot tell the difference.
+	jcfg=$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null)
+	if [ -z "$jcfg" ]; then
+		warn logs.dropin_loaded "could not read the effective journald configuration"
+	elif grep -q '10-media-stack.conf' <<<"$jcfg"; then
+		ok logs.dropin_loaded "the media-stack journald drop-in is loaded"
+	else
+		warn logs.dropin_loaded "no media-stack journald drop-in is loaded - retention is whatever the default happens to be"
+	fi
+
+	# tail -1 reproduces systemd's own last-wins precedence, so a later-sorting
+	# drop-in that overrides ours is caught rather than hidden.
+	jval() { sed -n "s/^[[:space:]]*$1=//p" <<<"$jcfg" | tail -1; }
+	jd_bad=""
+	[ "$(jval SystemMaxUse)"     = "$jd_want_max" ]       || jd_bad="$jd_bad SystemMaxUse=$(jval SystemMaxUse)"
+	[ "$(jval MaxRetentionSec)"  = "$jd_want_retention" ] || jd_bad="$jd_bad MaxRetentionSec=$(jval MaxRetentionSec)"
+	if [ -z "$jcfg" ]; then
+		: # already warned above; do not say the same thing twice
+	elif [ -z "$jd_bad" ]; then
+		ok logs.dropin_values "journald keeps ${jd_want_retention}, capped at ${jd_want_max}"
+	else
+		warn logs.dropin_values "journald policy differs from this repo:${jd_bad}"
+	fi
+
+	# THE EFFECT CHECK THAT MAKES THE TWO ABOVE MEAN ANYTHING. If usage is over
+	# the declared cap then journald is not enforcing what the file says,
+	# whatever the file says.
+	jd_mb=$(du -sm /var/log/journal 2>/dev/null | awk '{print $1}')
+	fact journal_mb "${jd_mb:-}" num
+	fact journal_cap_mb "$jd_cap_mb" num
+	if [ -z "$jd_mb" ]; then
+		warn logs.disk_usage "could not measure /var/log/journal"
+	elif [ "$jd_mb" -le "$jd_cap_mb" ]; then
+		ok logs.disk_usage "journal is ${jd_mb}M of ${jd_cap_mb}M"
+	else
+		warn logs.disk_usage "journal is ${jd_mb}M, over the ${jd_cap_mb}M cap - the limit is not being enforced"
+	fi
+
+	# Measured rather than declared. head -1 exits early on SIGPIPE, so this
+	# reads the front of the journal rather than all of it - 6ms, not seconds.
+	jd_oldest=$(journalctl -q -o short-unix --no-pager 2>/dev/null | head -1 | cut -d. -f1)
+	if [ -n "${jd_oldest##*[!0-9]*}" ] && [ -n "$jd_oldest" ]; then
+		jd_days=$(( ( $(date +%s) - jd_oldest ) / 86400 ))
+		fact journal_retention_days "$jd_days" num
+		# The interesting case is not "short" on its own - a freshly installed
+		# host is legitimately short. It is short WHILE AT THE CAP, which means
+		# size is the binding constraint and the stated 90 days is fiction.
+		if [ "$jd_days" -lt 30 ] && [ "${jd_mb:-0}" -ge "$jd_cap_mb" ]; then
+			warn logs.retention "only ${jd_days}d of journal and it is at the size cap - volume has outgrown the ${jd_want_retention} policy"
+		else
+			ok logs.retention "${jd_days}d of journal history"
+		fi
+	else
+		fact journal_retention_days "" num
+		warn logs.retention "could not read the oldest journal entry"
+	fi
+
+	# These are log lines that were LOST. A rate limit doing its job silently is
+	# how the one line you needed goes missing, so it has to be counted rather
+	# than assumed absent - which is also why the drop-in states the limits.
+	sup_raw=$(journalctl -q --no-pager --since=-24h -u systemd-journald -o cat 2>/dev/null | grep '^Suppressed ' || true)
+	sup_n=$(sed -n 's/^Suppressed \([0-9]*\) messages.*/\1/p' <<<"$sup_raw" | awk '{s += $1} END {print s + 0}')
+	fact journal_suppressed_24h "${sup_n:-0}" num
+	if [ "${sup_n:-0}" -eq 0 ]; then
+		ok logs.suppressed_24h "journald dropped nothing in 24h"
+	else
+		warn logs.suppressed_24h "journald dropped ${sup_n} messages in 24h - absence of a log line is no longer evidence"
+	fi
+
+	# PROVEN, NOT READ. podman info does not expose healthcheck_events, so the
+	# only way to know host/containers/containers.conf is in force is to count
+	# the events it is supposed to have stopped - the same argument as the
+	# nightly off-site delete-probe. Sixteen containers on a 60s interval would
+	# put ~960 events in this window; zero is the proof.
+	#
+	# timeout, because `podman events` streams by default and a hung probe in an
+	# hourly timer has nothing else bounding it. An inconclusive probe is a WARN,
+	# never a pass: unknown is not zero.
+	if hc_out=$(timeout 15 podman events --since=60m --until=1s \
+			--filter event=health_status --format '{{.Status}}' 2>/dev/null); then
+		hc_n=$(grep -c . <<<"$hc_out" || true)
+		[ -n "$hc_out" ] || hc_n=0
+		fact healthcheck_events_1h "$hc_n" num
+		if [ "$hc_n" -eq 0 ] && [ "${running:-0}" -eq 0 ]; then
+			# ZERO EVENTS FROM ZERO CONTAINERS PROVES NOTHING. Without this the
+			# probe reads PASS on a host where the whole stack is down, which is
+			# the reading least likely to be true and most likely to be trusted.
+			note logs.healthcheck_events "no containers running - healthcheck_events cannot be proved either way"
+		elif [ "$hc_n" -eq 0 ]; then
+			ok logs.healthcheck_events "no health_status events from $running containers - healthcheck_events is off"
+		else
+			warn logs.healthcheck_events "$hc_n health_status events in the last hour - healthcheck_events=false is NOT in force, and they are ~47% of journal volume"
+		fi
+	else
+		fact healthcheck_events_1h "" num
+		warn logs.healthcheck_events "could not read podman events - cannot prove healthcheck_events is off"
+	fi
+
+	# config/ is the one thing here that cannot be rebuilt from git, and it is
+	# staged and copied to two restic repositories every night. The backup
+	# already excludes these directories, so this is about the NVMe rather than
+	# the snapshots - an app that starts looping fills the disk config/ is on.
+	cfgroot="${DOCKER_VOLUME_CONFIG:-/var/media-stack/config}"
+	cfg_log_mb=0 cfg_log_top=""
+	if [ -d "$cfgroot" ]; then
+		# Process substitution rather than a pipe, so the accumulator survives
+		# the loop - same idiom as bin/lint-repo.sh. sort -rn puts the largest
+		# first, so the first iteration names the offender.
+		while read -r sz path; do
+			cfg_log_mb=$(( cfg_log_mb + sz ))
+			[ -n "$cfg_log_top" ] || cfg_log_top="${path#"$cfgroot"/} (${sz}M)"
+		done < <(find "$cfgroot" -maxdepth 3 -type d \( -name logs -o -name log -o -name Logs \) \
+			-print0 2>/dev/null | xargs -0 -r du -sm 2>/dev/null | sort -rn)
+		fact config_log_mb "$cfg_log_mb" num
+		if [ "$cfg_log_mb" -le "$cfg_log_ceiling_mb" ]; then
+			ok logs.config_log_size "app logs under config/ are ${cfg_log_mb}M"
+		else
+			warn logs.config_log_size "app logs under config/ are ${cfg_log_mb}M, over ${cfg_log_ceiling_mb}M - largest is ${cfg_log_top}"
+		fi
+	else
+		fact config_log_mb "" num
+		note logs.config_log_size "no config tree at $cfgroot - not measured"
+	fi
+
+	# --------------------------------------------------------------------------
+	# This script's own liveness.
+	# --------------------------------------------------------------------------
+	# NOT self-grading in the sense the Boot health section warns about: this
+	# reads systemd's runtime state, not a verdict this script wrote. During the
+	# timer's own run ExecMainExitTimestamp still holds the PREVIOUS completion,
+	# which is exactly the value wanted.
+	#
+	# It cannot catch its own timer being dead - nothing would be running to
+	# notice - which is the whole reason status.json carries generated_at and
+	# lives somewhere a reboot does not wipe. This catches the case one step
+	# earlier: the timer disabled while the battery is still being run by hand.
+	say verify "Self"
+	if [ "$(systemctl --user is-enabled media-stack-verify.timer 2>/dev/null)" = enabled ]; then
+		ok verify.timer_enabled "media-stack-verify.timer enabled"
+	else
+		bad verify.timer_enabled "media-stack-verify.timer is not enabled - the MOTD and status.json silently stop being refreshed"
+	fi
+	check_timer_run verify.last_run "host verification" 3600 media-stack-verify.service --user
+
 	if [ -n "$ROUTES" ]; then
 		say routes "Public routes"
 		for h in watch request id auth sonarr radarr prowlarr tdarr torrent; do
@@ -948,9 +1119,17 @@ if [ -z "$GREENBOOT" ]; then
 		priv mkdir -p "$(dirname "$status_file")" >/dev/null 2>&1
 		if ! { printf '%s\n' "$doc" | priv tee "$status_file.tmp" >/dev/null 2>&1 \
 			&& priv mv "$status_file.tmp" "$status_file" >/dev/null 2>&1; }; then
-			# Deliberately louder than the MOTD's `|| true` above. A silently
-			# stale status file is exactly what a dashboard misreads as current.
-			warn logs.status_write "could not write $status_file - any dashboard reading it is seeing stale data"
+			# STDERR, NOT warn(), and the reason is circular by nature: the
+			# document has already been encoded by this point, so a finding
+			# recorded here could only be reported inside the file we just
+			# failed to write. The timer runs --quiet, so stderr is what puts
+			# this in the journal - the same reasoning that sends --greenboot's
+			# FAILs there.
+			#
+			# Louder than the MOTD's `|| true` above because a silently stale
+			# status file is exactly what a dashboard misreads as current.
+			printf 'verify-host: could not write %s - any dashboard reading it is seeing stale data\n' \
+				"$status_file" >&2
 		fi
 	fi
 fi
