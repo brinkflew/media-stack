@@ -1,0 +1,96 @@
+# ==============================================================================
+# ntfy: the last hop, and the only one that reaches a person
+# ------------------------------------------------------------------------------
+# THE POINT OF THIS CONTAINER IS THAT IT LEAVES THE HOUSE. Everything built
+# before it - status.json, the 64-check battery, the metrics store, the MOTD -
+# is only legible to someone who has already logged in to find out whether
+# anything is wrong. That is the whole of what CLAUDE.md's roadmap still called
+# missing: "anything that reaches a human who is not logged in".
+#
+# :v2, a rolling major tag, for the reason prometheus.container gives at
+# length: AutoUpdate=registry needs something between :latest and a pin that
+# nothing maintains. ntfy publishes one. The bridge that feeds this does not,
+# and ntfy-alertmanager.container argues that exception separately.
+#
+# ITS ROUTE SKIPS SIGN-ON, WHICH IS THE ONE THING HERE WORTH READING TWICE.
+# watch and request are the only other site blocks that do, and the reason is
+# identical: their clients are applications, not browsers, and cannot complete a
+# passkey prompt. So ntfy authenticates its own users - auth-default-access is
+# deny-all, both accounts are declared in apps/ntfy/server.yml, and the
+# hostname on its own reaches nothing at all.
+#
+# WHY NOT ntfy.sh, WHICH WOULD HAVE COST NOTHING. Alert text names hosts, units
+# and what is broken about them, and a public topic is readable by anyone who
+# guesses it. Self-hosting keeps that inside the house at the cost of one
+# container - and this container going down is itself an alertable condition,
+# which the "who watches the watchman" rule group covers.
+#
+# Image:  https://hub.docker.com/r/binwiederhier/ntfy
+# See:    https://docs.ntfy.sh/config/
+# ==============================================================================
+
+[Unit]
+Description=ntfy push notification server
+
+[Container]
+Image=docker.io/binwiederhier/ntfy:v2
+AutoUpdate=registry
+ContainerName=ntfy
+Network=net-metrics.network
+
+# Container root IS core, which owns config/ - see prometheus.container for the
+# uid-mapping argument. ntfy writes both databases here, so it needs to be able
+# to.
+User=0
+
+# The rendered config, not the tracked template: apps/ntfy/server.yml holds
+# ${...} references and is useless to the server. ExecStartPre= below is what
+# turns one into the other.
+Volume=${DOCKER_VOLUME_CONFIG}/ntfy:/var/lib/ntfy:Z
+
+Environment=TZ=${TIMEZONE}
+
+Exec=serve --config /var/lib/ntfy/server.yml
+
+# /v1/health is deliberately outside ntfy's authentication, which is what makes
+# it usable as a health check on an instance whose default access is deny-all.
+# Verified against the running container rather than assumed - a check that
+# 401s would fail every start and roll back every update.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1/v1/health || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+# See sonarr.container. Note what this proves and does not: the process is up
+# and the config parsed, NOT that a phone is subscribed or that a message would
+# be delivered. Nothing on this host can prove the last part, which is why the
+# end-to-end test is a real alert and a real notification.
+HealthStartupCmd=wget -q -O /dev/null http://127.0.0.1/v1/health || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+# Podman does not create a missing bind-mount source directory; Docker did.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/ntfy
+# NOT prefixed with `-`. Jellyfin's renderers are allowed to fail because the
+# application starts perfectly well without them; this one writes the file that
+# declares who may publish and who may read. Rendering it wrongly and starting
+# anyway would produce a server that authenticates nobody and looks healthy.
+ExecStartPre=/var/home-server/bin/render-template.py \
+             /var/home-server/apps/ntfy/server.yml \
+             ${DOCKER_VOLUME_CONFIG}/ntfy/server.yml
+Restart=always
+RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
+
+# A ceiling, not a tuning knob. ntfy holds subscriptions and a small SQLite
+# cache; it is the smallest server in the stack.
+MemoryHigh=128M
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

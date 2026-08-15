@@ -90,6 +90,24 @@ request.{$DOMAIN} {
 	reverse_proxy jellyseerr:5055
 }
 
+# THE THIRD ONE, AND THE ONE THAT LOOKS WRONG UNTIL YOU READ WHY. ntfy is an
+# alerting endpoint, so leaving it outside sign-on invites the obvious
+# objection - but the client is the ntfy phone app, which has no browser in
+# which to complete a passkey prompt, exactly like the two above. It
+# authenticates its own users instead, and auth-default-access is deny-all, so
+# an unauthenticated request to this hostname reaches nothing at all.
+#
+# flush_interval -1 IS LOAD-BEARING, not tuning. ntfy delivers over a
+# long-lived streaming response; with Caddy's default buffering a phone
+# receives nothing until the buffer fills, which for a one-line alert is never.
+# The symptom is a working server, a subscribed phone and silence.
+ntfy.{$DOMAIN} {
+	import base
+	reverse_proxy ntfy:80 {
+		flush_interval -1
+	}
+}
+
 # ------------------------------------------------------------------------------
 # Identity
 # ------------------------------------------------------------------------------

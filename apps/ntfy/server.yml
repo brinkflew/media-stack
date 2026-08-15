@@ -1,0 +1,76 @@
+# =============================================================================
+# ntfy server configuration - A TEMPLATE, NOT THE FILE THE SERVER READS
+# -----------------------------------------------------------------------------
+# bin/render-template.py substitutes ${...} from .env and writes the result to
+# config/ntfy/server.yml, from an ExecStartPre= on ntfy.container. Editing the
+# rendered copy on the server is pointless: it is overwritten on every start.
+#
+# EVERY OTHER CONTAINER HERE TAKES ITS SECRETS THROUGH Environment=, AND THIS
+# ONE CANNOT. ntfy would accept NTFY_AUTH_USERS quite happily, but the value is
+# a bcrypt hash - `$2a$10$...` - and it would cross systemd's expansion and
+# ntfy's own `$$` unescaping on the way, so the string in sops would have to be
+# double-escaped and would no longer match what `ntfy user hash` printed. See
+# the header of bin/render-template.py.
+#
+# WHY DECLARATIVE USERS RATHER THAN `ntfy user add`. The CLI writes into
+# auth.db, which lives in config/ and is therefore backed up and restored - so
+# both approaches survive a restore. What the CLI does not survive is a FRESH
+# host, where it becomes an undocumented manual step of exactly the kind
+# host/butane/ucore.bu exists to abolish. Declared here, the accounts are part
+# of the deploy.
+#
+# See:  https://docs.ntfy.sh/config/
+# =============================================================================
+
+# Must match the browser's origin exactly. The phone app derives everything
+# from it, and ntfy refuses to publish links that disagree with it.
+base-url: "https://ntfy.${DOMAIN}"
+
+# Plain HTTP inside the container; Caddy terminates TLS, as for every other
+# service here. behind-proxy is what makes ntfy trust X-Forwarded-For, so its
+# rate limiting counts real clients rather than counting Caddy as one client.
+listen-http: ":80"
+behind-proxy: true
+
+# Both databases live in the volume, so both are backed up. auth.db is the one
+# that matters: lose it and every subscription on every phone stops
+# authenticating, with no error that names the cause.
+auth-file: "/var/lib/ntfy/auth.db"
+cache-file: "/var/lib/ntfy/cache.db"
+
+# How long a message survives for a phone that was off. Long enough to cover a
+# night; not a log, and deliberately not a substitute for the journal.
+cache-duration: "12h"
+
+# THE WHOLE SECURITY ARGUMENT FOR THIS BEING A PUBLIC ROUTE. Anonymous access
+# is denied outright, so the hostname alone reaches nothing - which is why this
+# is the third site block in the Caddyfile that skips sign-on, alongside watch
+# and request, and for the same reason: the client is an app with no browser in
+# which to complete a passkey prompt.
+auth-default-access: "deny-all"
+
+# No self-registration and no password reset. This is a two-account instance
+# and both accounts are declared below.
+enable-signup: false
+enable-login: true
+
+# Attachments are off by ONE ABSENT SETTING: ntfy disables them when no
+# attachment-cache-dir is set. Stated here because the absence is the switch,
+# and an absent line reads as an oversight rather than a decision. Nothing here
+# sends files, and an upload endpoint on a public host is not worth the reach.
+
+# NEITHER ACCOUNT IS AN ADMIN, and that is deliberate rather than an oversight.
+# Nothing in normal operation needs the role: the users are declared here, the
+# topic is fixed, and `podman exec ntfy ntfy ...` is available for anything
+# genuinely administrative. The same argument as the off-site backup key that
+# cannot delete - the credential that lives on a phone should not be able to
+# rewrite the server.
+auth-users:
+  - "${NTFY_USER}:${NTFY_USER_HASH}:user"
+  - "alertmanager:${NTFY_ALERT_HASH}:user"
+
+# The publisher is WRITE-ONLY. It has no reason to read the topic, and a
+# credential that sits in a container config should carry the least it can.
+auth-access:
+  - "${NTFY_USER}:home-server:rw"
+  - "alertmanager:home-server:wo"
