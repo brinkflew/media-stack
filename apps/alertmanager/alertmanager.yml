@@ -67,7 +67,15 @@ receivers:
         http_config:
           basic_auth:
             username: alertmanager
-            password_file: /etc/alertmanager/webhook.pw
+            # /alertmanager, NOT /etc/alertmanager. This directory is the two
+            # mounts' whole difference: /etc/alertmanager is apps/ mounted
+            # read-only, so the rendered credential cannot be written there,
+            # and /alertmanager is the writable state directory where
+            # ExecStartPre= puts it. Naming the wrong one costs nothing
+            # visible - every container stays healthy, both configs validate,
+            # Prometheus is happy, and each notification fails with a 401 that
+            # only appears in Alertmanager's own log.
+            password_file: /alertmanager/webhook.pw
 
 inhibit_rules:
   # A critical and a warning about the same thing is one problem. Without this
