@@ -96,8 +96,16 @@ image being pulled back and started.
 **Each also carries a `HealthStartupCmd=` at a 5s interval**, and that is not cosmetic. With only
 the 60s `HealthInterval` the first probe does not run until t=60s, so every unit took ~65s to start -
 about 15 minutes across a full sequential update run. The startup check brought the same restart to
-20s. The 60s steady-state interval is untouched, because that is what keeps podman's ~1.5 KB
+20s. The 60s steady-state interval is untouched, because it used to be what kept podman's ~1.5 KB
 `health_status` events out of the journal.
+
+**That is no longer the reason, and the interval is no longer the lever.** Cutting 30s to 60s halved
+the events and left them at **47.3% of all journal bytes** - 34,738 a day at 3.8 KB each, every one
+saying `healthy`. They are off entirely now, via `healthcheck_events = false` in
+`host/containers/containers.conf`, which drops `health_status` and keeps every lifecycle event.
+So **pick a health interval for how fast you want a failure noticed**, not to protect the journal.
+The cost of turning them off, and why `Notify=healthy` still makes auto-update's rollback fire, is
+in CLAUDE.md under "Logs and status".
 
 **`duckdns` and `unpackerr` define no healthcheck**, so they get no rollback beyond "did it crash
 immediately". That is accepted, not overlooked.

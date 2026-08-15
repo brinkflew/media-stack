@@ -879,17 +879,23 @@ if [ -z "$GREENBOOT" ]; then
 	# PROVEN, NOT READ. podman info does not expose healthcheck_events, so the
 	# only way to know host/containers/containers.conf is in force is to count
 	# the events it is supposed to have stopped - the same argument as the
-	# nightly off-site delete-probe. Sixteen containers on a 60s interval would
-	# put ~960 events in this window; zero is the proof.
+	# nightly off-site delete-probe.
+	#
+	# 15 MINUTES, not 60. The window has to be long enough that zero cannot
+	# happen by chance and short enough to clear promptly after a change: with
+	# gluetun at 5s, most containers at 60s and the Tdarr nodes at 120s, a
+	# quarter of an hour is several hundred events if the setting is on. At 60m
+	# it was safe but took a full hour to stop reporting events that predated
+	# the fix, which reads as "the change did not work".
 	#
 	# timeout, because `podman events` streams by default and a hung probe in an
 	# hourly timer has nothing else bounding it. An inconclusive probe is a WARN,
 	# never a pass: unknown is not zero.
-	if hc_out=$(timeout 15 podman events --since=60m --until=1s \
+	if hc_out=$(timeout 15 podman events --since=15m --until=1s \
 			--filter event=health_status --format '{{.Status}}' 2>/dev/null); then
 		hc_n=$(grep -c . <<<"$hc_out" || true)
 		[ -n "$hc_out" ] || hc_n=0
-		fact healthcheck_events_1h "$hc_n" num
+		fact healthcheck_events_15m "$hc_n" num
 		if [ "$hc_n" -eq 0 ] && [ "${running:-0}" -eq 0 ]; then
 			# ZERO EVENTS FROM ZERO CONTAINERS PROVES NOTHING. Without this the
 			# probe reads PASS on a host where the whole stack is down, which is
@@ -898,10 +904,10 @@ if [ -z "$GREENBOOT" ]; then
 		elif [ "$hc_n" -eq 0 ]; then
 			ok logs.healthcheck_events "no health_status events from $running containers - healthcheck_events is off"
 		else
-			warn logs.healthcheck_events "$hc_n health_status events in the last hour - healthcheck_events=false is NOT in force, and they are ~47% of journal volume"
+			warn logs.healthcheck_events "$hc_n health_status events in the last 15 min - healthcheck_events=false is NOT in force, and they are ~47% of journal volume"
 		fi
 	else
-		fact healthcheck_events_1h "" num
+		fact healthcheck_events_15m "" num
 		warn logs.healthcheck_events "could not read podman events - cannot prove healthcheck_events is off"
 	fi
 

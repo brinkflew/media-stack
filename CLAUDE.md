@@ -334,6 +334,84 @@ repository, both age private keys and every restic password used to live only th
 copies are in sops; the rest is why **the age keys and both restic passwords must be in the password
 manager** - off-site backups you cannot decrypt are not backups.
 
+## Logs and status
+
+**`/var/lib/media-stack/status.json` is the machine-readable interface**, rewritten hourly by
+`bin/verify-host.sh` alongside the MOTD. It exists because the dashboard that is coming needs
+something to read, and scraping ANSI-coloured text or re-implementing 50 checks are both worse.
+
+**Every finding is keyed by a STABLE ID, and the prose is not stable.** A consumer keys on
+`cdi.driver_match`; the sentence after it gets reworded whenever it turns out to be wrong, and that
+must cost nothing. Ids are `<section>.<property>`, named for what is being measured rather than for
+the verdict - `cdi.driver_match`, never `cdi.driver_ok`.
+
+```bash
+bin/verify-host.sh --json | jq '.summary, .facts'
+jq -r '.checks[] | select(.status != "pass") | "\(.status)  \(.id)  \(.message)"' \
+  /var/lib/media-stack/status.json
+```
+
+Four properties a consumer can rely on:
+
+- **`summary.status`** is `pass|warn|fail` - one field to colour on, so nobody re-derives precedence.
+- **A section that did not run is ABSENT, not zero-filled**, and `mode.routes` says so a second
+  time. "The route battery was not walked" must not read as "every route passed".
+- **`facts` keys are flat snake_case and always present**, `null` when not measured - so a key never
+  appears and disappears and force a reader to guess which case it is in. Check ids are dotted,
+  fact keys are not; the two namespaces cannot be confused.
+- **`generated_at` is authoritative.** This is also the script's own durable record: it was the only
+  automated job here that wrote no marker of its last success, and a MOTD lives on tmpfs. A failing
+  run carries the previous `verify_last_ok_at` forward, so "failing since Tuesday" and "has never
+  once passed" do not look alike.
+
+**`--greenboot` emits no JSON, and combining the two flags is an error.** That mode runs as root
+before the user session exists and its exit code decides whether the OS rolls back, so it gets no
+new failure modes and its stdout stays what it is - the only legible account of why a machine
+reverted.
+
+**Every check in the `Logs` section is WARN or PASS, never FAIL.** `bin/reboot-host.sh` refuses to
+reboot a host this battery calls unhealthy, so a FAIL there would block reboots over a log
+directory - and none of those findings is fixed by a reboot. Same mistake the `/boot` pin logic
+already documents. Adding a FAIL to that section needs its own written argument.
+
+### The policy, and why it is asserted rather than trusted
+
+Until 2026-08-15 there was **no journald configuration in this repository at all** - the host ran on
+uCore's `Storage=persistent` and inherited defaults, so retention was "10% of `/var`, capped at
+4 GB, about three weeks", true and undeclared. It is now `host/journald/10-media-stack.conf`:
+**90 days, with a 16 GB cap as the runaway backstop rather than the binding constraint.**
+
+| Measured before the change, 2026-08-14 | |
+|---|---|
+| journal on disk | 438 MB, all since the migration - **~193 MB/day** |
+| entries/day | 128,423 |
+| podman `health_status` | 34,738/day at 3.8 KB - **47.3% of all journal bytes** |
+
+**The two files deploy differently, and that is not an oversight.** journald is parsed by PID 1,
+which SELinux will not let read `var_t`, so its drop-in is **duplicated** into `host/butane/ucore.bu`
+rather than symlinked - the trap `host/greenboot/README.md` documents, where `systemctl cat` prints
+the file happily, no AVC is logged, and none of it applies. podman reads its config as `core`, an
+ordinary user process, so `host/containers/containers.conf` **is** a symlink, like the quadlets.
+**Ignition runs once at first boot**, so `ucore.bu` does not configure the running machine; both
+still need applying by hand there.
+
+**`logs.healthcheck_events` is a probe rather than a file read, and that is the point.** `podman
+info` does not expose `healthcheck_events`, so the only way to know the setting is in force is to
+**count the events it was supposed to have stopped** - the same argument as the nightly off-site
+delete-probe. Sixteen containers on a 60s interval would put ~960 in a one-hour window; zero is the
+proof. **Zero from zero containers proves nothing**, so that case is a note rather than a pass.
+
+**What turning the events off costs**, because it is a trade rather than a free win: there is no
+longer a journal record of the moment a container flips unhealthy. Three things already cover it -
+`Notify=healthy` is unaffected (sd_notify, not the event log, so auto-update's rollback still
+fires), `podman inspect` keeps the last 5 check results with their output, and `verify-host.sh`
+checks `--filter health=unhealthy` hourly. Every **lifecycle** event survives.
+
+**App-written log files need no new machinery.** They are 11 MB across 69 files, the \*arr apps and
+unpackerr rotate themselves, and `bin/backup-server.sh` already excludes `*.log`, `*/logs/`,
+`jellyfin/log/` and `tdarr/logs/` - so they are out of the backup. `logs.config_log_size` is a
+tripwire on the NVMe, not a rotation policy.
+
 ## Commands
 
 All of these run on the server as `core`, from `/var/media-stack`. **No `sudo`** - the stack is
@@ -354,6 +432,9 @@ podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change,
 
 ./bin/verify-host.sh                          # the whole battery; also writes the MOTD
 ./bin/verify-host.sh --routes                 # plus the public routes (slow)
+./bin/verify-host.sh --json | jq .summary     # the same findings, machine-readable
+jq -r '.checks[]|select(.status!="pass")|"\(.status)  \(.id)  \(.message)"' \
+  /var/lib/media-stack/status.json            # what the hourly run last found
 podman auto-update --dry-run                  # 17 rows with a policy, not an empty table
 systemctl --user list-timers                  # verify hourly, backup + auto-update nightly
 
@@ -1104,10 +1185,22 @@ Conclusions from auditing the running host. Do not rediscover these:
   alerting built on it worse than nothing. Caddy is now pointed at stdout in *both* the global block
   and the `(base)` snippet; Tinyauth's duplicate HTTP stream is off and its audit stream is on.
   **Check where a new service logs before trusting a priority filter.**
+- **`journalctl -p err` is STILL not a usable signal, and this entry used to imply otherwise.**
+  Fixing Caddy and Tinyauth fixed the two services that had a knob for it. Measured on 2026-08-14,
+  what is left: **Jellyfin emits 2,644 priority-3 lines a day** that are ffmpeg decoder chatter
+  (`Duplicate POC in a sequence`), and unpackerr another 228 that are s6-overlay `info:` messages at
+  startup. Both are the container writing to stderr, neither application can be told otherwise from
+  outside, and `LogDriver=`/`LogOpt=` do not remap priority. **So alerting keys on unit state and
+  container health - which is what `status.json` carries - and priority is at best a secondary
+  filter with a known-noisy allowlist.**
 - **Podman emits a `health_status` event per check, carrying the image's whole label set** - the
-  Jellyfin one is ~1.5 KB. Sixteen containers at 30s tripled journal volume, so the interval is 60s
-  (120s for the Tdarr nodes, 5s for gluetun, which is the kill-switch). Worth knowing before adding
-  a seventeenth.
+  Jellyfin one is ~1.5 KB, and the median is 3.8 KB. Sixteen containers at 30s tripled journal
+  volume, so the interval was cut to 60s (120s for the Tdarr nodes, 5s for gluetun, the
+  kill-switch). **That helped and was not enough.** Measured over a 3-hour full-field
+  `journalctl -o export` on 2026-08-14: 34,738 events a day, **47.3% of all journal bytes**, every
+  one of them saying `healthy`. They are now off entirely - `healthcheck_events = false` in
+  `host/containers/containers.conf` - which drops only `health_status` and keeps every lifecycle
+  event. See "Logs and status" below for what that costs.
 - **The media disk gets SLOWER with concurrency, and this is measured.** O_DIRECT sequential reads
   off `sda`: **1 reader 127.5 MB/s, 2 readers 70.9 MB/s aggregate, 3 readers 71.4, 4 readers 66.5.**
   Going from one reader to two costs **45% of total throughput** and quadruples `await` (7.7->28 ms).
@@ -1240,15 +1333,26 @@ abandoned because nothing maintained it. See `stacks/README.md`.
 Remaining, in order:
 
 1. **Monitoring**, so a failed unit surfaces without someone running `systemctl --user --failed`.
-   `bin/verify-host.sh` and its MOTD are the first half and cover the specific things automation
-   puts at risk - a staged deployment nobody applies, an update run that silently stopped, a CDI
-   spec that no longer matches the driver, a backup that has stopped running, a checkout that has
-   drifted from git. What is still missing is anything that reaches a human who is not logged in.
-   Three prerequisites are now in place and are what make an alerting channel worth building:
-   journal priorities mean something (Caddy and Tinyauth were emitting ~1950 false errors a day),
-   16 of 18 containers report real health, and every automated job now records enough state to tell
-   "quiet" from "stopped". `duckdns` and `unpackerr` never will report health - neither serves HTTP
-   - so a check that assumes every container has a health status will report them broken for ever.
+   `bin/verify-host.sh` and its MOTD cover the specific things automation puts at risk - a staged
+   deployment nobody applies, an update run that silently stopped, a CDI spec that no longer matches
+   the driver, a backup that has stopped running, a checkout that has drifted from git.
+
+   **The data layer is done, 2026-08-15.** `/var/lib/media-stack/status.json` carries every finding
+   keyed by a stable id, plus a `facts` object of the numbers, rewritten hourly - see "Logs and
+   status". The journal is declared and bounded at 90 days, and 47% of its volume (podman's
+   `health_status` events) is gone. **The durable-record gap named below is closed**: `status.json`
+   carries `generated_at` and lives where a reboot does not reach, so this script finally has the
+   marker every other job already had.
+
+   **What is still missing is anything that reaches a human who is not logged in.** That is now the
+   whole of this item. The dashboard reads `status.json`; a notifier would fire off the same
+   document, or off an `OnFailure=` on `media-stack-verify.service`.
+
+   **Do NOT build it on `journalctl -p err`.** Jellyfin alone emits 2,644 priority-3 lines a day of
+   ffmpeg chatter and there is no lever to stop it - see Known state. Unit state and container
+   health are the signal. Note also that `duckdns` and `unpackerr` never report health - neither
+   serves HTTP - so a check assuming every container has a health status reports them broken for
+   ever.
 
    **The generalisable lesson from the backup work: an automated job needs a durable record of its
    last success, not just a unit that exits 0.** `ExecMainExitTimestamp` is wiped by a reboot, and a
