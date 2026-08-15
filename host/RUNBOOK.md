@@ -478,6 +478,46 @@ match, firewalld, lingering, the `io` delegation, and every unit and container.
 /var/media-stack/bin/verify-host.sh --routes     # --routes adds the public route walk
 ```
 
+It also writes `/var/lib/media-stack/status.json` on every non-greenboot run - the same findings
+keyed by a stable id, which is what a dashboard reads and what tells you when the hourly run last
+succeeded. To see only what is wrong, without re-running the battery:
+
+```bash
+jq -r '.checks[]|select(.status!="pass")|"\(.status)  \(.id)  \(.message)"' \
+  /var/lib/media-stack/status.json
+jq -r '"last run \(.facts.verify_last_run_at), last clean \(.facts.verify_last_ok_at)"' \
+  /var/lib/media-stack/status.json
+```
+
+**A stale `generated_at` is the only way to notice the hourly timer has stopped.** The battery
+cannot check that itself - if it is not running, nothing evaluates the check - which is why the
+document is durable rather than living in the MOTD on tmpfs.
+
+**After editing `host/journald/10-media-stack.conf` or `host/containers/containers.conf`, a
+`git pull` is not enough.** The journald drop-in is a copy, not a symlink, because PID 1 cannot read
+`var_t`:
+
+```bash
+sudo install -D -m 0644 /var/media-stack/host/journald/10-media-stack.conf \
+  /etc/systemd/journald.conf.d/10-media-stack.conf
+sudo systemctl restart systemd-journald
+systemd-analyze cat-config systemd/journald.conf | grep -E 'MaxUse|Retention|RateLimit'
+```
+
+containers.conf *is* a symlink and needs no copy step, but it does need to exist on a host that
+predates it:
+
+```bash
+ln -sfn /var/media-stack/host/containers/containers.conf ~/.config/containers/containers.conf
+# then prove it took effect - podman info does NOT expose healthcheck_events
+timeout 20 podman events --since=15m --until=1s --filter event=health_status | wc -l   # want 0
+timeout 20 podman events --since=15m --until=1s --format '{{.Status}}' | sort | uniq -c
+```
+
+The second command must still show lifecycle events (`start`, `died`, `pull`, ...). If it shows
+nothing at all, nothing has happened in the window rather than events being broken - restart a
+low-impact container such as `duckdns` to generate some.
+
 What it deliberately does **not** cover, and you should still do by hand:
 
 ```bash
