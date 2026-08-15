@@ -871,6 +871,292 @@ def source_status(m):
 
 
 # ------------------------------------------------------------------------------
+# The applications - the SLOW tier
+# ------------------------------------------------------------------------------
+# Every one of these is reached with `podman exec`, which works whatever the
+# network topology says and grants NO container any reachability it does not
+# already have. That is the established house pattern here, and it is why
+# net-arr, net-download, net-media and net-transcode stay sealed from each other
+# while all of them can still be measured.
+#
+# It is also the one place where the diagnostic touches the patient: a poll
+# forks a process INSIDE the container being measured. Bounded by the slow tier,
+# by curl's own max-time and by a subprocess timeout, in that order.
+
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+ENV_FILE = os.path.join(REPO, ".env")
+
+
+def load_env():
+    """The .env, read directly rather than through the unit's EnvironmentFile=
+    so that --print works from an interactive shell.
+
+    Unlike bin/promote-transcoded.py's loader this DEGRADES rather than dying.
+    There is a window during bin/render-env.sh when the file is absent or half
+    written, and it must cost the application sources and nothing else - a
+    reconciler that stops is safe, a monitor that stops is blind.
+    """
+    env = {}
+    try:
+        for line in read_text(ENV_FILE).splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                env[key.strip()] = value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return env
+
+
+def api_get(container, url, headers=None, timeout=12):
+    """A GET inside a container, with the credential passed on STDIN not argv.
+
+    `curl -K -` reads its entire configuration from stdin, so an API key never
+    appears in the process list - which `podman exec ... -H "X-Api-Key: ..."`
+    cannot avoid, and which matters more here than in a job that runs twice an
+    hour, because this one runs 288 times a day.
+    """
+    config = ['url = "%s"' % url, "silent", "max-time = 8"]
+    for header in (headers or []):
+        config.append('header = "%s"' % header)
+    try:
+        res = subprocess.run(["podman", "exec", "-i", container, "curl", "-K", "-"],
+                             input="\n".join(config) + "\n", capture_output=True,
+                             text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    try:
+        return json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def source_arr(m):
+    env = load_env()
+    answered = 0
+
+    for name, port in (("sonarr", 8989), ("radarr", 7878)):
+        key = env.get("%s_API_KEY" % name.upper(), "")
+        if not key:
+            continue
+        base = "http://localhost:%d/api/v3" % port
+        hdr = ["X-Api-Key: " + key]
+
+        status = api_get(name, base + "/queue/status", hdr)
+        if isinstance(status, dict):
+            answered += 1
+            for field, state in (("totalCount", "total"),
+                                 ("unknownCount", "unknown")):
+                m.add("home_server_arr_queue_items", status.get(field),
+                      {"service": name, "state": state},
+                      "Items in the download queue.")
+            m.add("home_server_arr_queue_errors",
+                  1 if status.get("errors") else 0, {"service": name},
+                  "The queue is reporting errors.")
+
+        health = api_get(name, base + "/health", hdr)
+        _arr_health(m, name, health)
+        if isinstance(health, list):
+            answered += 1
+
+    # Prowlarr. THE ONE THAT EARNS ITS KEEP: the ISP resolver returned a
+    # blocking page for four indexers while every container stayed healthy and
+    # the only symptom was that nothing was found. A disabled indexer is one
+    # Prowlarr has given up on after repeated failures.
+    key = env.get("PROWLARR_API_KEY", "")
+    if key:
+        hdr = ["X-Api-Key: " + key]
+        indexers = api_get("prowlarr", "http://localhost:9696/api/v1/indexer", hdr)
+        statuses = api_get("prowlarr",
+                           "http://localhost:9696/api/v1/indexerstatus", hdr)
+        if isinstance(indexers, list):
+            answered += 1
+            failing = set()
+            if isinstance(statuses, list):
+                failing = {s.get("indexerId") for s in statuses
+                           if s.get("disabledTill")}
+            enabled = 0
+            for indexer in indexers:
+                if not indexer.get("enable"):
+                    continue
+                enabled += 1
+                m.add("home_server_indexer_up",
+                      0 if indexer.get("id") in failing else 1,
+                      {"indexer": str(indexer.get("name", "?"))},
+                      "0 when Prowlarr has disabled the indexer after repeated "
+                      "failures. This is what a DNS sinkhole looks like from "
+                      "the outside - every container healthy, nothing found.")
+            m.add("home_server_indexers_enabled", enabled, None,
+                  "Indexers configured and enabled.")
+        _arr_health(m, "prowlarr",
+                    api_get("prowlarr", "http://localhost:9696/api/v1/health", hdr))
+
+    # Bazarr is NOT a Servarr application: different header, different API.
+    key = env.get("BAZARR_API_KEY", "")
+    if key:
+        badges = api_get("bazarr", "http://localhost:6767/api/badges",
+                         ["X-API-KEY: " + key])
+        if isinstance(badges, dict):
+            answered += 1
+            for field, kind in (("episodes", "episodes"), ("movies", "movies")):
+                m.add("home_server_subtitles_missing", badges.get(field),
+                      {"kind": kind}, "Items with subtitles still wanted.")
+            m.add("home_server_subtitle_providers", badges.get("providers"),
+                  None, "Subtitle providers currently usable.")
+
+    if not answered:
+        raise RuntimeError("no *arr application answered")
+
+
+def _arr_health(m, service, health):
+    """Health issues as a COUNT per severity, never as the message.
+
+    The text is unstable by charter - these are the applications' own strings
+    and they get reworded upstream - so a label carrying it would mint a fresh
+    series on every release and leave the old one for the whole retention
+    period. The count says something is wrong; the UI says what.
+    """
+    if not isinstance(health, list):
+        return
+    counts = {}
+    for issue in health:
+        counts[str(issue.get("type", "unknown")).lower()] = \
+            counts.get(str(issue.get("type", "unknown")).lower(), 0) + 1
+    for severity in ("error", "warning", "notice"):
+        m.add("home_server_arr_health_issues", counts.get(severity, 0),
+              {"service": service, "severity": severity},
+              "Health issues the application reports, counted by severity.")
+
+
+def source_jellyfin(m):
+    env = load_env()
+    key = env.get("JELLYFIN_API_KEY", "")
+    if not key:
+        raise RuntimeError("JELLYFIN_API_KEY is not set")
+    sessions = api_get("jellyfin", "http://localhost:8096/Sessions",
+                       ["X-Emby-Token: " + key])
+    if not isinstance(sessions, list):
+        raise RuntimeError("unexpected /Sessions response")
+
+    # NO user, device or item label. They are unbounded in principle, and they
+    # are surveillance of the household - what is wanted is how hard the box is
+    # working, which the playback method answers on its own.
+    methods = {"directplay": 0, "directstream": 0, "transcode": 0}
+    for session in sessions:
+        if not session.get("NowPlayingItem"):
+            continue
+        method = str((session.get("PlayState") or {}).get("PlayMethod") or "")
+        methods[method.lower()] = methods.get(method.lower(), 0) + 1
+    for method, count in sorted(methods.items()):
+        m.add("home_server_jellyfin_sessions", count,
+              {"playback_method": method},
+              "Sessions actively playing something. A transcode is the "
+              "expensive case and the one worth watching.")
+    m.add("home_server_jellyfin_sessions_total", len(sessions), None,
+          "Connected sessions, playing or not.")
+
+
+def source_torrent(m):
+    """qBittorrent needs NO credential from here, and that is not an oversight.
+
+    WebUI\\LocalHostAuth is false, and `podman exec` lands inside the pod's
+    network namespace where "localhost" means gluetun, qBittorrent and JOAL and
+    nothing else. Proven twice over by things already in this repository: the
+    unit's own healthcheck, and gluetun's port-forward push command, both
+    unauthenticated. A request arriving over net-download as torrent:8200 is a
+    different matter and would need a login.
+    """
+    env = load_env()
+    port = env.get("PORT_QBITTORRENT_WEB", "8200")
+    info = api_get("qbittorrent",
+                   "http://localhost:%s/api/v2/transfer/info" % port)
+    if not isinstance(info, dict):
+        raise RuntimeError("qBittorrent did not answer")
+
+    for field, direction in (("dl_info_data", "download"),
+                             ("up_info_data", "upload")):
+        m.add("home_server_torrent_bytes_total", info.get(field),
+              {"direction": direction},
+              "Session traffic. Resets when the client restarts, which is what "
+              "a counter reset means and Prometheus already handles.", "counter")
+    for field, direction in (("dl_info_speed", "download"),
+                             ("up_info_speed", "upload")):
+        m.add("home_server_torrent_rate_bytes_per_second", info.get(field),
+              {"direction": direction}, "Current transfer rate.")
+    m.add("home_server_torrent_dht_nodes", info.get("dht_nodes"), None,
+          "DHT nodes known.")
+    m.add("home_server_torrent_connection_state",
+          {"connected": 0, "firewalled": 1}.get(
+              str(info.get("connection_status")), 2), None,
+          "0 connected, 1 firewalled, 2 disconnected. Firewalled means the "
+          "forwarded port and the listen port have drifted apart, which is "
+          "silent from every other angle.")
+
+    # THE PORT NUMBER IS THE VALUE, not a label. As a label it would be
+    # unbounded - ProtonVPN hands out a different one on every reconnect - and
+    # as a value the check that matters is one subtraction.
+    prefs = api_get("qbittorrent",
+                    "http://localhost:%s/api/v2/app/preferences" % port)
+    if isinstance(prefs, dict):
+        m.add("home_server_torrent_listen_port", prefs.get("listen_port"), None,
+              "The port qBittorrent is listening on. Compare with the port the "
+              "VPN is forwarding: if they differ, the client is unconnectable "
+              "and nothing else says so.")
+
+    forwarded = os.path.join(
+        os.environ.get("DOCKER_VOLUME_CONFIG", "/var/home-server/config"),
+        "gluetun", "forwarded_port")
+    port_value = read_int(forwarded)
+    m.add("home_server_vpn_forwarded_port", port_value, None,
+          "The port ProtonVPN is currently forwarding, as gluetun records it.")
+
+
+def source_tdarr(m):
+    """Tdarr's file table is the QUEUE, not a history.
+
+    filejsondb drains to zero by design: every library watches
+    library/queued/<type> only, and the flow moves output to transcoded/<type>,
+    outside every watched folder - so the folder watcher reaps each file as it
+    is promoted. A short table means the queue is empty, which is the goal, and
+    that is why this is a GAUGE. The durable history lives in jobsjsondb and is
+    deliberately not pulled here: getAll over thousands of rows every five
+    minutes would cost more than it tells anyone.
+    """
+    body = json.dumps({"data": {"collection": "FileJSONDB", "mode": "getAll"}})
+    try:
+        res = subprocess.run(
+            ["podman", "exec", "-i", "tdarr-server", "curl", "-s",
+             "--max-time", "10", "-X", "POST",
+             "-H", "Content-Type: application/json", "--data-binary", "@-",
+             "http://localhost:8266/api/v2/cruddb"],
+            input=body, capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError):
+        raise RuntimeError("tdarr did not answer")
+    if res.returncode != 0:
+        raise RuntimeError("tdarr returned %d" % res.returncode)
+    rows = json.loads(res.stdout)
+    if not isinstance(rows, list):
+        raise RuntimeError("unexpected cruddb response")
+
+    verdicts = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        verdict = str(row.get("TranscodeDecisionMaker") or "unknown").lower()
+        verdicts[verdict.replace(" ", "_")] = \
+            verdicts.get(verdict.replace(" ", "_"), 0) + 1
+    for verdict, count in sorted(verdicts.items()):
+        m.add("home_server_tdarr_queue_files", count, {"verdict": verdict},
+              "Files in Tdarr's library table, by its verdict. A GAUGE, and it "
+              "drains to zero by design - a file still here carrying a finished "
+              "verdict is one the flow abandoned.")
+    m.add("home_server_tdarr_queue_files_total", len(rows), None,
+          "Files Tdarr currently has in its library table.")
+
+
+# ------------------------------------------------------------------------------
 # The collector's own record
 # ------------------------------------------------------------------------------
 # There is deliberately no home_server_collector_up 1. A sample asserting
@@ -901,6 +1187,10 @@ SOURCES = (
     ("sensors", source_sensors, False),
     ("status", source_status, False),
     ("smart", source_smart, True),
+    ("arr", source_arr, True),
+    ("jellyfin", source_jellyfin, True),
+    ("torrent", source_torrent, True),
+    ("tdarr", source_tdarr, True),
 )
 
 
