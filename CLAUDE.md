@@ -1004,6 +1004,17 @@ secret can be written to disk in a public repository. `sops secrets/env.sops.env
 
 Conclusions from auditing the running host. Do not rediscover these:
 
+- **Two things bit during the 2026-08-15 rename, and both would bite again on any move of the
+  checkout.** The one-shot script that carried them has been deleted, so they live here:
+  - **A symlink from `/etc/greenboot/check/required.d/` into the checkout dangles the instant the
+    checkout moves.** A dangling entry there cannot be exec'd, so the next boot is RED and greenboot
+    rolls back a deployment that was never bad - and the reboot is inside the greenboot binary, so
+    no unit file hints at it. An *empty* `required.d` is green by default; a broken symlink in it is
+    not. Remove it before moving anything and restore it after.
+  - **Renaming a unit out from under a running timer leaves the OLD name in systemd's runtime state
+    as `not-found`/`failed`** - phantoms that nothing on disk explains, that `daemon-reload` does not
+    clear, and that `verify-host.sh` correctly counts as failed units for ever. Only
+    `systemctl --user reset-failed` clears them, and only once the new names are linked.
 - **The project was `media-stack` until 2026-08-15.** The checkout moved `/var/media-stack` ->
   `/var/home-server`, five timers and five services were renamed, `/var/lib/`, `/var/backups/` and
   `~/.cache/` followed, and `MEDIA_STACK_*` became `HOME_SERVER_*`. **Three things deliberately did
