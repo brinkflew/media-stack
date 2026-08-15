@@ -38,6 +38,16 @@
 #                       cache and zero stall - and names the five numbers that
 #                       settle it. Four of them have no cAdvisor metric at all.
 #
+# THE NAMING RULE, because half of what follows is somebody else's name and half
+# is ours. An upstream name is adopted ONLY where the semantics match exactly -
+# same quantity, same unit, same reset behaviour - so that this implementation
+# can be replaced without touching a dashboard. Where they only almost match, a
+# home_server_* name is minted instead: a wrong number under a right name is
+# undetectable from a dashboard, while a right number under an unfamiliar name
+# is merely inconvenient. The sharpest case is memory.high, which cAdvisor would
+# have called container_spec_memory_reservation_limit_bytes and which means
+# memory.low there - see the note at that metric.
+#
 # A DIAGNOSTIC MUST NEVER BREAK THE THING IT ANNOTATES. Every source is called
 # inside its own try/except with a subprocess timeout; one that fails drops its
 # own series, records itself in home_server_collector_source_up, and changes
@@ -299,6 +309,11 @@ def source_network(m):
 
 HEALTH_STATES = {"healthy": 0, "starting": 1, "unhealthy": 2}
 
+# The kernel's PSI vocabulary mapped onto cAdvisor's. They mean the same thing:
+# `some` is "at least one task was delayed", `full` is "every runnable task
+# was". Anything the kernel adds later is skipped rather than guessed at.
+PSI_LEVELS = {"some": "waiting", "full": "stalled"}
+
 
 def source_containers(m):
     raw = run(["podman", "ps", "--format", "json"], timeout=20)
@@ -333,8 +348,7 @@ def source_containers(m):
               labels, "Restart count as podman reports it. Resets when the "
               "container is recreated, which auto-update does nightly.",
               "counter")
-        m.add("home_server_container_start_time_seconds",
-              _started_at(c), labels,
+        m.add("container_start_time_seconds", _started_at(c), labels,
               "Unix timestamp the container started.")
 
         # duckdns, unpackerr and the pod's infra container define no
@@ -377,15 +391,40 @@ def _container_cgroup(m, labels, base):
     alone reproduces exactly the misdiagnosis CLAUDE.md already records.
     """
     stat = read_kv(os.path.join(base, "memory.stat"))
-    for key, metric, help_text in (
-            ("anon", "anon_bytes", "Anonymous memory - the actual working set."),
-            ("file", "file_bytes", "Page cache charged to this cgroup."),
-            ("inactive_file", "inactive_file_bytes",
-             "Cold, clean page cache. Reclaimable at essentially no cost, and "
-             "the difference between 'at its ceiling' and 'in trouble'."),
-            ("active_file", "active_file_bytes", "Recently used page cache.")):
-        m.add("home_server_container_memory_" + metric, stat.get(key), labels,
-              help_text)
+    current = read_int(os.path.join(base, "memory.current"))
+    inactive_file = stat.get("inactive_file")
+
+    # THE NUMBER THAT WOULD HAVE PREVENTED THE MISDIAGNOSIS, under the name the
+    # rest of the world already uses for it. Working set is what is genuinely
+    # resident: memory.current minus the cold, clean page cache the kernel can
+    # drop for nothing. Jellyfin reads ~0.66G here against a memory.current of
+    # 3.00G at a 3G ceiling - the same cgroup, the same instant, and the only
+    # one of the two numbers worth alerting on.
+    if current is not None and inactive_file is not None:
+        m.add("container_memory_working_set_bytes",
+              max(current - inactive_file, 0), labels,
+              "Memory usage minus inactive file cache - what is actually "
+              "resident and not free to reclaim. Alert on THIS, never on "
+              "container_memory_usage_bytes.")
+
+    # cAdvisor's names, adopted verbatim: same cgroup fields, same units, same
+    # meaning, so this implementation can be swapped out without touching a
+    # dashboard. The missing _bytes suffix on rss and cache is cAdvisor's wart
+    # rather than ours, and reproducing it faithfully is the whole point - a
+    # name that is ALMOST the upstream one is worse than either, because it
+    # breaks silently on the day something else serves it.
+    m.add("container_memory_rss", stat.get("anon"), labels,
+          "Anonymous memory - the actual working set.")
+    m.add("container_memory_cache", stat.get("file"), labels,
+          "Page cache charged to this cgroup.")
+
+    # No upstream equivalent, and load-bearing: the split between cold and warm
+    # cache is the difference between 'at its ceiling' and 'in trouble'.
+    m.add("home_server_container_memory_inactive_file_bytes", inactive_file,
+          labels,
+          "Cold, clean page cache. Reclaimable at essentially no cost.")
+    m.add("home_server_container_memory_active_file_bytes",
+          stat.get("active_file"), labels, "Recently used page cache.")
     for key, metric, help_text in (
             ("pgscan", "pgscan_total", "Pages scanned for reclaim."),
             ("pgsteal", "pgsteal_total",
@@ -397,20 +436,26 @@ def _container_cgroup(m, labels, base):
         m.add("home_server_container_memory_" + metric, stat.get(key), labels,
               help_text, "counter")
 
-    m.add("home_server_container_memory_current_bytes",
-          read_int(os.path.join(base, "memory.current")), labels,
-          "memory.current. MISLEADING ON ITS OWN - read it beside anon and "
-          "pressure, never instead of them.")
-    m.add("home_server_container_memory_peak_bytes",
+    m.add("container_memory_usage_bytes", current, labels,
+          "memory.current. MISLEADING ON ITS OWN - a cgroup doing file I/O sits "
+          "at its ceiling by design. Read container_memory_working_set_bytes.")
+    m.add("container_memory_max_usage_bytes",
           read_int(os.path.join(base, "memory.peak")), labels,
           "High-water mark since the cgroup was created.")
-    m.add("home_server_container_memory_high_bytes",
-          read_int(os.path.join(base, "memory.high")), labels,
-          "The MemoryHigh= throttle watermark. NOT memory.low, which is what "
-          "cAdvisor's reservation_limit metric reports.")
-    m.add("home_server_container_memory_max_bytes",
+    m.add("container_spec_memory_limit_bytes",
           read_int(os.path.join(base, "memory.max")), labels,
           "The MemoryMax= hard limit.")
+
+    # MINTED DELIBERATELY, and this is the sharpest case for the naming rule.
+    # cAdvisor's container_spec_memory_reservation_limit_bytes reads like the
+    # name for this and is NOT: it maps to memory.low, a reservation, where this
+    # is memory.high, a throttle watermark. Publishing MemoryHigh under that
+    # name would show a container pressed against a limit it is not at - the
+    # exact misdiagnosis container_memory_working_set_bytes exists to prevent,
+    # reintroduced through the label instead of the number.
+    m.add("home_server_container_memory_high_bytes",
+          read_int(os.path.join(base, "memory.high")), labels,
+          "The MemoryHigh= throttle watermark, NOT memory.low.")
 
     events = read_kv(os.path.join(base, "memory.events"))
     for key in ("high", "max", "oom", "oom_kill"):
@@ -422,39 +467,50 @@ def _container_cgroup(m, labels, base):
                   "doing file I/O always accumulates it. `oom_kill` is the one "
                   "that is unambiguous.", "counter")
 
+    # cAdvisor's PSI names, adopted verbatim. Note the vocabulary differs from
+    # the kernel's and means the same thing: PSI writes some/full, cAdvisor says
+    # waiting/stalled - some is "at least one task was delayed", full is "every
+    # runnable task was". The level therefore lives in the metric NAME here
+    # rather than in a label, which is what upstream does.
     for controller in ("cpu", "memory", "io"):
         for level, seconds in read_pressure(
                 os.path.join(base, "%s.pressure" % controller)).items():
-            pl = dict(labels)
-            pl["level"] = level
-            m.add("home_server_container_%s_pressure_stall_seconds_total"
-                  % controller, "%.6f" % seconds, pl,
+            if level not in PSI_LEVELS:
+                continue
+            m.add("container_pressure_%s_%s_seconds_total"
+                  % (controller, PSI_LEVELS[level]), "%.6f" % seconds, labels,
                   "PSI total stall. The arbiter: real starvation shows here, "
                   "and a cgroup merely holding cache does not.", "counter")
 
     cpu = read_kv(os.path.join(base, "cpu.stat"))
-    for key, metric in (("usage_usec", "usage"), ("user_usec", "user"),
-                        ("system_usec", "system"), ("nice_usec", "nice")):
+    for key, metric in (("usage_usec", "container_cpu_usage_seconds_total"),
+                        ("user_usec", "container_cpu_user_seconds_total"),
+                        ("system_usec", "container_cpu_system_seconds_total")):
         if key in cpu:
-            m.add("home_server_container_cpu_%s_seconds_total" % metric,
-                  "%.6f" % (cpu[key] / 1e6), labels,
-                  "CPU time. nice_usec is why `podman stats` showing Jellyfin "
-                  "near the top is trickplay, not usage.", "counter")
-    m.add("home_server_container_cpu_throttled_seconds_total",
+            m.add(metric, "%.6f" % (cpu[key] / 1e6), labels,
+                  "CPU time from cpu.stat.", "counter")
+    m.add("container_cpu_cfs_throttled_seconds_total",
           "%.6f" % (cpu["throttled_usec"] / 1e6) if "throttled_usec" in cpu
           else None, labels, "Time throttled against the CPU limit.", "counter")
+    # No upstream equivalent, and it is the one that explains this host: 92.5%
+    # of Jellyfin's CPU was nice_usec, which is why `podman stats` showing it
+    # near the top is trickplay extraction rather than anybody watching.
+    m.add("home_server_container_cpu_nice_seconds_total",
+          "%.6f" % (cpu["nice_usec"] / 1e6) if "nice_usec" in cpu else None,
+          labels, "CPU time spent at positive nice.", "counter")
 
     io = read_kv_io(os.path.join(base, "io.stat"))
     for device, counters in io.items():
         il = dict(labels)
         il["device"] = device
         for key, metric, help_text in (
-                ("rbytes", "read_bytes_total", "Bytes read from this device."),
-                ("wbytes", "write_bytes_total", "Bytes written to this device."),
-                ("rios", "reads_total", "Read operations."),
-                ("wios", "writes_total", "Write operations.")):
-            m.add("home_server_container_io_" + metric, counters.get(key), il,
-                  help_text, "counter")
+                ("rbytes", "container_fs_reads_bytes_total",
+                 "Bytes read from this device."),
+                ("wbytes", "container_fs_writes_bytes_total",
+                 "Bytes written to this device."),
+                ("rios", "container_fs_reads_total", "Read operations."),
+                ("wios", "container_fs_writes_total", "Write operations.")):
+            m.add(metric, counters.get(key), il, help_text, "counter")
 
     m.add("home_server_container_pids", read_int(os.path.join(base,
           "pids.current")), labels, "Processes in the cgroup.")
