@@ -1,0 +1,100 @@
+# ==============================================================================
+# Alertmanager: grouping, repetition and resolution
+# ------------------------------------------------------------------------------
+# Prometheus decides WHETHER a thing is true. This decides whether you are told
+# about it, how often, and when to say it stopped - which is the part that
+# determines whether an alerting channel is still being read in six months.
+#
+# WHY NOT A SCRIPT POLLING status.json, which would have been smaller. Three
+# behaviours would have had to be reinvented, and reinvented badly: grouping
+# (twenty checks failing at once is one event), repeat suppression (a condition
+# that stays true must not notify every 30 seconds), and resolution. The first
+# two are exactly what stops a channel becoming noise, and this repository has
+# already written down what happens to a signal nobody reads - see the
+# `journalctl -p err` entry in CLAUDE.md.
+#
+# :v0 IS A ROLLING MAJOR TAG DESPITE LOOKING LIKE A PIN. Alertmanager has been
+# pre-1.0 for its whole life; quay.io/prometheus/alertmanager:v0 tracks the
+# newest 0.x exactly as prometheus:v3 tracks the newest 3.x. Checked against the
+# registry rather than assumed, because a tag that silently never moves is
+# indistinguishable from one that does not exist.
+#
+# IT HAS NO PUBLIC ROUTE, and its own UI is therefore unreachable from a
+# browser. That is deliberate and it costs something: silences have to be
+# created with `podman exec`. The alternative was exposing it - or exposing the
+# bridge, which is what the notification's Silence button would require - and
+# neither is worth a second unauthenticated endpoint on a public address. See
+# ntfy-alertmanager.container.
+#
+# Image:  https://quay.io/repository/prometheus/alertmanager
+# See:    https://prometheus.io/docs/alerting/latest/alertmanager/
+# ==============================================================================
+
+[Unit]
+Description=Alertmanager
+
+[Container]
+Image=quay.io/prometheus/alertmanager:v0
+AutoUpdate=registry
+ContainerName=alertmanager
+Network=net-metrics.network
+
+# Container root IS core - see prometheus.container. Alertmanager writes its
+# notification log and silences into /alertmanager.
+User=0
+
+# Read-only and shared, so :z not :Z. The rendered password file lands in
+# config/ rather than here, because apps/ is tracked and a credential must not
+# be - so the two are mounted separately and only the second is writable state.
+Volume=/var/home-server/apps/alertmanager:/etc/alertmanager:z,ro
+Volume=${DOCKER_VOLUME_CONFIG}/alertmanager:/alertmanager:Z
+
+Environment=TZ=${TIMEZONE}
+
+# DELIBERATELY NO --web.external-url. Alertmanager would put it in the webhook
+# payload as the address the receiver should call back on, and there is no
+# hostname that resolves to this container - it has no public route. The bridge
+# therefore names `http://alertmanager:9093` in its own config instead, which
+# is the address that actually works from where it sits. Setting a URL that
+# nothing serves would be worse than setting none: it reads as configured.
+Exec=--config.file=/etc/alertmanager/alertmanager.yml \
+     --storage.path=/alertmanager \
+     --data.retention=120h \
+     --web.listen-address=0.0.0.0:9093
+
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:9093/-/healthy || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+# See sonarr.container. What this proves: the process is up and the config
+# parsed. What it does not: that a notification would actually be delivered.
+# Only a real alert proves that, which is why the deployment test fires one.
+HealthStartupCmd=wget -q -O /dev/null http://127.0.0.1:9093/-/healthy || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/alertmanager
+# NOT prefixed with `-`. Without this file Alertmanager starts perfectly well
+# and every webhook it sends is rejected 401 by the bridge - alerting that is
+# green at both ends and delivers nothing.
+ExecStartPre=/var/home-server/bin/render-template.py \
+             /var/home-server/apps/alertmanager/webhook.pw.template \
+             ${DOCKER_VOLUME_CONFIG}/alertmanager/webhook.pw
+Restart=always
+RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
+ReloadSignal=SIGHUP
+
+# A ceiling, not a tuning knob. This holds a handful of alerts and a
+# notification log; it is smaller than Prometheus by an order of magnitude.
+MemoryHigh=128M
+MemoryMax=256M
+
+[Install]
+WantedBy=default.target

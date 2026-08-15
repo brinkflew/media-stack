@@ -1,0 +1,92 @@
+# =============================================================================
+# Alertmanager routing
+# -----------------------------------------------------------------------------
+# Bind-mounted read-only into the container as a DIRECTORY, so a `git pull`
+# replacing this file does not leave the container holding a stale inode - the
+# same reason apps/caddy and apps/prometheus are mounted that way.
+#
+# NO ENVIRONMENT SUBSTITUTION HAPPENS IN THIS FILE. `${VAR}` is literal to
+# Alertmanager, exactly as it is to Prometheus. That is why the one secret here
+# is a password_FILE rather than a password: bin/render-template.py writes
+# config/alertmanager/webhook.pw from .env, and this file names the path.
+#
+# WHAT ALERTMANAGER IS FOR, given Prometheus already evaluates the rules. Three
+# things that a rule alone cannot do, and that a hand-rolled notifier would
+# have had to reinvent badly:
+#
+#   - grouping, so twenty checks failing at once is one notification
+#   - repeat_interval, so a condition that stays true does not notify every
+#     30 seconds until the channel is worthless
+#   - resolution, so you are told when it stops being true
+#
+# See:  https://prometheus.io/docs/alerting/latest/configuration/
+# =============================================================================
+
+global:
+  # How long after the last sample before a firing alert is called resolved.
+  # Prometheus sends a fresh notification every evaluation while an alert is
+  # active; if those stop arriving for this long, Alertmanager assumes it ended.
+  resolve_timeout: 5m
+
+route:
+  receiver: ntfy
+  # Grouped by what the alert IS, not by which check fired it. A backup going
+  # stale and its off-site copy going stale are one event and should arrive as
+  # one notification.
+  group_by: ["alertname"]
+  # Long enough to collect the rest of a cascade, short enough that the first
+  # notification is still prompt.
+  group_wait: 30s
+  group_interval: 5m
+  # THE NUMBER THAT DECIDES WHETHER THIS CHANNEL SURVIVES. Too short and a
+  # long-running condition trains you to swipe the notification away without
+  # reading it, which is worse than having no alerting at all - the same
+  # argument this repository already makes about `journalctl -p err`. Twelve
+  # hours means a warning you have chosen to live with costs two notifications
+  # a day.
+  repeat_interval: 12h
+
+  routes:
+    # Critical repeats sooner, because these are the ones where the cost of
+    # forgetting is real: no backup, a failing disk, a container down.
+    - matchers:
+        - severity = "critical"
+      receiver: ntfy
+      repeat_interval: 4h
+      group_wait: 10s
+
+receivers:
+  - name: ntfy
+    webhook_configs:
+      # ntfy has no native Alertmanager receiver and this is not a workaround
+      # for a missing feature - it is genuinely absent upstream, and every
+      # option in ntfy's own documentation is a third-party bridge. See
+      # stacks/infra/ntfy-alertmanager.container for why this one.
+      - url: http://ntfy-alertmanager:8080/
+        send_resolved: true
+        http_config:
+          basic_auth:
+            username: alertmanager
+            password_file: /etc/alertmanager/webhook.pw
+
+inhibit_rules:
+  # A critical and a warning about the same thing is one problem. Without this
+  # a filesystem crossing both thresholds notifies twice, and the second one
+  # tells you nothing the first did not.
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "instance"]
+
+  # THE ONE THAT MATTERS MOST, AND THE ONLY ONE THAT IS NOT OBVIOUS. Everything
+  # this host knows about itself arrives through node-exporter's textfile
+  # collector. If that target is down, every home_server_* series stops being
+  # scraped - so the rules that read them do not fire, they go SILENT, which
+  # looks identical to healthy. TargetDown is the alert that covers all of them
+  # at once, and it must not itself be drowned by whatever else notices.
+  - source_matchers:
+      - alertname = "TargetDown"
+    target_matchers:
+      - severity = "warning"
+    equal: ["instance"]

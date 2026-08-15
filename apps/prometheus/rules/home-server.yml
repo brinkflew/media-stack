@@ -1,0 +1,311 @@
+# =============================================================================
+# Alerting rules
+# -----------------------------------------------------------------------------
+# Loaded by apps/prometheus/prometheus.yml from the same read-only mount, so a
+# change deploys like everything else: commit, `git pull`,
+# `systemctl --user reload prometheus`. Check them BEFORE deploying - a
+# malformed file makes the reload fail and silently leaves the old rules
+# running, which is safe but is not what you asked for:
+#
+#   podman exec prometheus promtool check rules /etc/prometheus/rules/*.yml
+#
+# TWO CONVENTIONS HOLD THROUGHOUT.
+#
+# `severity` is critical or warning and nothing else. Alertmanager routes on
+# it, the bridge maps it to an ntfy priority, and a third value would silently
+# fall through to the default route at default priority - visible nowhere.
+#
+# EVERY ALERT NAMES WHAT TO DO, not just what is true. An alert whose whole
+# content is a metric name and a number costs the reader the entire diagnosis
+# at the moment they are least able to do it, and that is how a channel stops
+# being read. `summary` says what happened; `description` says where to look.
+# =============================================================================
+
+groups:
+  # ===========================================================================
+  # Who watches the watchman
+  # ---------------------------------------------------------------------------
+  # THIS GROUP IS NOT OPTIONAL AND IT IS FIRST FOR A REASON. Every rule below
+  # it reads a series that arrives through node-exporter's textfile collector.
+  # If the collector stops, or the scrape stops, those series simply stop
+  # existing - and a rule whose expression matches nothing does not fire. The
+  # whole battery goes quiet, and quiet is exactly what healthy looks like.
+  #
+  # This is the same trap bin/verify-host.sh documents about its own timer, and
+  # the same one behind the deliberate absence of a `home_server_collector_up 1`
+  # sample: a metric that asserts liveness can only be written by something
+  # alive, so it reads green for ever after the writer dies.
+  # ===========================================================================
+  - name: pipeline
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
+          description: >-
+            Every home_server_* series arrives through node-exporter. While
+            this is down the rest of these rules cannot fire at all, so treat
+            silence from them as unknown rather than healthy.
+            `systemctl --user status node-exporter prometheus`.
+
+      - alert: MetricsCollectorStale
+        # The collector runs every 30s and stamps its own success into the
+        # textfile it produces, so the last value present is by construction
+        # the last success. 10 minutes is twenty missed runs.
+        expr: time() - home_server_metrics_last_ok_timestamp_seconds > 600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "bin/collect-metrics.py has not succeeded for 10 minutes"
+          description: >-
+            node-exporter is still up, so host vitals continue - but every
+            home_server_* series is frozen at its last value, which on a graph
+            is indistinguishable from a stable system.
+            `journalctl --user -u home-server-metrics -n 50`.
+
+      - alert: VerifyBatteryStale
+        # Hourly timer; two hours is one missed run plus margin.
+        expr: time() - home_server_verify_last_run_timestamp_seconds > 7200
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The health battery has not run for two hours"
+          description: >-
+            home_server_check_status is frozen, so CheckFailing below cannot
+            fire on anything new. `systemctl --user status home-server-verify`.
+
+      - alert: AlertDeliveryFailing
+        # Prometheus failing to hand alerts to Alertmanager. NOTE WHAT THIS
+        # CANNOT DO: if the delivery path is broken, this alert cannot reach
+        # the phone either. It fires so that it is recorded and so that it
+        # arrives the moment delivery recovers; the channel that actually
+        # covers a dead notifier is the MOTD and container health.
+        expr: increase(prometheus_notifications_errors_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot deliver alerts to Alertmanager"
+          description: >-
+            Alerts are being evaluated and dropped. Nothing else in this file
+            can reach you while it is true. Check alertmanager, then
+            ntfy-alertmanager, then ntfy - in that order, it is the direction
+            the alert travels.
+
+  # ===========================================================================
+  # The battery
+  # ===========================================================================
+  - name: battery
+    rules:
+      - alert: CheckFailing
+        # ONE RULE COVERS ALL 64 CHECKS AND EVERY FUTURE ONE, because a new
+        # check joins home_server_check_status automatically. The id label is
+        # stable by charter - bin/verify-host.sh guarantees it and lint-repo.sh
+        # asserts uniqueness - while the prose is explicitly not, which is why
+        # this alerts on the id and sends the reader to the message rather than
+        # trying to carry it.
+        expr: home_server_check_status == 3
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Health check {{ $labels.id }} is FAILING"
+          description: >-
+            Section {{ $labels.section }}. The wording lives in status.json,
+            not here: `jq -r '.checks[]|select(.id=="{{ $labels.id }}")'
+            /var/lib/home-server/status.json`.
+
+  # ===========================================================================
+  # Units and containers
+  # ===========================================================================
+  - name: containers
+    rules:
+      - alert: ContainerUnhealthy
+        # 0 healthy, 1 starting, 2 unhealthy - and ABSENT where no health check
+        # is defined, which is what stops duckdns and unpackerr firing this for
+        # ever. Those two serve no HTTP and report no health, and a rule that
+        # assumed every container has a status would call them broken
+        # permanently. CLAUDE.md names that mistake explicitly.
+        expr: home_server_container_health == 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Container {{ $labels.container }} is unhealthy"
+          description: >-
+            It is running but failing its own health check, so systemd still
+            calls the unit active. `podman inspect {{ $labels.container }}
+            --format '{{ "{{" }}json .State.Health{{ "}}" }}'` keeps the last
+            five results with their output.
+
+      - alert: ContainerRestartLoop
+        expr: increase(home_server_container_restarts_total[1h]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.container }} has restarted repeatedly"
+          description: >-
+            A unit stuck restarting is usually Restart=always plus a failure at
+            startup, not slow progress. Read the journal rather than waiting -
+            the real error scrolls past between restarts.
+
+  # ===========================================================================
+  # Backups
+  # ---------------------------------------------------------------------------
+  # The thresholds match bin/verify-host.sh deliberately. Two sources of truth
+  # disagreeing about when a backup is stale is worse than either alone.
+  # ===========================================================================
+  - name: backups
+    rules:
+      - alert: BackupStale
+        expr: time() - home_server_backup_local_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The local backup is more than 48 hours old"
+          description: >-
+            config/ is the only part of this system that cannot be rebuilt from
+            git. `journalctl --user -u home-server-backup -n 50`.
+
+      - alert: BackupOffsiteStale
+        expr: time() - home_server_backup_offsite_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The off-site backup is more than 48 hours old"
+          description: >-
+            The local copy shares a disk with config/ and does not survive it.
+            This is the copy that survives the machine.
+
+      - alert: BackupPolicyProofStale
+        # NOT "the policy is broken" - "we have not proved it is intact". The
+        # nightly probe records a marker only on a CONFIRMED refusal, so a
+        # timeout or a DNS failure leaves the old marker rather than claiming
+        # either outcome. One unreachable night reads as stale; a real
+        # regression surfaces on the second.
+        expr: time() - home_server_backup_offsite_policy_ok_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The append-only backup policy has not been proved for 48 hours"
+          description: >-
+            The nightly probe writes a 0-byte object outside locks/ and expects
+            the delete to be refused. This does not mean the policy failed - it
+            means it has not been confirmed. A policy that silently stops
+            working looks exactly like one that works.
+
+      - alert: BackupTsdbSnapshotStale
+        expr: time() - home_server_backup_tsdb_snapshot_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The metrics store has not been snapshotted for 48 hours"
+          description: >-
+            Only the metrics history is at risk, not config/ - hence warning.
+            A live TSDB cannot be rsynced, so this snapshot is the only way it
+            reaches the backup.
+
+  # ===========================================================================
+  # Degradation
+  # ---------------------------------------------------------------------------
+  # Everything here is a warning, and the thresholds are deliberately slack.
+  # These conditions are real but slow, and several of them flap - an indexer
+  # or a subtitle provider backing off for an hour is ordinary. The failure
+  # mode being designed against is not missing one, it is sending enough of
+  # them that the critical ones stop being read.
+  # ===========================================================================
+  - name: degradation
+    rules:
+      - alert: SubtitleProvidersAllDown
+        # NOT per-provider. Any single provider throttling is routine - a free
+        # daily quota runs out most days. The condition that actually matters
+        # is that none is usable, which is the state Bazarr was in for months
+        # with one provider configured, logging "All providers are throttled"
+        # while every container stayed healthy.
+        expr: sum(home_server_subtitle_provider_up) == 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Every subtitle provider is unusable"
+          description: >-
+            Bazarr is doing nothing at all, not working slowly. Usually a
+            provider quota; check for "All providers are throttled" in
+            config/bazarr/log/bazarr.log and consider enabling another.
+
+      - alert: IndexersMostlyDown
+        # Threshold rather than any-indexer, for the reason above. Individual
+        # indexers back off constantly and most of the causes are somebody
+        # else's site being down.
+        expr: >-
+          sum(home_server_indexer_up) / count(home_server_indexer_up) < 0.5
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than half of the indexers are backing off"
+          description: >-
+            Searching is degraded while everything looks healthy - this signal
+            exists precisely because nothing else shows it. Read the Prowlarr
+            log before assuming a local cause; measured on 2026-08-15 the
+            causes were a dead mirror, duplicate entries and two sites down.
+
+      - alert: FilesystemFillingUp
+        expr: >-
+          node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.mountpoint }} is below 10% free"
+          description: >-
+            /var carries the OS, the checkout, config/ and /var/backups on one
+            233 GB partition. /boot is 350 MB and cannot be grown - if that is
+            the one filling, check for a pinned deployment first.
+
+      - alert: FilesystemAlmostFull
+        expr: >-
+          node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.mountpoint }} is below 5% free"
+          description: >-
+            At this point the backup, the metrics store and the databases are
+            all at risk of a write failure.
+
+      - alert: DiskHealthFailing
+        # SMART's own overall verdict. It is conservative to the point of being
+        # late, so a zero here is never a false alarm.
+        expr: home_server_disk_health_ok == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SMART reports {{ $labels.device }} as failing"
+          description: >-
+            /mnt/media has no redundancy and is deliberately not backed up. If
+            this is nvme0 it carries config/ and the local backup, and the
+            off-site copy is the one that matters.
+
+      - alert: GpuHot
+        expr: home_server_gpu_temperature_celsius > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU {{ $labels.gpu }} has been over 85C for 15 minutes"
+          description: >-
+            Sustained rather than a transcode spike. Check airflow and whether
+            two NVENC sessions are running against a queue that is not draining.

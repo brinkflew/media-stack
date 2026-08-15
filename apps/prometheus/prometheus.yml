@@ -28,6 +28,25 @@ global:
   # store smaller than config/. See CLAUDE.md, "Logs and status".
   scrape_interval: 30s
   scrape_timeout: 10s
+  # How often the rules below are evaluated. Deliberately equal to the scrape
+  # interval: evaluating faster than the data arrives only re-reads the same
+  # sample, and evaluating slower delays every `for:` clause by an unpredictable
+  # amount.
+  evaluation_interval: 30s
+
+# Loaded from the same read-only mount as this file, so a rule change deploys
+# the same way everything else here does - commit, `git pull`,
+# `systemctl --user reload prometheus`. A malformed rule file makes the reload
+# FAIL and leaves the previous rules running, which is the behaviour you want:
+# check `promtool check rules` before deploying, and read the reload's exit
+# code rather than assuming.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
 
 scrape_configs:
   # Prometheus watching itself is not a liveness check - if it is down, nothing

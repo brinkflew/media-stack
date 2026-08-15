@@ -1,0 +1,106 @@
+# =============================================================================
+# ntfy-alertmanager - A TEMPLATE, NOT THE FILE THE BRIDGE READS
+# -----------------------------------------------------------------------------
+# bin/render-template.py substitutes ${...} from .env and writes the result to
+# config/ntfy-alertmanager/config, from an ExecStartPre= on the quadlet.
+# Editing the rendered copy on the server is pointless: it is overwritten on
+# every start.
+#
+# scfg, not YAML. It is the format this program reads; the syntax is
+# `key value` and `block { ... }`, and a value containing spaces is quoted.
+#
+# See:  https://git.xenrox.net/~xenrox/ntfy-alertmanager/tree/master/item/config.scfg
+# =============================================================================
+
+# The default is 127.0.0.1:8080, which inside a container means Alertmanager
+# cannot reach it at all - the connection is refused and every notification is
+# silently lost. Binding all interfaces is safe here because the container
+# publishes no port and net-metrics is isolate=true.
+http-address :8080
+log-level info
+
+# ONE NOTIFICATION PER ALERT rather than one per Alertmanager group. Grouping
+# already happened upstream; what this buys is that each notification carries
+# its own alert's labels, which is what makes the source button and the
+# per-alert cache work. In multi mode both degrade to whatever the alerts have
+# in common.
+alert-mode single
+
+# HTTP basic auth on the webhook endpoint. Both ends are on net-metrics and
+# neither is published, so this is defence in depth rather than the barrier -
+# but "nothing else is on this segment" is a property that changes the day
+# someone adds a container, and this does not.
+user alertmanager
+password ${ALERT_WEBHOOK_PASSWORD}
+
+# SEVERITY BECOMES ntfy PRIORITY, which is the whole reason this bridge is here
+# rather than Alertmanager mailing ntfy's built-in SMTP server. Priority 5 is
+# ntfy's max: it bypasses Do Not Disturb on the phone. Priority 3 is default -
+# it notifies without insisting.
+labels {
+	order "severity"
+
+	severity "critical" {
+		priority 5
+		tags "rotating_light"
+	}
+
+	severity "warning" {
+		priority 3
+		tags "warning"
+	}
+}
+
+# Being told it stopped is half the value. update-notification replaces the
+# original notification rather than adding a second one, so a resolved alert
+# does not leave a stale red line in the notification shade.
+resolved {
+	update-notification true
+	tags "white_check_mark"
+	priority 2
+}
+
+ntfy {
+	# Over the shared network by container name, never through the public
+	# hostname. A container reaching another container through the front door
+	# is always a mistake here - it is slower, it depends on NAT hairpinning,
+	# and in this particular case it would make alerting depend on the very
+	# ingress an alert might be telling you is broken.
+	server http://ntfy:80
+	topic home-server
+
+	# The write-only account. It cannot read the topic back, which is the
+	# least privilege a publisher can hold.
+	user alertmanager
+	password ${NTFY_ALERT_PASSWORD}
+
+	markdown true
+
+	# A button that opens the alert's own Prometheus query. It works without
+	# exposing anything, because it opens metrics.avanserv.com in a real
+	# browser, where sign-on can complete normally.
+	generator-url-label "Prometheus"
+}
+
+alertmanager {
+	# NO silence-duration, AND THEREFORE NO SILENCE BUTTON. That feature works
+	# by proxying the silence request back through THIS service, so it needs
+	# base-url set and this container exposed to the internet. That would be a
+	# second unauthenticated public endpoint, and the trade is not obviously
+	# worth it for a convenience - silences can be created with
+	# `podman exec alertmanager amtool`. Enabling it later means adding
+	# base-url, silence-duration, and a Caddyfile block.
+	#
+	# The URL is stated because Alertmanager sets no --web.external-url, so
+	# there is nothing in the webhook payload for the bridge to parse.
+	url http://alertmanager:9093
+}
+
+# alert-mode single sends one notification per alert per Alertmanager
+# notification, and Alertmanager re-sends while an alert stays firing. Without
+# this cache every repeat would arrive again at the phone.
+cache {
+	type memory
+	duration 24h
+	cleanup-interval 1h
+}

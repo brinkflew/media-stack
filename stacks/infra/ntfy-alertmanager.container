@@ -1,0 +1,96 @@
+# ==============================================================================
+# ntfy-alertmanager: the one piece of glue nobody upstream provides
+# ------------------------------------------------------------------------------
+# Alertmanager speaks its own webhook JSON. ntfy publishes whatever body it is
+# POSTed. The two do not meet, and that is not an oversight anyone is about to
+# fix: ntfy's own documentation lists four third-party bridges and no native
+# receiver. This translates one into the other, and maps severity onto ntfy
+# priority on the way - which is the reason it exists rather than pointing
+# Alertmanager's email receiver at ntfy's built-in SMTP server. That route
+# needs no third container and no third-party image, but every alert arrives at
+# the same priority, so a failing disk buzzes exactly like a warm GPU.
+#
+# THIS IS THE ONLY IMAGE HERE WITH NO ROLLING MAJOR TAG, and that objection is
+# the same one that ruled out VictoriaMetrics for the metrics store. It is
+# accepted here for a reason that did not apply there:
+#
+#   - VictoriaMetrics would have held every byte of history, so a bad
+#     unattended update risked the retention window. This holds NOTHING. It is
+#     stateless glue with an in-memory cache; a bad update costs a restart.
+#   - Notify=healthy below is what makes the rollback real rather than
+#     decorative. The image has a shell and wget, checked rather than assumed -
+#     several distroless exporters have neither, which silently costs them the
+#     health check and therefore the rollback.
+#
+# It is nonetheless the weakest link in the chain by supply-chain standards: a
+# single maintainer, :latest, and it holds the credential that publishes to
+# your phone. It reaches nothing else - net-metrics is isolate=true and this
+# container joins no other segment - and the credential it holds is write-only
+# on one topic.
+#
+# THE FAILURE MODE TO WATCH FOR is silence, not an error. If this container is
+# down, Alertmanager records a failed notification and retries, Prometheus
+# keeps evaluating, every unit stays healthy, and nothing arrives. That is what
+# the AlertPipelineDown rule in apps/prometheus/rules/ is for - and why
+# alerting must never be the only thing watching alerting.
+#
+# Image:  https://hub.docker.com/r/xenrox/ntfy-alertmanager
+# See:    https://hub.xenrox.net/~xenrox/ntfy-alertmanager/
+# ==============================================================================
+
+[Unit]
+Description=ntfy-alertmanager bridge
+
+[Container]
+Image=docker.io/xenrox/ntfy-alertmanager:latest
+AutoUpdate=registry
+ContainerName=ntfy-alertmanager
+Network=net-metrics.network
+
+# Container root IS core - see prometheus.container. This one writes nothing,
+# but the rendered config it reads is 0600 and owned by core, so anything else
+# maps into the subuid range and cannot open it.
+User=0
+
+Volume=${DOCKER_VOLUME_CONFIG}/ntfy-alertmanager:/etc/ntfy-alertmanager:Z
+
+Environment=TZ=${TIMEZONE}
+
+Exec=--config /etc/ntfy-alertmanager/config
+
+# A 401 IS THE HEALTHY ANSWER, and asserting it proves more than a 200 would.
+# The service exposes only the webhook endpoint, so there is nothing to GET
+# successfully - but a 401 proves the process is up, the config parsed AND that
+# basic auth is switched on. A check that accepted any response would go green
+# against a bridge that had silently lost its credentials.
+HealthCmd=wget -S -q -O /dev/null http://127.0.0.1:8080/ 2>&1 | grep -q " 401 " || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+HealthStartupCmd=wget -S -q -O /dev/null http://127.0.0.1:8080/ 2>&1 | grep -q " 401 " || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/ntfy-alertmanager
+# NOT prefixed with `-`. The rendered file holds both credentials; without it
+# the bridge starts, rejects every webhook, and delivers nothing.
+ExecStartPre=/var/home-server/bin/render-template.py \
+             /var/home-server/apps/ntfy-alertmanager/config.scfg \
+             ${DOCKER_VOLUME_CONFIG}/ntfy-alertmanager/config
+Restart=always
+RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
+
+# A ceiling, not a tuning knob. This is a small Go binary holding a map of
+# recently-sent alerts.
+MemoryHigh=64M
+MemoryMax=128M
+
+[Install]
+WantedBy=default.target
