@@ -57,9 +57,12 @@
 # Usage:
 #   bin/collect-metrics.py            collect and write   (what the timer runs)
 #   bin/collect-metrics.py --print    collect, print to stdout, write nothing
-#   bin/collect-metrics.py --source containers   one source only
+#   bin/collect-metrics.py --slow     force the 5-minute tier this run
+#   bin/collect-metrics.py --source smart        one source only, tier ignored
 # ==============================================================================
 
+import calendar
+import glob
 import json
 import os
 import subprocess
@@ -68,6 +71,7 @@ import time
 
 CACHE = os.environ.get("DOCKER_VOLUME_CACHE", "/var/home-server/cache")
 TEXTFILE = os.path.join(CACHE, "textfile", "home-server.prom")
+TEXTFILE_SLOW = os.path.join(CACHE, "textfile", "home-server-slow.prom")
 MARKER = os.path.expanduser("~/.cache/home-server/metrics-state")
 
 # The cgroup root the user manager delegates. `io` is NOT delegated by default -
@@ -555,6 +559,308 @@ def _devname(devno):
 
 
 # ------------------------------------------------------------------------------
+# GPU
+# ------------------------------------------------------------------------------
+# Minted names, deliberately. There is no upstream standard for the field that
+# matters most on this host - utilization.encoder - so there is nothing to be
+# portable TO, and DCGM's names (SCREAMING_CASE, no unit suffix, framebuffer in
+# MiB) would import a contradictory convention permanently.
+#
+# THE ENGINE IS A LABEL, NOT FOUR METRICS, and that is the point: two NVENC
+# sessions pin the encoder block at 100% while the SM sits at 10%, so anyone
+# reading utilization.gpu alone sees an idle GPU mid-transcode. Putting them on
+# one metric makes reading them side by side the easy query.
+#
+# NEVER AGGREGATE ACROSS CARDS. GPU 0's video engines are dead hardware - every
+# NVENC session on it fails with "unsupported device", which jellyfin.container
+# documents - so a sum over both cards reads 50% during a full-rate encode.
+
+GPU_FIELDS = ("index", "uuid", "name", "utilization.gpu", "utilization.memory",
+              "utilization.encoder", "utilization.decoder", "memory.total",
+              "memory.used", "temperature.gpu", "power.draw", "power.limit",
+              "clocks.current.sm", "clocks.current.memory", "fan.speed",
+              "encoder.stats.sessionCount", "encoder.stats.averageFps",
+              "encoder.stats.averageLatency", "driver_version")
+
+
+def _num(raw):
+    """A CSV cell as a float, or None. nvidia-smi writes [N/A] for a field a
+    card does not support, and one unsupported field must drop its own series
+    rather than the whole row."""
+    try:
+        return float(raw.strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def source_gpu(m):
+    out = run(["nvidia-smi", "--query-gpu=" + ",".join(GPU_FIELDS),
+               "--format=csv,noheader,nounits"], timeout=8)
+    if out is None:
+        # NOTHING is emitted, never a fabricated zero. A zero here would read as
+        # "no transcode running" on a host whose driver has just gone, which is
+        # the opposite of the truth and worse than a blank panel. Same doctrine
+        # as bin/reboot-when-staged.sh: unknown is not idle.
+        raise RuntimeError("nvidia-smi failed")
+
+    for line in out.strip().splitlines():
+        f = [c.strip() for c in line.split(",")]
+        if len(f) != len(GPU_FIELDS):
+            continue
+        row = dict(zip(GPU_FIELDS, f))
+        labels = {"gpu": row["index"], "uuid": row["uuid"]}
+
+        m.add("home_server_gpu_info", 1,
+              {"gpu": row["index"], "uuid": row["uuid"], "name": row["name"],
+               "driver_version": row["driver_version"]},
+              "GPU identity. The driver version lives here and nowhere else.")
+
+        for field, engine in (("utilization.gpu", "sm"),
+                              ("utilization.encoder", "encoder"),
+                              ("utilization.decoder", "decoder"),
+                              ("utilization.memory", "memory_bandwidth")):
+            value = _num(row[field])
+            if value is not None:
+                el = dict(labels)
+                el["engine"] = engine
+                m.add("home_server_gpu_utilization_ratio", value / 100.0, el,
+                      "Engine utilisation, 0-1. engine=encoder is the one this "
+                      "host runs on; engine=sm is near-idle during a transcode "
+                      "and reading it alone is misleading. memory_bandwidth is "
+                      "time spent moving memory, NOT memory used.")
+
+        for field, metric, scale, help_text in (
+                ("memory.used", "home_server_gpu_memory_used_bytes", 1 << 20,
+                 "Framebuffer in use, in bytes rather than MiB."),
+                ("memory.total", "home_server_gpu_memory_total_bytes", 1 << 20,
+                 "Framebuffer size."),
+                ("temperature.gpu", "home_server_gpu_temperature_celsius", 1,
+                 "Core temperature."),
+                ("power.draw", "home_server_gpu_power_watts", 1,
+                 "Current board power draw."),
+                ("power.limit", "home_server_gpu_power_limit_watts", 1,
+                 "Board power cap."),
+                ("fan.speed", "home_server_gpu_fan_speed_ratio", 0.01,
+                 "Fan speed, 0-1."),
+                ("encoder.stats.sessionCount",
+                 "home_server_gpu_encoder_sessions", 1,
+                 "Active NVENC sessions. The consumer ceiling is 8, but two "
+                 "already pin the encoder block at 100%."),
+                ("encoder.stats.averageFps", "home_server_gpu_encoder_fps", 1,
+                 "Average frames per second across encoder sessions."),
+                ("encoder.stats.averageLatency",
+                 "home_server_gpu_encoder_latency_seconds", 1e-6,
+                 "Average encoder latency, converted from microseconds.")):
+            value = _num(row[field])
+            if value is not None:
+                m.add(metric, value * scale, labels, help_text)
+
+        for field, domain in (("clocks.current.sm", "sm"),
+                              ("clocks.current.memory", "memory")):
+            value = _num(row[field])
+            if value is not None:
+                cl = dict(labels)
+                cl["domain"] = domain
+                m.add("home_server_gpu_clock_hertz", value * 1e6, cl,
+                      "Current clock, converted from MHz.")
+
+
+# ------------------------------------------------------------------------------
+# Temperatures
+# ------------------------------------------------------------------------------
+# Read straight out of sysfs rather than by shelling out to `sensors -j`: no
+# fork, and no dependence on lm_sensors' JSON schema staying put.
+#
+# Minted rather than taking node_exporter's node_hwmon_temp_celsius, because
+# that one uses a SLUGIFIED SYSFS PATH as its chip label rather than the chip
+# name, and we would not reproduce that faithfully. A name that is almost the
+# upstream one is the failure this whole naming rule exists to avoid.
+
+def source_sensors(m):
+    found = 0
+    for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            chip = read_text(os.path.join(hwmon, "name")).strip()
+        except OSError:
+            continue
+        for path in sorted(glob.glob(os.path.join(hwmon, "temp*_input"))):
+            sensor = os.path.basename(path)[:-len("_input")]
+            millidegrees = read_int(path)
+            if millidegrees is None:
+                continue
+            labels = {"chip": chip, "sensor": sensor}
+            try:
+                labels["label"] = read_text(
+                    os.path.join(hwmon, sensor + "_label")).strip()
+            except OSError:
+                labels["label"] = sensor
+            m.add("home_server_hwmon_temp_celsius", millidegrees / 1000.0,
+                  labels, "Temperature from /sys/class/hwmon.")
+            found += 1
+    if not found:
+        raise RuntimeError("no hwmon temperatures found")
+
+
+# ------------------------------------------------------------------------------
+# Disk health - the SLOW tier
+# ------------------------------------------------------------------------------
+# -n standby is what stops a monitoring job waking a sleeping spindle every five
+# minutes. smartctl exits 2 in that case, which means "asleep" and not "broken";
+# run() already returns None on a non-zero exit, so it degrades to no series.
+
+def source_smart(m):
+    devices = [d for d in ("/dev/sda", "/dev/nvme0") if os.path.exists(d)]
+    if not devices:
+        raise RuntimeError("no SMART-capable devices")
+    for dev in devices:
+        out = run(["sudo", "-n", "smartctl", "-j", "-n", "standby", "-A", "-H",
+                   dev], timeout=20)
+        if out is None:
+            continue
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError:
+            continue
+        name = os.path.basename(dev)
+        labels = {"device": name}
+        m.add("home_server_disk_info", 1,
+              {"device": name, "model": data.get("model_name", ""),
+               "firmware": data.get("firmware_version", "")},
+              "Disk identity. The serial is deliberately not carried.")
+        passed = data.get("smart_status", {}).get("passed")
+        if passed is not None:
+            m.add("home_server_disk_health_ok", 1 if passed else 0, labels,
+                  "SMART overall-health self-assessment.")
+        temp = data.get("temperature", {}).get("current")
+        if temp is not None:
+            m.add("home_server_disk_temperature_celsius", temp, labels,
+                  "Drive temperature.")
+        hours = data.get("power_on_time", {}).get("hours")
+        if hours is not None:
+            m.add("home_server_disk_power_on_hours", hours, labels,
+                  "Powered-on hours.", "counter")
+        nvme = data.get("nvme_smart_health_information_log")
+        if nvme:
+            for key, metric, help_text in (
+                    ("percentage_used", "home_server_disk_nvme_wear_ratio",
+                     "Endurance consumed, 0-1 where 1 is the rated life."),
+                    ("media_errors", "home_server_disk_media_errors_total",
+                     "Unrecovered data integrity errors."),
+                    ("unsafe_shutdowns", "home_server_disk_unsafe_shutdowns_total",
+                     "Power lost without a clean shutdown.")):
+                value = nvme.get(key)
+                if value is not None:
+                    m.add(metric, value / 100.0 if key == "percentage_used"
+                          else value, labels, help_text,
+                          "gauge" if key == "percentage_used" else "counter")
+        for attr in (data.get("ata_smart_attributes", {}).get("table") or []):
+            table = {5: ("home_server_disk_reallocated_sectors",
+                         "Sectors the drive has remapped."),
+                     197: ("home_server_disk_pending_sectors",
+                           "Sectors waiting to be remapped - the leading "
+                           "indicator of a failing spindle."),
+                     199: ("home_server_disk_crc_errors_total",
+                           "Interface CRC errors, usually a cable.")}
+            entry = table.get(attr.get("id"))
+            if entry:
+                m.add(entry[0], attr.get("raw", {}).get("value"), labels,
+                      entry[1])
+
+
+# ------------------------------------------------------------------------------
+# status.json as series
+# ------------------------------------------------------------------------------
+# The hourly battery already keys every finding by a stable id. This turns those
+# into time series so "when did that start failing" becomes answerable, without
+# duplicating the document badly.
+#
+# THE ORDERED SEVERITY ORDINAL IS THE WHOLE DESIGN. max(home_server_check_status)
+# is the entire system's verdict, because the ordering IS the precedence - which
+# is the time-series translation of status.json's own guarantee that summary
+# .status is one field to colour on and nobody re-derives precedence.
+#
+# THE MESSAGE IS NEVER EMITTED. Prose is unstable by charter here, and a label
+# carrying it would mint a fresh series on every reword and leave the old one
+# lingering for the whole retention period. The dashboard fetches the sentence
+# from status.json at render time, keyed by the same id it queried with. That is
+# the id/prose split, drawn along the boundary between the two stores.
+
+STATUS_FILE = "/var/lib/home-server/status.json"
+CHECK_STATUS = {"pass": 0, "note": 1, "warn": 2, "fail": 3}
+GREENBOOT_STATES = {"green": 0, "red": 1}
+# Facts whose value is a version or a word rather than a number. They become
+# labels on one info series, so a new OS version costs one series a month
+# instead of one per sample.
+FACT_INFO_KEYS = ("booted_version", "staged_version", "driver_version")
+
+
+def _epoch(stamp):
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def source_status(m):
+    doc = json.loads(read_text(STATUS_FILE))
+
+    for check in doc.get("checks", []):
+        value = CHECK_STATUS.get(check.get("status"))
+        if value is None:
+            continue
+        m.add("home_server_check_status", value,
+              {"id": check.get("id", ""), "section": check.get("section", "")},
+              "0 pass, 1 note, 2 warn, 3 fail. Ordered by severity, so "
+              "max() over it is the whole system's verdict and no consumer "
+              "re-derives precedence. A check that did not run is ABSENT.")
+
+    m.add("home_server_status_generated_timestamp_seconds",
+          _epoch(doc.get("generated_at")), None,
+          "When the battery last ran. A TIMESTAMP, not an age: the consumer "
+          "subtracts from time(), so a stopped timer shows as staleness rather "
+          "than freezing at its last value.")
+    m.add("home_server_status_schema", doc.get("schema"), None,
+          "status.json's own schema version.")
+    for mode, on in (doc.get("mode") or {}).items():
+        m.add("home_server_status_mode", 1 if on else 0, {"mode": mode},
+              "Which optional sections ran. Absence of a section and a section "
+              "that passed must not look alike.")
+
+    facts = doc.get("facts") or {}
+    info = {k: str(facts.get(k) or "") for k in FACT_INFO_KEYS}
+    m.add("home_server_status_info", 1, info,
+          "Version strings from the battery's facts, joined rather than "
+          "repeated per sample.")
+    m.add("home_server_greenboot_result",
+          GREENBOOT_STATES.get(facts.get("greenboot_result")), None,
+          "0 green, 1 red. Absent when no verdict has been recorded.")
+
+    for key, value in facts.items():
+        if key in FACT_INFO_KEYS or key == "greenboot_result":
+            continue
+        if value is None:
+            # A null fact is ABSENT, never zero. The substrates fail in opposite
+            # directions - a JSON key that vanishes makes a reader guess, while
+            # a zero in a TSDB reads as a measurement - so the same goal
+            # produces opposite encodings, and this is the TSDB's.
+            continue
+        if isinstance(value, bool):
+            m.add("home_server_" + key, 1 if value else 0, None,
+                  "From status.json facts.")
+        elif isinstance(value, (int, float)):
+            # _mb in a name is a permanent wart; base units only.
+            if key.endswith("_mb"):
+                m.add("home_server_%s_bytes" % key[:-3], value * (1 << 20),
+                      None, "From status.json facts, converted to bytes.")
+            else:
+                m.add("home_server_" + key, value, None,
+                      "From status.json facts.")
+        elif key.endswith("_at"):
+            m.add("home_server_%s_timestamp_seconds" % key[:-3], _epoch(value),
+                  None, "From status.json facts, as a unix timestamp.")
+
+
+# ------------------------------------------------------------------------------
 # The collector's own record
 # ------------------------------------------------------------------------------
 # There is deliberately no home_server_collector_up 1. A sample asserting
@@ -564,11 +870,45 @@ def _devname(devno):
 # replaced, so the last value present is by construction the last success - and
 # node_textfile_mtime_seconds says the same thing from outside.
 
+# (name, function, slow). A slow source runs every 5 minutes rather than every
+# tick, because its cost is real: smartctl talks to the drive, and the
+# application sources fork a process inside the container being measured.
+#
+# Tier selection is `int(time.time()) % 300 < 30` - wall-clock modulo, so it is
+# stateless, cannot drift, and cannot get stuck. A slow round lost to a skipped
+# tick is picked up five minutes later.
+#
+# SLOW SOURCES WRITE THEIR OWN FILE, and that is not tidiness. The textfile is
+# rewritten whole on every run, so if the slow series were in it they would
+# vanish for nine ticks out of ten and reappear on the tenth - a sawtooth of
+# gaps that looks exactly like a flapping disk. node-exporter globs *.prom, so a
+# second file is simply served unchanged in between.
 SOURCES = (
-    ("filesystems", source_filesystems),
-    ("network", source_network),
-    ("containers", source_containers),
+    ("filesystems", source_filesystems, False),
+    ("network", source_network, False),
+    ("containers", source_containers, False),
+    ("gpu", source_gpu, False),
+    ("sensors", source_sensors, False),
+    ("status", source_status, False),
+    ("smart", source_smart, True),
 )
+
+
+def write_textfile(path, body):
+    """Atomic replace. os.replace cannot be interrupted halfway within one
+    filesystem, and node-exporter globs *.prom - so the .tmp is never read and a
+    reader never sees a partial file."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="ascii") as fh:
+            fh.write(body)
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        print("collect-metrics: cannot write %s: %s" % (path, exc),
+              file=sys.stderr)
+        return False
 
 
 def write_marker(ok, started, duration, failed, series):
@@ -614,25 +954,34 @@ def main():
             only = sys.argv[idx + 1]
 
     started = now()
+    # Forced with --slow or --source, so a slow source is testable by hand
+    # without waiting up to five minutes for its turn to come round.
+    slow_due = ("--slow" in sys.argv or only is not None
+                or int(started) % 300 < 30)
+
     m = Metrics()
+    slow = Metrics()
     failed = []
-    for name, fn in SOURCES:
+    for name, fn, is_slow in SOURCES:
         if only and name != only:
             continue
+        if is_slow and not slow_due:
+            continue
+        target = slow if is_slow else m
         t0 = now()
         try:
-            fn(m)
+            fn(target)
             up = 1
         except Exception as exc:  # noqa: BLE001 - one source must not stop the rest
             up = 0
             failed.append(name)
             print("collect-metrics: source %s failed: %s" % (name, exc),
                   file=sys.stderr)
-        m.add("home_server_collector_source_up", up, {"source": name},
-              "1 when this source produced its series on the last run.")
-        m.add("home_server_collector_source_duration_seconds",
-              "%.4f" % (now() - t0), {"source": name},
-              "Wall time for this source.")
+        target.add("home_server_collector_source_up", up, {"source": name},
+                   "1 when this source produced its series on the last run.")
+        target.add("home_server_collector_source_duration_seconds",
+                   "%.4f" % (now() - t0), {"source": name},
+                   "Wall time for this source.")
 
     duration = now() - started
     m.add("home_server_collector_last_success_timestamp_seconds",
@@ -642,27 +991,23 @@ def main():
           "old' for ever after the collector dies.")
     m.add("home_server_collector_duration_seconds", "%.4f" % duration, None,
           "Wall time for the whole run.")
-    m.add("home_server_collector_series", m.count + 1, None,
+    m.add("home_server_collector_series", m.count + slow.count + 1, None,
           "Series written last run. A source that silently stops emitting a "
           "sub-family looks identical to one emitting legitimate absence; a "
           "count catches it.")
 
-    body = m.render()
     if to_stdout:
-        sys.stdout.write(body)
+        sys.stdout.write(m.render())
+        if slow.count:
+            sys.stdout.write(slow.render())
     else:
-        try:
-            os.makedirs(os.path.dirname(TEXTFILE), exist_ok=True)
-            tmp = TEXTFILE + ".tmp"
-            with open(tmp, "w", encoding="ascii") as fh:
-                fh.write(body)
-            # os.replace is atomic within a filesystem, and node-exporter globs
-            # *.prom - so the .tmp is never read and a reader never sees a
-            # half-written file.
-            os.replace(tmp, TEXTFILE)
-        except OSError as exc:
-            print("collect-metrics: cannot write %s: %s" % (TEXTFILE, exc),
-                  file=sys.stderr)
+        if not write_textfile(TEXTFILE, m.render()):
+            failed.append("write")
+        # Only rewritten when the slow tier actually ran. Left alone otherwise,
+        # so node-exporter keeps serving the previous values instead of the
+        # series blinking out for nine ticks in ten.
+        if slow.count and not write_textfile(TEXTFILE_SLOW, slow.render()):
+            failed.append("write_slow")
             failed.append("write")
 
     write_marker(not failed, started, duration, failed, m.count)
