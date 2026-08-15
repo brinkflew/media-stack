@@ -1,0 +1,47 @@
+# ==============================================================================
+# Collect what no container can honestly measure about this host
+# ------------------------------------------------------------------------------
+# Host filesystems, host network and the cgroup memory detail that decides
+# whether a container at its MemoryHigh is starved or merely holding cache.
+# Written into node-exporter's textfile directory, which serves it as part of
+# its own scrape - Prometheus pulls and has no push endpoint.
+#
+# After=, NEVER Wants=. A Wants=node-exporter.service firing every 30 seconds
+# would restart an exporter somebody had deliberately stopped, which is exactly
+# how home-server-promote.service used to start Tdarr every ten minutes. And
+# ordering is all that is wanted here anyway: if node-exporter is down the file
+# is still written, and it is served again the moment it comes back.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Collect host and container metrics
+Documentation=file:/var/home-server/bin/collect-metrics.py
+After=node-exporter.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/home-server/bin/collect-metrics.py
+# A failed source is this unit's OUTPUT, not a reason to mark it failed. A unit
+# sitting in `failed` trips containers.failed_units, which is a FAIL, which
+# blocks the unattended reboot window - so a wrong API key or a stopped exporter
+# could hold up an OS security update. The finding belongs in the metrics and in
+# the MOTD, which is where bin/verify-host.sh puts it.
+SuccessExitStatus=0 1
+# Under the 30s period, so a hung run is killed before the next tick and two
+# collectors can never overlap.
+TimeoutStartSec=25s
+# 2,880 runs a day x systemd's "Starting"/"Finished" pair is ~5,700 info-level
+# journal lines. Dropping them keeps this from becoming the next health_status,
+# which was 47.3% of all journal bytes. Anything the script writes to stderr
+# still gets through, which is the channel that matters.
+LogLevelMax=notice
+
+# The thing that measures the stack must yield to it. Same shape as
+# home-server-backup.service.
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryHigh=256M
+MemoryMax=384M

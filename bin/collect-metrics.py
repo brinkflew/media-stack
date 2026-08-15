@@ -72,7 +72,14 @@ CGROUP = ("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice"
 # regex fails OPEN when something new appears. This fails closed. /mnt and /home
 # are symlinks into /var on CoreOS, so the canonical kernel paths are used - the
 # same reason the mount unit is var-mnt-media.mount.
-FILESYSTEMS = ("/", "/boot", "/var", "/var/mnt/media")
+#
+# `/` IS DELIBERATELY ABSENT. It is the read-only composefs: 8 MB, 0 bytes free,
+# 100% full by design and for ever. A panel showing the root filesystem full
+# would read as an emergency and mean nothing, which is worse than showing
+# nothing - and statvfs on it returns -1 for the inode counts, so it emits
+# negative gauges as well. The three filesystems below are the ones that can
+# actually fill up.
+FILESYSTEMS = ("/boot", "/var", "/var/mnt/media")
 
 
 def now():

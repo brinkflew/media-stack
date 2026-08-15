@@ -1,0 +1,40 @@
+# ==============================================================================
+# Collect metrics every 30 seconds
+# ------------------------------------------------------------------------------
+# Three settings here are the opposite of every other timer in this directory,
+# and each would look like a mistake to anyone tidying up. They are not.
+#
+# AccuracySec=1s, not the 1-5 minutes used elsewhere. systemd's default accuracy
+# is one minute, which it spends coalescing timers into shared wakeups - a real
+# power saving, and ruinous here. Against a 30-second period it would smear the
+# ticks into whatever else happens to be waking the CPU, and the sample spacing
+# a rate() divides by would be fiction. This is the one place in this repository
+# where wall-clock precision is the point.
+#
+# RandomizedDelaySec=0, stated explicitly rather than left to the default of 0,
+# because every neighbouring timer sets it and its absence would read as an
+# oversight. Jitter exists to stop a fleet stampeding a server. There is one
+# machine, and jitter here would only make the interval uneven.
+#
+# Persistent=false, where the backup timer is true and for the opposite reason.
+# Catching up a missed metrics sample is not merely useless, it is wrong: it
+# would stamp "now" on numbers that describe then. A gap in a graph is the
+# honest record of a collector that was not running.
+#
+# OnCalendar rather than OnUnitActiveSec so the ticks are wall-clock aligned and
+# do not drift forward by the duration of each run.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Collect host and container metrics, every 30 seconds
+
+[Timer]
+OnCalendar=*:*:00/30
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+
+[Install]
+WantedBy=timers.target

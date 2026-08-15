@@ -17,7 +17,7 @@ done
 systemctl --user daemon-reload
 systemctl --user enable --now home-server-promote.timer home-server-verify.timer \
                               home-server-caddy-build.timer home-server-backup.timer \
-                              home-server-reboot.timer
+                              home-server-reboot.timer home-server-metrics.timer
 ```
 
 **The loop is a glob rather than a list on purpose.** It used to name the four files it knew about,
@@ -40,6 +40,7 @@ symlinks, so there is no copy step. Only `daemon-reload` is needed.
 | `home-server-verify` | Runs the host health battery hourly and writes **two** files: `/run/motd.d/40-home-server.motd`, so a staged OS update, a failed unit, a stale CDI spec or a backup that has stopped running is the first thing an ssh session shows; and `/var/lib/home-server/status.json`, the same findings keyed by a stable id for a dashboard to read. The MOTD is on tmpfs and dies with the boot - the JSON does not, which is what finally gives this unit a durable record of its own last success. See `bin/verify-host.sh` and CLAUDE.md's "Logs and status". |
 | `home-server-caddy-build` | Rebuilds the Caddy image weekly. Caddy is the one image built here rather than pulled, and `AutoUpdate=local` notices a new image without producing one - so without this it is the only thing in the stack that never updates. See `bin/../apps/caddy/Dockerfile`. |
 | `home-server-reboot` | Applies a staged OS deployment, hourly 05:00-09:00 on Sundays - but only if greenboot is armed to undo it, no deployment has been rejected and left unexplained, no backup is running, the host is healthy now and nothing is mid-transcode. Every check is a refusal and doing nothing is the default; the one exception is the encoder, which stops being a veto past 14 days staged or 30 days of uptime. Five attempts rather than one because that refusal is transient. See `bin/reboot-when-staged.sh`. |
+| `home-server-metrics` | Collects, every 30 seconds, the numbers no container can honestly measure here: host filesystems (node-exporter's collector reads `/proc/1/mountinfo`, which no rootless container may), host network (`/proc/net` resolves in the reader's namespace), and the cgroup memory detail that separates a container holding cold page cache from one that is actually starved. It writes Prometheus exposition format into node-exporter's textfile directory rather than pushing, because Prometheus pulls - which also buys `node_textfile_mtime_seconds`, dating the file from outside the collector. See `bin/collect-metrics.py`. |
 | `home-server-backup` | Backs up `config/` nightly at 03:00, to `/var/backups/home-server` and then off-site by `restic copy`. This is the backup that actually happens; the workstation's `bin/backup-config.sh` is a third copy taken when someone is home. See `bin/backup-server.sh`. |
 
 ```bash

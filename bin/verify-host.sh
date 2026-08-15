@@ -956,6 +956,37 @@ if [ -z "$GREENBOOT" ]; then
 	# the reason net-metrics needs no published port.
 	say metrics "Metrics"
 
+	if [ "$(systemctl --user is-enabled home-server-metrics.timer 2>/dev/null)" = enabled ]; then
+		ok metrics.timer_enabled "home-server-metrics.timer enabled"
+	else
+		warn metrics.timer_enabled "home-server-metrics.timer is not enabled - the host-side series stop and every graph of them freezes"
+	fi
+
+	# DELIBERATELY NOT check_timer_run. That helper grades in whole hours -
+	# age=$((.../3600)) against stale_h=$((period*2/3600)) - so against a
+	# 30-second period it compares a zero-hour age to a zero-hour threshold and
+	# passes a collector that stopped 55 minutes ago. Second resolution here,
+	# with the same uptime guard the helper uses, because a machine that booted
+	# a minute ago has legitimately not collected anything yet.
+	m_ok=$(sed -n 's/^last_ok_at=//p' \
+		"$HOME/.cache/home-server/metrics-state" 2>/dev/null | tail -1)
+	m_age=
+	if [ -n "$m_ok" ]; then
+		m_epoch=$(date -d "$m_ok" +%s 2>/dev/null)
+		[ -z "$m_epoch" ] || m_age=$(( $(date +%s) - m_epoch ))
+	fi
+	if [ -n "$m_age" ] && [ "$m_age" -le 300 ]; then
+		ok metrics.collector_fresh "metrics collected ${m_age}s ago"
+	elif [ -n "$m_age" ]; then
+		warn metrics.collector_fresh "the last successful collection was ${m_age}s ago, limit 300s - those graphs are showing a gap, not a healthy host"
+	elif [ "${uptime_s:-0}" -lt 120 ]; then
+		ok metrics.collector_fresh "nothing collected in the ${uptime_s}s since boot - not yet due"
+	else
+		warn metrics.collector_fresh "the collector has no record of a successful run"
+	fi
+	fact metrics_last_ok_at "${m_ok:-}"
+	fact metrics_collect_age_s "${m_age:-}" num
+
 	# Endpoints that need no URL encoding are chosen deliberately. The
 	# label-values API answers "which collectors are running" and the targets
 	# API answers "how many are down" without a PromQL matcher, so this section
