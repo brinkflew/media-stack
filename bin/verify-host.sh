@@ -1042,6 +1042,18 @@ if [ -z "$GREENBOOT" ]; then
 	fact verify_warn_count  "${#warns[@]}" num
 	fact uptime_s           "${uptime_s:-}" num
 
+	# A DUPLICATE ID IS INVISIBLE FROM THE CONSUMER'S SIDE: two checks sharing a
+	# key means a dashboard shows one and silently hides the other, for ever - a
+	# check that does nothing, indistinguishable from one that works. Asserted
+	# here rather than in bin/lint-repo.sh because an id legitimately appears
+	# many times in the SOURCE, once per branch; what must be unique is what a
+	# single run emits, and only a run knows that.
+	dup_ids=$(printf '%s\n' ${chk_id+"${chk_id[@]}"} | sort | uniq -d | tr '\n' ' ')
+	if [ -n "${dup_ids// /}" ]; then
+		cur_sect=verify
+		bad verify.unique_ids "duplicate check id(s) emitted: ${dup_ids}- a dashboard will hide one of each pair"
+	fi
+
 	# NUL-DELIMITED, and that is the whole safety argument: a bash string is
 	# NUL-terminated, so it is the one byte a message provably cannot contain.
 	# Quotes, backslashes, pipes and embedded newlines all survive and jq

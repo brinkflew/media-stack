@@ -81,6 +81,37 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+say "Check ids"
+# ------------------------------------------------------------------------------
+# bin/verify-host.sh writes status.json, in which every finding is keyed by a
+# hand-written dotted id.
+#
+# WHAT IS *NOT* CHECKED HERE, and why: id uniqueness. An id legitimately appears
+# several times in the source - once per branch of the same check, which is the
+# design, since an id that speaks only on failure is indistinguishable from a
+# check that did not run. The real invariant is "at most once per RUN", which is
+# a runtime property; verify-host.sh asserts it itself at emit time. A static
+# uniq -d here flags every correctly-written check, which is worse than nothing.
+#
+# What IS checkable statically is the shape. A malformed id means a message was
+# passed in the id position - the whole finding then keys on a sentence, which
+# is exactly what the id exists to avoid.
+vh=bin/verify-host.sh
+if [ -f "$vh" ]; then
+	# Every literal argument in the id position, however spelled.
+	malformed=$(grep -oE '^[[:space:]]*(ok|bad|warn|note) [^"$][^ ]*' "$vh" \
+		| awk '{print $2}' | grep -vE '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$' || true)
+	n=$(grep -coE '\b(ok|bad|warn|note) ([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|"\$)' "$vh" || true)
+	if [ -n "$malformed" ]; then
+		bad "malformed check id(s) in $vh: $(printf '%s' "$malformed" | tr '\n' ' ')"
+	else
+		ok "$n check ids, all well-formed"
+	fi
+else
+	skip "no $vh"
+fi
+
+# ------------------------------------------------------------------------------
 say "Quadlets"
 # ------------------------------------------------------------------------------
 # Catches syntax errors, NOT unset variables - systemd expands an unset ${VAR}
