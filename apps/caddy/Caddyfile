@@ -101,6 +101,19 @@ request.{$DOMAIN} {
 # long-lived streaming response; with Caddy's default buffering a phone
 # receives nothing until the buffer fills, which for a one-line alert is never.
 # The symptom is a working server, a subscribed phone and silence.
+#
+# IT STAYS EVEN THOUGH THE APP USES WEBSOCKETS. A WebSocket upgrade bypasses
+# HTTP response buffering entirely, so this directive is inert for /ws - but it
+# still governs /json and /sse, which are the fallback path, the web UI and any
+# curl subscriber. Removing it as redundant would leave those silently dead.
+#
+# The upgrade itself needs nothing here: Caddy proxies it natively, verified
+# rather than assumed - HTTP/1.1 to /home-server/ws returns 101 Switching
+# Protocols and the open frame arrives immediately, and an unauthenticated one
+# is still refused 403. Note it must be HTTP/1.1: over HTTP/2, which Caddy
+# negotiates by default, `Connection: Upgrade` is meaningless and ntfy answers
+# 400 "client not using the websocket protocol". That is a red herring when
+# testing by hand, not a proxy fault.
 ntfy.{$DOMAIN} {
 	import base
 	reverse_proxy ntfy:80 {
