@@ -956,15 +956,30 @@ def source_arr(m):
                   1 if status.get("errors") else 0, {"service": name},
                   "The queue is reporting errors.")
 
+        # HOW MANY INDEXERS REACHED THIS APPLICATION, which is a different
+        # number from how many Prowlarr has, and the gap is the thing that was
+        # invisible. Prowlarr pushes every indexer to every application and
+        # retries the ones an application refuses, for ever, six-hourly, at
+        # WARN - so a mismatch never surfaces anywhere a person looks. It cost
+        # nine months of `Nyaa Trusted - Live Action` returning results in a
+        # category neither Sonarr nor Radarr accepts.
+        #
+        # SOME GAP IS CORRECT and this metric deliberately does not judge:
+        # a movies-only indexer belongs in Radarr and not Sonarr. Compare the
+        # three series and read the log; do not alert on equality.
+        indexers = api_get(name, base + "/indexer", hdr)
+        if isinstance(indexers, list):
+            m.add("home_server_arr_indexers", len(indexers), {"service": name},
+                  "Indexers configured in this application.")
+
         health = api_get(name, base + "/health", hdr)
         _arr_health(m, name, health)
         if isinstance(health, list):
             answered += 1
 
-    # Prowlarr. THE ONE THAT EARNS ITS KEEP: the ISP resolver returned a
-    # blocking page for four indexers while every container stayed healthy and
-    # the only symptom was that nothing was found. A disabled indexer is one
-    # Prowlarr has given up on after repeated failures.
+    # Prowlarr. THE ONE THAT EARNS ITS KEEP: nothing else in the stack reports
+    # that searching has quietly stopped working. Every container stays healthy,
+    # every unit stays active, and the only symptom is that nothing is found.
     key = env.get("PROWLARR_API_KEY", "")
     if key:
         hdr = ["X-Api-Key: " + key]
@@ -985,26 +1000,51 @@ def source_arr(m):
                 m.add("home_server_indexer_up",
                       0 if indexer.get("id") in failing else 1,
                       {"indexer": str(indexer.get("name", "?"))},
-                      "0 when Prowlarr has disabled the indexer after repeated "
-                      "failures. This is what a DNS sinkhole looks like from "
-                      "the outside - every container healthy, nothing found.")
-            m.add("home_server_indexers_enabled", enabled, None,
-                  "Indexers configured and enabled.")
+                      "0 while Prowlarr is backing off this indexer after "
+                      "repeated failures. IT DOES NOT SAY WHY, and the causes "
+                      "are not mostly local: measured on 2026-08-15, six zeros "
+                      "were a dead mirror, its duplicate, two entries sharing "
+                      "one refusing API host, a 502 and a 403. Read the "
+                      "Prowlarr log before changing anything here.")
+            m.add("home_server_arr_indexers", enabled, {"service": "prowlarr"},
+                  "Indexers configured in this application.")
         _arr_health(m, "prowlarr",
                     api_get("prowlarr", "http://localhost:9696/api/v1/health", hdr))
 
     # Bazarr is NOT a Servarr application: different header, different API.
     key = env.get("BAZARR_API_KEY", "")
     if key:
-        badges = api_get("bazarr", "http://localhost:6767/api/badges",
-                         ["X-API-KEY: " + key])
+        hdr = ["X-API-KEY: " + key]
+        badges = api_get("bazarr", "http://localhost:6767/api/badges", hdr)
         if isinstance(badges, dict):
             answered += 1
             for field, kind in (("episodes", "episodes"), ("movies", "movies")):
                 m.add("home_server_subtitles_missing", badges.get(field),
                       {"kind": kind}, "Items with subtitles still wanted.")
-            m.add("home_server_subtitle_providers", badges.get("providers"),
-                  None, "Subtitle providers currently usable.")
+
+        # NOT `badges.providers`, WHICH COUNTS THE BROKEN ONES. This read
+        # `home_server_subtitle_providers` from that field under the help text
+        # "providers currently usable", and it was exactly inverted: with one
+        # provider enabled and throttled it reported 1, and enabling five more
+        # working ones moved it to 2. A wrong number under a right name cannot
+        # be spotted from a dashboard, so the field is not used at all now.
+        #
+        # /api/providers is per-provider and says which. "Good" is Bazarr's own
+        # word for usable; every other status - DownloadLimitExceeded, offline,
+        # a login failure - is a provider that will not answer.
+        providers = api_get("bazarr", "http://localhost:6767/api/providers", hdr)
+        rows = providers.get("data") if isinstance(providers, dict) else None
+        if isinstance(rows, list):
+            answered += 1
+            for row in rows:
+                m.add("home_server_subtitle_provider_up",
+                      1 if str(row.get("status", "")) == "Good" else 0,
+                      {"provider": str(row.get("name", "?"))},
+                      "0 while this subtitle provider is unusable - most often "
+                      "a daily download quota, which is why ONE provider is a "
+                      "single point of failure rather than a thin margin.")
+            m.add("home_server_subtitle_providers_enabled", len(rows), None,
+                  "Subtitle providers enabled, working or not.")
 
     if not answered:
         raise RuntimeError("no *arr application answered")
