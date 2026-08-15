@@ -364,6 +364,15 @@ step "orphaned unit symlinks swept" \
 	"test -z \"\$(find \$HOME/.config/systemd/user -maxdepth 2 -xtype l -lname '/var/$OLD/*' -print -quit)\"" \
 	"find \$HOME/.config/systemd/user -maxdepth 2 -xtype l -lname '/var/$OLD/*' -delete"
 
+# Renaming a unit out from under a RUNNING timer leaves the OLD name behind in
+# systemd's runtime state as not-found/failed - five ghosts that no file
+# explains, that survive daemon-reload, and that verify-host.sh correctly
+# reports as failed units for ever. Only reset-failed clears them, and it can
+# only run once the new names are linked.
+step "the old unit names cleared from systemd's runtime state" \
+	"test \"\$(systemctl --user list-units --failed --no-legend | grep -c $OLD || true)\" -eq 0" \
+	"systemctl --user reset-failed"
+
 step "greenboot symlinks restored" \
 	"test -x /etc/greenboot/check/$GB_DIR/40-$NEW.sh && test -x /etc/greenboot/red.d/50-record-red-boot.sh" \
 	"sudo -n ln -sfn $NEW_ROOT/host/greenboot/40-$NEW.sh /etc/greenboot/check/$GB_DIR/40-$NEW.sh &&
@@ -538,7 +547,7 @@ fi
 # Prove restic opens the renamed repository without waiting for 03:00.
 if sshq "set -a; . $NEW_ROOT/.env; set +a;
          RESTIC_REPOSITORY=\"\$BACKUP_LOCAL_REPOSITORY\" RESTIC_PASSWORD=\"\$BACKUP_LOCAL_PASSWORD\" \
-         ~/.local/bin/restic snapshots --last 1 --compact" >/dev/null 2>&1; then
+         ~/.local/bin/restic snapshots --latest 1 --compact" >/dev/null 2>&1; then
 	ok "restic opens $NEW_ROOT's repository at the new path"
 else
 	bad "restic could not open the local repository - check BACKUP_LOCAL_REPOSITORY"
