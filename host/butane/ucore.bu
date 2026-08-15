@@ -142,6 +142,31 @@ storage:
           net.ipv4.ip_unprivileged_port_start=80
 
     # ------------------------------------------------------------------------
+    # How much log this host keeps, and for how long
+    # ------------------------------------------------------------------------
+    # Kept in sync with host/journald/10-media-stack.conf, which carries the
+    # reasoning. It is duplicated rather than symlinked because journald is
+    # parsed by PID 1, and SELinux will not let PID 1 read var_t - the trap
+    # host/greenboot/README.md documents, where `systemctl cat` prints the file
+    # happily, no AVC is logged, and it silently does not apply.
+    #
+    # IGNITION RUNS ONCE, AT FIRST BOOT, so adding this here does not configure
+    # the running machine. It was applied by hand on 2026-08-15; this entry is
+    # what a reinstall gets. bin/verify-host.sh asserts the values are in force.
+    - path: /etc/systemd/journald.conf.d/10-media-stack.conf
+      mode: 0644
+      contents:
+        inline: |
+          [Journal]
+          SystemMaxUse=16G
+          MaxRetentionSec=90d
+          SystemKeepFree=4G
+          SystemMaxFileSize=128M
+          MaxFileSec=1day
+          RateLimitIntervalSec=30s
+          RateLimitBurst=10000
+
+    # ------------------------------------------------------------------------
     # gluetun needs /dev/net/tun
     # ------------------------------------------------------------------------
     # CoreOS ships it 0600 root:root, which a rootless container cannot open.
@@ -347,6 +372,14 @@ storage:
       group: { name: core }
     - path: /var/home/core/.config/containers/systemd/infra
       target: /var/media-stack/stacks/infra
+      user: { name: core }
+      group: { name: core }
+
+    # Podman engine settings - see host/containers/containers.conf. A symlink
+    # is fine here where it is not for journald above: podman reads this as
+    # `core`, an ordinary user process, not as PID 1.
+    - path: /var/home/core/.config/containers/containers.conf
+      target: /var/media-stack/host/containers/containers.conf
       user: { name: core }
       group: { name: core }
 
