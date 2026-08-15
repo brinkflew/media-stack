@@ -113,7 +113,7 @@ immediately". That is accepted, not overlooked.
 **Caddy is built here, so it takes `AutoUpdate=local`** - and `local` policy notices a new image
 without ever *producing* one, while a `.build` unit only runs when its image is absent. Left alone,
 the one built image would have been the only thing in the stack that never updated.
-`media-stack-caddy-build.timer` rebuilds it weekly, and `caddy.build` carries `Pull=newer` because
+`home-server-caddy-build.timer` rebuilds it weekly, and `caddy.build` carries `Pull=newer` because
 podman build's default pull policy is `missing` - it would otherwise reuse a stale local `caddy:2`
 for ever while succeeding in four seconds.
 

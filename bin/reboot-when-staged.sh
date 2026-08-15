@@ -2,7 +2,7 @@
 # ==============================================================================
 # Apply a staged deployment, unattended, but only when it is safe to
 # ------------------------------------------------------------------------------
-# RUNS ON THE SERVER, as `core`, from media-stack-reboot.timer. This is the other
+# RUNS ON THE SERVER, as `core`, from home-server-reboot.timer. This is the other
 # half of greenboot: greenboot decides whether a deployment was good AFTER the
 # reboot, and this decides whether to reboot at all.
 #
@@ -39,7 +39,7 @@ set -uo pipefail
 export PATH="${HOME:-/var/home/core}/.local/bin:$PATH"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE="${MEDIA_STACK_BOOT_STATE:-/var/lib/media-stack/boot-state}"
+STATE="${HOME_SERVER_BOOT_STATE:-/var/lib/home-server/boot-state}"
 BOOT_MIN_MB=160
 
 DRY=""
@@ -59,13 +59,13 @@ note()   { printf 'reboot-when-staged: %s\n' "$1"; }
 # ------------------------------------------------------------------------------
 # Exit 0 rather than 1: "nothing staged" is the normal state on most nights and
 # a timer that goes red on a quiet week is a timer people stop reading.
-# MEDIA_STACK_STATUS_JSON exists so the refusals below can be exercised without
+# HOME_SERVER_STATUS_JSON exists so the refusals below can be exercised without
 # waiting for a real deployment to stage. This script is nothing BUT refusals,
 # and every gate past the first is unreachable on a host with nothing staged -
 # which is most nights. An untestable refusal is the same shape as a check that
 # cannot fail, and this repository has found enough of those.
-if [ -n "${MEDIA_STACK_STATUS_JSON:-}" ]; then
-	status_json=$(cat "$MEDIA_STACK_STATUS_JSON" 2>/dev/null)
+if [ -n "${HOME_SERVER_STATUS_JSON:-}" ]; then
+	status_json=$(cat "$HOME_SERVER_STATUS_JSON" 2>/dev/null)
 else
 	status_json=$(rpm-ostree status --json 2>/dev/null)
 fi
@@ -82,11 +82,11 @@ depl_count=$(jq '.deployments | length' <<<"$status_json")
 # because a staged deployment cannot outlive a reboot: ostree-finalize-staged
 # applies it at shutdown, so the file's mtime really is "since we last declined".
 #
-# The override exists for the same reason MEDIA_STACK_STATUS_JSON does, and the
+# The override exists for the same reason HOME_SERVER_STATUS_JSON does, and the
 # reason is stronger: the escalation below is unreachable for a fortnight, and a
 # branch nobody can reach is the same shape as one that cannot fire.
-if [ -n "${MEDIA_STACK_STAGED_AGE_DAYS:-}" ]; then
-	staged_age_d="$MEDIA_STACK_STAGED_AGE_DAYS"
+if [ -n "${HOME_SERVER_STAGED_AGE_DAYS:-}" ]; then
+	staged_age_d="$HOME_SERVER_STAGED_AGE_DAYS"
 elif [ -e /run/ostree/staged-deployment ]; then
 	staged_age_d=$(( ( $(date +%s) - $(stat -c %Y /run/ostree/staged-deployment) ) / 86400 ))
 else
@@ -102,7 +102,7 @@ note "staged $staged (${staged_age_d}d ago), $depl_count deployment(s) on disk, 
 # procedure, and this is not attended. Both halves have to be there: the check in
 # required.d, and the GRUB counter - either alone is inert, silently.
 [ -x /usr/libexec/greenboot/greenboot ] || refuse "greenboot is not installed - a bad deployment could not roll itself back"
-[ -e /etc/greenboot/check/required.d/40-media-stack.sh ] || refuse "the health check is not in required.d - greenboot would only log"
+[ -e /etc/greenboot/check/required.d/40-home-server.sh ] || refuse "the health check is not in required.d - greenboot would only log"
 [ -f /boot/grub2/custom.cfg ] || refuse "no GRUB boot counter - greenboot could not roll back"
 [ "$depl_count" -ge 2 ] || refuse "only $depl_count deployment - there would be nothing to roll back to"
 
@@ -130,8 +130,8 @@ boot_free=$(df -Pm /boot | awk 'NR==2 {print $4}')
 pinned=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 [ "$pinned" -eq 0 ] || refuse "$pinned deployment(s) pinned - unpin and 'rpm-ostree cleanup -r' first"
 
-# THE BACKUP GATE BELONGS HERE, NOT IN THE UNIT. media-stack-reboot.service
-# carries After=media-stack-backup.service and that does NOT do what it looks
+# THE BACKUP GATE BELONGS HERE, NOT IN THE UNIT. home-server-reboot.service
+# carries After=home-server-backup.service and that does NOT do what it looks
 # like: systemd ordering applies to units in the same job transaction, and a
 # backup already running at 05:08 was started by its own timer hours earlier, so
 # it is not in this transaction and nothing waits for it. Rebooting through
@@ -140,7 +140,7 @@ pinned=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 # The schedule makes this unlikely rather than impossible - 03:00 plus a 45
 # minute timeout against a window that opens at 05:00 - which is exactly the
 # kind of margin that quietly disappears when someone widens a timeout.
-# AND `is-active` IS THE WRONG QUESTION FOR A ONESHOT. media-stack-backup is
+# AND `is-active` IS THE WRONG QUESTION FOR A ONESHOT. home-server-backup is
 # Type=oneshot with RemainAfterExit=no, so for the entire time restic is running
 # its ActiveState is `activating` - never `active`. Written the obvious way,
 # `[ "$(systemctl --user is-active ...)" = active ]`, this gate could not fire at
@@ -151,7 +151,7 @@ pinned=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 # state this does not recognise is treated as busy, which is the direction that
 # fails safe. RemainAfterExit=no is what makes `inactive` mean finished rather
 # than never-started, and is worth re-checking if that unit is ever changed.
-backup_state=$(systemctl --user show media-stack-backup.service -p ActiveState --value 2>/dev/null)
+backup_state=$(systemctl --user show home-server-backup.service -p ActiveState --value 2>/dev/null)
 case "$backup_state" in
 	inactive|failed|"") ;;
 	*) refuse "the backup is $backup_state - rebooting through restic leaves a partial snapshot and a lock in the off-site repository" ;;
@@ -176,7 +176,7 @@ esac
 # had been running while the code was written finished before the test ran. A
 # gate that can only be exercised when something else happens to be busy is a
 # gate nobody exercises.
-enc_raw="${MEDIA_STACK_ENCODER_PCT:-}"
+enc_raw="${HOME_SERVER_ENCODER_PCT:-}"
 if [ -z "$enc_raw" ]; then
 	enc_raw=$(nvidia-smi --query-gpu=utilization.encoder --format=csv,noheader,nounits 2>/dev/null)
 	[ -n "$enc_raw" ] || refuse "nvidia-smi answered nothing - cannot tell whether a transcode is running, and unknown is not idle"

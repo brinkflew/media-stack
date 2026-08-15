@@ -15,15 +15,15 @@ no copy step. Nothing here is picked up automatically; each link is made once.
 
 | Tracked here | Installed at | What it is |
 |---|---|---|
-| `40-media-stack.sh` | `/etc/greenboot/check/required.d/40-media-stack.sh` | the check wrapper, **symlinked** |
+| `40-home-server.sh` | `/etc/greenboot/check/required.d/40-home-server.sh` | the check wrapper, **symlinked** |
 | `50-record-red-boot.sh` | `/etc/greenboot/red.d/50-record-red-boot.sh` | the loop-breaker, **symlinked** |
-| (inline in `ucore.bu`) | `/etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf` | ordering and timeout, **a real file** |
+| (inline in `ucore.bu`) | `/etc/systemd/system/greenboot-healthcheck.service.d/10-home-server.conf` | ordering and timeout, **a real file** |
 | `custom.cfg` | `/boot/grub2/custom.cfg` | GRUB boot counting, **copied not symlinked** |
 
 ```bash
 sudo rpm-ostree install greenboot      # NOT greenboot-default-health-checks - see below
-sudo ln -sf /var/media-stack/host/greenboot/40-media-stack.sh \
-            /etc/greenboot/check/wanted.d/40-media-stack.sh
+sudo ln -sf /var/home-server/host/greenboot/40-home-server.sh \
+            /etc/greenboot/check/wanted.d/40-home-server.sh
 # the drop-in is an ordinary file - see host/butane/ucore.bu for its contents
 sudo systemctl daemon-reload
 sudo systemctl enable greenboot-healthcheck.service
@@ -36,7 +36,7 @@ after layering ran no check at all. `bin/verify-host.sh` now asserts the unit is
 
 ## SELinux decides what may be a symlink, and it fails silently
 
-**PID 1 cannot read or execute anything under `/var/media-stack`.** SELinux is Enforcing and the
+**PID 1 cannot read or execute anything under `/var/home-server`.** SELinux is Enforcing and the
 checkout is `var_t`. So a *system* unit, or a drop-in for one, symlinked into this repository is
 silently ignored - and it is convincingly silent:
 
@@ -158,7 +158,7 @@ Expect several reboots: one per `GREENBOOT_MAX_BOOT_ATTEMPTS`. Afterwards remove
 
 ## The verdict, and where to read it
 
-`/var/lib/media-stack/boot-state`, written by the wrapper on every boot and surfaced hourly
+`/var/lib/home-server/boot-state`, written by the wrapper on every boot and surfaced hourly
 in the MOTD by `bin/verify-host.sh`. `ExecMainExitTimestamp` is runtime state that a reboot
 wipes, which is useless when the subject is the reboot.
 

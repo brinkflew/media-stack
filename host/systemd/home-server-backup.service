@@ -18,7 +18,7 @@
 
 [Unit]
 Description=Back up config/ locally and off-site
-Documentation=file:/var/media-stack/bin/backup-server.sh
+Documentation=file:/var/home-server/bin/backup-server.sh
 # Ordering only, never Wants=. The backup is worth taking whether or not the
 # stack is up, and a Wants= here would start containers at 03:00 that somebody
 # had deliberately stopped.
@@ -26,8 +26,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=/var/media-stack/.env
-ExecStart=/var/media-stack/bin/backup-server.sh
+EnvironmentFile=/var/home-server/.env
+ExecStart=/var/home-server/bin/backup-server.sh
 # It rsyncs 5.6 GB locally and copies to object storage. Ten minutes is
 # generous; the point is that a hung network call cannot leave this running
 # until the next timer fires.

@@ -16,7 +16,7 @@
 #
 # The rebuild is not automatic either way: a .build unit only runs when the
 # image is absent, and podman auto-update's `local` policy notices a new image
-# but does not produce one. media-stack-caddy-build.timer is what actually
+# but does not produce one. home-server-caddy-build.timer is what actually
 # rebuilds, weekly; auto-update then restarts the proxy.
 #
 # THE BUILD IS THE SAFETY NET HERE, and it is a real one. xcaddy has to compile

@@ -12,12 +12,12 @@
 # infer from a container being Up. Both Jellyfin and tdarr-node-01 consume
 # nvidia.com/gpu=1, and a stale spec surfaces as a failed transcode hours later.
 #
-# It writes /run/motd.d/40-media-stack.motd, so the result is the first thing an
+# It writes /run/motd.d/40-home-server.motd, so the result is the first thing an
 # ssh session shows. THE MOTD CARRIES ITS OWN TIMESTAMP: a quiet MOTD and a
 # checker that stopped running are otherwise indistinguishable, and the second
 # one is the failure that hides every other failure.
 #
-# It also writes /var/lib/media-stack/status.json on every non-greenboot run -
+# It also writes /var/lib/home-server/status.json on every non-greenboot run -
 # the same findings, keyed by a STABLE ID rather than by prose, for a dashboard
 # to read. That file is additionally this script's own durable record: it was
 # the only automated job here that wrote no marker of its last success, and a
@@ -41,9 +41,9 @@
 # and exit code are load-bearing in the rollback decision.
 #
 # Overrides, for exercising branches without waiting for the real thing:
-#   MEDIA_STACK_STATUS_FILE   where status.json goes
-#   MEDIA_STACK_BOOT_STATE    greenboot's verdict file
-#   MEDIA_STACK_GREENBOOT_BIN / _ETC, MEDIA_STACK_GRUB_CUSTOM
+#   HOME_SERVER_STATUS_FILE   where status.json goes
+#   HOME_SERVER_BOOT_STATE    greenboot's verdict file
+#   HOME_SERVER_GREENBOOT_BIN / _ETC, HOME_SERVER_GRUB_CUSTOM
 # ==============================================================================
 
 set -uo pipefail
@@ -439,15 +439,15 @@ if [ -z "$GREENBOOT" ]; then
 	# Overridable so this section's own branches can be exercised without a
 	# reboot. "Armed" is the claim here that fails silently, so being able to
 	# test the logic that reports it is worth three variables.
-	boot_state="${MEDIA_STACK_BOOT_STATE:-/var/lib/media-stack/boot-state}"
-	gb_etc="${MEDIA_STACK_GREENBOOT_ETC:-/etc/greenboot}"
-	gb_cfg="${MEDIA_STACK_GRUB_CUSTOM:-/boot/grub2/custom.cfg}"
+	boot_state="${HOME_SERVER_BOOT_STATE:-/var/lib/home-server/boot-state}"
+	gb_etc="${HOME_SERVER_GREENBOOT_ETC:-/etc/greenboot}"
+	gb_cfg="${HOME_SERVER_GRUB_CUSTOM:-/boot/grub2/custom.cfg}"
 	# THE BINARY, NOT /etc/greenboot, IS WHAT "INSTALLED" MEANS. /etc is
 	# merged forward across deployments and can be created by hand, so it
 	# survives a rollback to a deployment that has no greenboot in it - and
 	# would then report an armed rollback that cannot happen. /usr is part of
 	# the deployment, so the binary answers the question honestly.
-	gb_bin="${MEDIA_STACK_GREENBOOT_BIN:-/usr/libexec/greenboot/greenboot}"
+	gb_bin="${HOME_SERVER_GREENBOOT_BIN:-/usr/libexec/greenboot/greenboot}"
 
 	# The loudest thing here. A red boot means a deployment was rejected, and
 	# this mark is also what stops bin/reboot-when-staged.sh rebooting into the
@@ -516,15 +516,15 @@ if [ -z "$GREENBOOT" ]; then
 		# in required.d - wanted.d only logs - AND the GRUB counter must exist,
 		# because without the GRUB custom.cfg greenboot arms a boot_counter
 		# that nothing counts down. Neither absence shows up anywhere else.
-		if   [ -e "$gb_etc/check/required.d/40-media-stack.sh" ]; then gb_dir=required
-		elif [ -e "$gb_etc/check/wanted.d/40-media-stack.sh" ];   then gb_dir=wanted
+		if   [ -e "$gb_etc/check/required.d/40-home-server.sh" ]; then gb_dir=required
+		elif [ -e "$gb_etc/check/wanted.d/40-home-server.sh" ];   then gb_dir=wanted
 		else gb_dir=absent
 		fi
 		gb_grub=no
 		[ -f "$gb_cfg" ] && gb_grub=yes
 
 		# THE ORDERING DROP-IN, ASSERTED BY ITS EFFECT RATHER THAN ITS
-		# PRESENCE. It was first shipped as a symlink into /var/media-stack,
+		# PRESENCE. It was first shipped as a symlink into /var/home-server,
 		# where PID 1 cannot read it under SELinux: `systemctl cat` printed it
 		# and none of it applied. Checking that the file exists would have
 		# passed throughout. Ask systemd what it actually loaded instead.
@@ -545,7 +545,7 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 
 		if [ "$gb_dir" = absent ]; then
-			bad greenboot.armed "the media-stack check is in neither required.d nor wanted.d - greenboot is not checking this host"
+			bad greenboot.armed "the home-server check is in neither required.d nor wanted.d - greenboot is not checking this host"
 		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ] && [ "${depl_count:-0}" -lt 2 ]; then
 			# ARMED WITH NOWHERE TO GO, which is the NORMAL state here rather
 			# than a fault: an attended reboot ends in `rpm-ostree cleanup -r`,
@@ -588,22 +588,22 @@ if [ -z "$GREENBOOT" ]; then
 	# Initialised unconditionally: the MOTD below reads it, that block also runs
 	# under --greenboot, and `set -u` is on.
 	reboot_next=""
-	if [ "$(systemctl --user is-enabled media-stack-reboot.timer 2>/dev/null)" = enabled ]; then
-		ok reboot.timer_enabled "media-stack-reboot.timer enabled"
+	if [ "$(systemctl --user is-enabled home-server-reboot.timer 2>/dev/null)" = enabled ]; then
+		ok reboot.timer_enabled "home-server-reboot.timer enabled"
 		# Computed HERE rather than in the MOTD block, because that block also
 		# runs under --greenboot - as root, at boot, where there is no
 		# XDG_RUNTIME_DIR and `systemctl --user` cannot answer at all.
-		reboot_next=$(systemctl --user list-timers media-stack-reboot.timer \
+		reboot_next=$(systemctl --user list-timers home-server-reboot.timer \
 			--no-legend --no-pager 2>/dev/null | awk 'NR==1 {print $1, $2, $3, $4}')
 	else
-		bad reboot.timer_enabled "media-stack-reboot.timer is not enabled - a staged deployment would never be applied"
+		bad reboot.timer_enabled "home-server-reboot.timer is not enabled - a staged deployment would never be applied"
 	fi
 
 	# A WEEK, not a night. The unit fires five times on a Sunday morning and in
 	# the ordinary case refuses on all five, because nothing is staged; what this
 	# asserts is that the group ran at all. Possible only since check_timer_run
 	# started deriving its staleness threshold from the period it is given.
-	check_timer_run reboot.window_run "unattended reboot window" 604800 media-stack-reboot.service --user
+	check_timer_run reboot.window_run "unattended reboot window" 604800 home-server-reboot.service --user
 
 	# THE MARKER FINALLY EARNING ITS KEEP. bin/reboot-when-staged.sh writes this
 	# immediately before rebooting, because afterwards there is no process left
@@ -642,10 +642,10 @@ if [ -z "$GREENBOOT" ]; then
 	# Caddy is built here, and `local` policy notices a new image without ever
 	# producing one - so if this timer stops, Caddy silently stops updating while
 	# every other service carries on.
-	if [ "$(systemctl --user is-enabled media-stack-caddy-build.timer 2>/dev/null)" = enabled ]; then
-		ok update.caddy_build_timer "media-stack-caddy-build.timer enabled"
+	if [ "$(systemctl --user is-enabled home-server-caddy-build.timer 2>/dev/null)" = enabled ]; then
+		ok update.caddy_build_timer "home-server-caddy-build.timer enabled"
 	else
-		bad update.caddy_build_timer "media-stack-caddy-build.timer is off - Caddy will never be rebuilt"
+		bad update.caddy_build_timer "home-server-caddy-build.timer is off - Caddy will never be rebuilt"
 	fi
 
 	# Every container that can be auto-updated should be. A unit that lost its
@@ -670,17 +670,17 @@ if [ -z "$GREENBOOT" ]; then
 	# bin/backup-server.sh writes the marker below after each leg. Reading the
 	# repositories directly would be better, except the off-site one is a network
 	# call with credentials, and this runs every hour.
-	if [ "$(systemctl --user is-enabled media-stack-backup.timer 2>/dev/null)" = enabled ]; then
-		ok backup.timer_enabled "media-stack-backup.timer enabled"
+	if [ "$(systemctl --user is-enabled home-server-backup.timer 2>/dev/null)" = enabled ]; then
+		ok backup.timer_enabled "home-server-backup.timer enabled"
 	else
-		bad backup.timer_enabled "media-stack-backup.timer is not enabled - config/ is not being backed up"
+		bad backup.timer_enabled "home-server-backup.timer is not enabled - config/ is not being backed up"
 	fi
-	check_timer_run backup.run "backup" 86400 media-stack-backup.service --user
+	check_timer_run backup.run "backup" 86400 home-server-backup.service --user
 
 	# Same ${HOME:-} guard as line 42. This branch only runs as `core`, where
 	# HOME is always set, but an unbound expansion aborts the whole script
 	# under `set -u` and that is too sharp an edge to leave lying around.
-	backup_state="${HOME:-/root}/.cache/media-stack/backup-state"
+	backup_state="${HOME:-/root}/.cache/home-server/backup-state"
 	# <id> <label> <key> <max-hours> <severity>
 	check_backup_age() {
 		local id="$1" label="$2" key="$3" max="$4" sev="$5" at age
@@ -732,7 +732,12 @@ if [ -z "$GREENBOOT" ]; then
 	# the one part of the system with no automation and no feedback. The remote
 	# has drifted from git before, and an edit made over ssh is invisible until
 	# the next pull refuses with "local changes would be overwritten".
-	repo=/var/media-stack
+	# DERIVED, not a literal. Every other script here computes its root from
+	# BASH_SOURCE; this one hardcoded the path, so it checked "is the checkout
+	# at /var/<name> clean" rather than "is the checkout I am part of clean".
+	# Those are the same sentence right up until the tree moves, which is
+	# exactly when you want the answer to be about the tree that moved.
+	repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 	dirty=$(git -C "$repo" status --porcelain 2>/dev/null)
 	fact checkout_clean "$([ -z "$dirty" ] && echo true || echo false)" bool
 	if [ -z "$dirty" ]; then
@@ -811,10 +816,10 @@ if [ -z "$GREENBOOT" ]; then
 	jcfg=$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null)
 	if [ -z "$jcfg" ]; then
 		warn logs.dropin_loaded "could not read the effective journald configuration"
-	elif grep -q '10-media-stack.conf' <<<"$jcfg"; then
-		ok logs.dropin_loaded "the media-stack journald drop-in is loaded"
+	elif grep -q '10-home-server.conf' <<<"$jcfg"; then
+		ok logs.dropin_loaded "the home-server journald drop-in is loaded"
 	else
-		warn logs.dropin_loaded "no media-stack journald drop-in is loaded - retention is whatever the default happens to be"
+		warn logs.dropin_loaded "no home-server journald drop-in is loaded - retention is whatever the default happens to be"
 	fi
 
 	# tail -1 reproduces systemd's own last-wins precedence, so a later-sorting
@@ -915,7 +920,7 @@ if [ -z "$GREENBOOT" ]; then
 	# staged and copied to two restic repositories every night. The backup
 	# already excludes these directories, so this is about the NVMe rather than
 	# the snapshots - an app that starts looping fills the disk config/ is on.
-	cfgroot="${DOCKER_VOLUME_CONFIG:-/var/media-stack/config}"
+	cfgroot="${DOCKER_VOLUME_CONFIG:-/var/home-server/config}"
 	cfg_log_mb=0 cfg_log_top=""
 	if [ -d "$cfgroot" ]; then
 		# Process substitution rather than a pipe, so the accumulator survives
@@ -940,7 +945,7 @@ if [ -z "$GREENBOOT" ]; then
 	# --------------------------------------------------------------------------
 	# This script's own liveness - and the one question it must NOT ask.
 	# --------------------------------------------------------------------------
-	# THERE IS DELIBERATELY NO check_timer_run FOR media-stack-verify.service
+	# THERE IS DELIBERATELY NO check_timer_run FOR home-server-verify.service
 	# HERE. It was written, it shipped, and it failed on the server within the
 	# minute, in a way worth keeping:
 	#
@@ -965,10 +970,10 @@ if [ -z "$GREENBOOT" ]; then
 	# timer even armed? That reads systemd's configuration rather than this
 	# script's own output, so it has no feedback loop.
 	say verify "Self"
-	if [ "$(systemctl --user is-enabled media-stack-verify.timer 2>/dev/null)" = enabled ]; then
-		ok verify.timer_enabled "media-stack-verify.timer enabled"
+	if [ "$(systemctl --user is-enabled home-server-verify.timer 2>/dev/null)" = enabled ]; then
+		ok verify.timer_enabled "home-server-verify.timer enabled"
 	else
-		bad verify.timer_enabled "media-stack-verify.timer is not enabled - the MOTD and status.json silently stop being refreshed"
+		bad verify.timer_enabled "home-server-verify.timer is not enabled - the MOTD and status.json silently stop being refreshed"
 	fi
 
 	if [ -n "$ROUTES" ]; then
@@ -987,9 +992,9 @@ fi
 # The MOTD. Warnings only when warranted, plus two lines that are always there:
 # a one-line summary, and when this last ran.
 # ------------------------------------------------------------------------------
-motd=/run/motd.d/40-media-stack.motd
+motd=/run/motd.d/40-home-server.motd
 {
-	printf '  \033[1m-- media-stack -------------------------------------------------\033[0m\n'
+	printf '  \033[1m-- home-server -------------------------------------------------\033[0m\n'
 	if [ -n "${staged_ver:-}" ]; then
 		staged_age=""
 		if [ -e /run/ostree/staged-deployment ]; then
@@ -1004,7 +1009,7 @@ motd=/run/motd.d/40-media-stack.motd
 		# NAME THE UNATTENDED ROUTE FIRST, because it is now the one that
 		# usually applies this. Saying only "sudo systemctl reboot - attended"
 		# reads as "nothing will happen until you do this", which stopped being
-		# true when media-stack-reboot.timer was armed.
+		# true when home-server-reboot.timer was armed.
 		#
 		# gb_red is empty under --greenboot (that section does not run), so the
 		# held branch simply never fires there - correct, since the MOTD it
@@ -1042,7 +1047,7 @@ motd=/run/motd.d/40-media-stack.motd
 # arrays above - keeping one code path is safer than branching it - and simply
 # never encodes them.
 if [ -z "$GREENBOOT" ]; then
-	status_file="${MEDIA_STACK_STATUS_FILE:-/var/lib/media-stack/status.json}"
+	status_file="${HOME_SERVER_STATUS_FILE:-/var/lib/home-server/status.json}"
 	now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 	# THE DURABLE RECORD THIS SCRIPT HAS NEVER HAD. Every other automated job

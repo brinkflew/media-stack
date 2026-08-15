@@ -106,7 +106,7 @@ HealthRetries=1
 Notify=healthy
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 Restart=always
 RestartSec=5
 # The tunnel handshake plus the first healthcheck can outlast the default 90s

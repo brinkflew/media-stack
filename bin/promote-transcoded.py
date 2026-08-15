@@ -42,7 +42,10 @@ import os
 import subprocess
 import sys
 
-ENV_FILE = "/var/media-stack/.env"
+# Derived from this file's own location rather than hardcoded, so moving the
+# checkout does not silently point the reconciler at an .env that is not there.
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+ENV_FILE = os.path.join(REPO, ".env")
 
 # The one tree, seen three ways: the host mounts it at /mnt/media, the *arr apps
 # see it at /data, and Tdarr at /media. Only the prefix differs.

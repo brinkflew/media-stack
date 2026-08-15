@@ -61,10 +61,10 @@ HealthStartupSuccess=1
 Notify=healthy
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 # Podman does not create a missing bind-mount source directory; Docker did.
 # The difference surfaces as
-#   Error: statfs /var/media-stack/config/tdarr/logs: no such file or directory
+#   Error: statfs /var/home-server/config/tdarr/logs: no such file or directory
 # and with Restart=always it becomes a silent 5-second retry loop rather than a
 # visible failure - this unit reached restart 126 before anyone looked. These
 # are all scratch or log paths that no backup restores, so a fresh host has
@@ -75,7 +75,7 @@ ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/server ${DOCKER_VOL
 # is authoritative-from-git: editing the one in Plugins/Local/ on the server is
 # pointless, it is overwritten here. The trailing /. copies the directory
 # CONTENTS - systemd runs this without a shell, so a glob would not expand.
-ExecStartPre=/usr/bin/cp -a /var/media-stack/apps/tdarr/plugins/. ${DOCKER_VOLUME_CONFIG}/tdarr/server/Tdarr/Plugins/Local/
+ExecStartPre=/usr/bin/cp -a /var/home-server/apps/tdarr/plugins/. ${DOCKER_VOLUME_CONFIG}/tdarr/server/Tdarr/Plugins/Local/
 Restart=always
 RestartSec=5
 # Must clear the startup check's 300s ceiling - see sonarr.container.

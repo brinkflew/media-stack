@@ -34,13 +34,18 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 
+# Derived from this file's own location rather than hardcoded. This runs from an
+# ExecStartPre= on jellyfin.container, so a stale literal here fails every
+# Jellyfin start rather than showing up somewhere it can be read.
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
 CSS = os.environ.get(
-    "JELLYFIN_CUSTOM_CSS", "/var/media-stack/apps/jellyfin/custom.css"
+    "JELLYFIN_CUSTOM_CSS", os.path.join(REPO, "apps", "jellyfin", "custom.css")
 )
 BRANDING = os.environ.get(
     "JELLYFIN_BRANDING",
     os.path.join(
-        os.environ.get("DOCKER_VOLUME_CONFIG", "/var/media-stack/config"),
+        os.environ.get("DOCKER_VOLUME_CONFIG", os.path.join(REPO, "config")),
         "jellyfin",
         "branding.xml",
     ),

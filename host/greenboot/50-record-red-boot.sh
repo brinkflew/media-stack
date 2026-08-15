@@ -16,7 +16,7 @@
 # MOTD. Clearing it is a human act, deliberately: the question it asks is "do you
 # know why this deployment was rejected", and only a person can answer that.
 #
-#   sudo sed -i '/^red_boot_at=/d' /var/lib/media-stack/boot-state
+#   sudo sed -i '/^red_boot_at=/d' /var/lib/home-server/boot-state
 #
 # It writes red_boot_at rather than rollback_at because red is what actually
 # happened. A rollback follows only once the boot counter is exhausted -
@@ -28,7 +28,7 @@ set -uo pipefail
 
 export PATH="/usr/local/bin:/usr/bin:/usr/sbin:/usr/local/sbin"
 
-STATE="${MEDIA_STACK_BOOT_STATE:-/var/lib/media-stack/boot-state}"
+STATE="${HOME_SERVER_BOOT_STATE:-/var/lib/home-server/boot-state}"
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 mkdir -p "$(dirname "$STATE")"
@@ -50,4 +50,4 @@ mkdir -p "$(dirname "$STATE")"
 } >"$STATE.tmp"
 mv "$STATE.tmp" "$STATE"
 
-echo "greenboot/media-stack: recorded a RED boot in $STATE - unattended reboots are held" >&2
+echo "greenboot/home-server: recorded a RED boot in $STATE - unattended reboots are held" >&2

@@ -57,11 +57,11 @@ export PATH="$HOME/.local/bin:$PATH"
 # home.local, not home: `home` resolves to the WAN address and hairpins back
 # through the router, which is both slower for a 5GB mirror and a dependency
 # this script does not need. The LAN route is direct.
-REMOTE="${MEDIA_STACK_HOST:-home.local}"
-REMOTE_CONFIG="/var/media-stack/config"
-REPO="${RESTIC_REPOSITORY:-$HOME/backups/media-stack}"
-PWFILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/media-stack.pw}"
-STAGING="${MEDIA_STACK_STAGING:-$HOME/.cache/media-stack/staging}"
+REMOTE="${HOME_SERVER_HOST:-home.local}"
+REMOTE_CONFIG="/var/home-server/config"
+REPO="${RESTIC_REPOSITORY:-$HOME/backups/home-server}"
+PWFILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/home-server.pw}"
+STAGING="${HOME_SERVER_STAGING:-$HOME/.cache/home-server/staging}"
 DRY=""
 [ "${1:-}" = "--dry-run" ] && DRY="--dry-run"
 
@@ -112,7 +112,7 @@ fi
 # ------------------------------------------------------------------------------
 echo "==> snapshotting live databases"
 ssh "$REMOTE" 'bash -s' < "$(dirname "${BASH_SOURCE[0]}")/snapshot-databases.sh"
-rsync -a "$REMOTE:.cache/media-stack/db-snapshot/" "$STAGING/config/"
+rsync -a "$REMOTE:.cache/home-server/db-snapshot/" "$STAGING/config/"
 
 # ------------------------------------------------------------------------------
 # 4. Into restic
@@ -124,14 +124,14 @@ echo "==> backing up"
 # snapshots with whichever ssh alias was used splits one machine's history into
 # separate retention groups - each pruned independently, and neither holding the
 # full chain. The alias is a route; this is an identity.
-restic backup $DRY --tag media-stack --tag config \
-  --host media-stack "$STAGING/config"
+restic backup $DRY --tag home-server --tag config \
+  --host home-server "$STAGING/config"
 
 if [ -z "$DRY" ]; then
   # Keeps a year of history for a few GB. The daily tier matters most: the
   # damage this protects against is usually noticed within a week.
   echo "==> pruning old snapshots"
-  restic forget --tag media-stack --prune \
+  restic forget --tag home-server --prune \
     --keep-daily 7 --keep-weekly 4 --keep-monthly 12
 fi
 

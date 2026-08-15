@@ -85,10 +85,10 @@ HealthStartupSuccess=1
 Notify=healthy
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 # Podman does not create a missing bind-mount source directory; Docker did.
 # The difference surfaces as
-#   Error: statfs /var/media-stack/config/tdarr/logs: no such file or directory
+#   Error: statfs /var/home-server/config/tdarr/logs: no such file or directory
 # and with Restart=always it becomes a silent 5-second retry loop rather than a
 # visible failure - this unit reached restart 126 before anyone looked. These
 # are all scratch or log paths that no backup restores, so a fresh host has

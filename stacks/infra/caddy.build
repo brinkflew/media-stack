@@ -21,9 +21,9 @@
 Description=Build Caddy with caddy-dns/gandi
 
 [Build]
-ImageTag=localhost/media-stack/caddy:latest
-File=/var/media-stack/apps/caddy/Dockerfile
-SetWorkingDirectory=/var/media-stack/apps/caddy
+ImageTag=localhost/home-server/caddy:latest
+File=/var/home-server/apps/caddy/Dockerfile
+SetWorkingDirectory=/var/home-server/apps/caddy
 
 # WITHOUT THIS THE WEEKLY REBUILD IS DECORATIVE. podman build's default pull
 # policy is `missing`: once docker.io/library/caddy:2 exists in local storage

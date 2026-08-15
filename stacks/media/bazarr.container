@@ -55,7 +55,7 @@ HealthStartupSuccess=1
 Notify=healthy
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 # Podman does not create a missing bind-mount source directory; Docker did.
 ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/bazarr
 Restart=always

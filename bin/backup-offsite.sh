@@ -28,7 +28,7 @@
 #
 # NOTE THAT THE OFF-SITE REPOSITORY HOLDS TWO SNAPSHOT CHAINS, because the
 # server stages at /var/backups/staging/config and this machine at
-# ~/.cache/media-stack/staging/config. `restic forget` groups by host AND paths,
+# ~/.cache/home-server/staging/config. `restic forget` groups by host AND paths,
 # so the retention policy below is applied to each chain separately - 7 daily of
 # each, not 7 in total. That is more copies than the policy reads like, and it
 # is fine at this size; it is not a bug to "fix" by unifying the paths.
@@ -39,8 +39,8 @@
 # the whole thing is 1.4 GiB.
 #
 # Setup, once - see the block printed if the config is missing:
-#   ~/.config/restic/media-stack-offsite.env   bucket, region and API keys
-#   ~/.config/restic/media-stack-offsite.pw    the destination password
+#   ~/.config/restic/home-server-offsite.env   bucket, region and API keys
+#   ~/.config/restic/home-server-offsite.pw    the destination password
 #
 # Usage:  bin/backup-offsite.sh [--check]
 #           --check   also verify the destination's structure after copying
@@ -50,10 +50,10 @@ set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
 
-SRC_REPO="${RESTIC_REPOSITORY:-$HOME/backups/media-stack}"
-SRC_PW="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/media-stack.pw}"
-DST_ENV="${MEDIA_STACK_OFFSITE_ENV:-$HOME/.config/restic/media-stack-offsite.env}"
-DST_PW="${MEDIA_STACK_OFFSITE_PW:-$HOME/.config/restic/media-stack-offsite.pw}"
+SRC_REPO="${RESTIC_REPOSITORY:-$HOME/backups/home-server}"
+SRC_PW="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/home-server.pw}"
+DST_ENV="${HOME_SERVER_OFFSITE_ENV:-$HOME/.config/restic/home-server-offsite.env}"
+DST_PW="${HOME_SERVER_OFFSITE_PW:-$HOME/.config/restic/home-server-offsite.pw}"
 CHECK=""
 [ "${1:-}" = "--check" ] && CHECK=1
 
@@ -143,8 +143,8 @@ restic -r "$DST_REPO" --password-file "$DST_PW" forget --prune \
 #
 # bin/verify-host.sh warns when this is more than 30 days old. The timestamp is
 # all that crosses; the credentials that did the pruning stay here.
-if ssh "${MEDIA_STACK_HOST:-home.local}" \
-  'f=~/.cache/media-stack/backup-state; mkdir -p "$(dirname "$f")"; touch "$f";
+if ssh "${HOME_SERVER_HOST:-home.local}" \
+  'f=~/.cache/home-server/backup-state; mkdir -p "$(dirname "$f")"; touch "$f";
    grep -v "^offsite_pruned_at=" "$f" > "$f.tmp";
    echo "offsite_pruned_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f.tmp";
    mv "$f.tmp" "$f"' 2>/dev/null; then

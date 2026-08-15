@@ -68,7 +68,7 @@ HealthStartupSuccess=1
 Notify=healthy
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 
 # The web UI's Custom CSS is TRACKED IN GIT at apps/jellyfin/custom.css and
 # rendered into config/jellyfin/branding.xml on every start. Same contract as
@@ -84,7 +84,7 @@ EnvironmentFile=/var/media-stack/.env
 #
 # Leading `-` so a failure cannot stop Jellyfin. This is cosmetics; it must
 # never be able to take the media server down. It logs to the journal instead.
-ExecStartPre=-/var/media-stack/bin/render-jellyfin-branding.py
+ExecStartPre=-/var/home-server/bin/render-jellyfin-branding.py
 
 Restart=always
 RestartSec=5

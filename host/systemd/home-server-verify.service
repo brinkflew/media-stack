@@ -16,11 +16,11 @@
 
 [Unit]
 Description=Verify the host and refresh its MOTD
-Documentation=file:/var/media-stack/bin/verify-host.sh
+Documentation=file:/var/home-server/bin/verify-host.sh
 
 [Service]
 Type=oneshot
-ExecStart=/var/media-stack/bin/verify-host.sh --quiet
+ExecStart=/var/home-server/bin/verify-host.sh --quiet
 # A FAIL is this unit's OUTPUT, not a reason to mark it failed. The finding is
 # already in the MOTD, and a unit sitting in `failed` would be one more thing
 # nobody is watching - which is the problem this exists to solve, not add to.

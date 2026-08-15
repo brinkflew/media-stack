@@ -24,13 +24,13 @@
 set -euo pipefail
 
 STREAM="stable"
-HOST="${MEDIA_STACK_HOST:-home.local}"          # the LAN address, NOT the hairpin
+HOST="${HOME_SERVER_HOST:-home.local}"          # the LAN address, NOT the hairpin
 TARGET_IP="192.168.0.100"
 GATEWAY="192.168.0.1"
 NETMASK="255.255.255.0"
 DNS="192.168.0.1"
 MAC="4c:ed:fb:3f:97:11"
-WORK="${MEDIA_STACK_WORK:-$HOME/.cache/media-stack/fcos}"
+WORK="${HOME_SERVER_WORK:-$HOME/.cache/home-server/fcos}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -52,10 +52,10 @@ command -v podman >/dev/null || die "podman is needed to run butane and coreos-i
 
 # A backup older than the change you are about to make is not a backup. config/
 # lives on the disk this wipes, so "recent" means minutes, not days.
-if [ -d "${RESTIC_REPOSITORY:-$HOME/backups/media-stack}" ]; then
+if [ -d "${RESTIC_REPOSITORY:-$HOME/backups/home-server}" ]; then
   export PATH="$HOME/.local/bin:$PATH"
-  export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-$HOME/backups/media-stack}"
-  export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/media-stack.pw}"
+  export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-$HOME/backups/home-server}"
+  export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/home-server.pw}"
   last=$(restic snapshots --json 2>/dev/null | python3 -c "
 import sys, json, datetime
 s = json.load(sys.stdin)
@@ -78,7 +78,7 @@ fi
 # live session at disk speed. A copy on this laptop is the fallback for sda
 # failing, and costs a 73GB upload. Check for both; the old system is still up
 # at this point, so the on-box one is a plain ssh away.
-IMAGE="${MEDIA_STACK_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
+IMAGE="${HOME_SERVER_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
 
 onbox=$(ssh -o BatchMode=yes "$HOST" 'stat -c %s /mnt/media/nvme0n1.img.zst 2>/dev/null || echo 0' 2>/dev/null || echo 0)
 if [ "${onbox:-0}" -gt 1000000000 ]; then
@@ -94,7 +94,7 @@ elif [ "${onbox:-0}" -le 1000000000 ]; then
           $IMAGE
         Fine for a rehearsal, which cannot damage anything. NOT fine for the
         real run: it is the only rollback and, with no console on this machine,
-        the only diagnosis. Set MEDIA_STACK_DISK_IMAGE if it lives elsewhere.
+        the only diagnosis. Set HOME_SERVER_DISK_IMAGE if it lives elsewhere.
 EOF
 fi
 

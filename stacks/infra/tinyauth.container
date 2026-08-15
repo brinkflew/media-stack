@@ -81,7 +81,7 @@ HealthStartupSuccess=1
 Notify=healthy
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 Restart=always
 RestartSec=5
 # Must clear the startup check's 300s ceiling - see sonarr.container.

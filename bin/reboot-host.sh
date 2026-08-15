@@ -34,7 +34,7 @@
 
 set -uo pipefail
 
-HOST="${MEDIA_STACK_HOST:-home.local}"
+HOST="${HOME_SERVER_HOST:-home.local}"
 BOOT_MIN_MB=160
 WAIT_MAX=600
 # How long the stack gets to become healthy after it answers ssh. Generous on
@@ -61,10 +61,10 @@ sshq true 2>/dev/null || die "cannot reach $HOST"
 
 # The whole battery, not a subset. If the host is unhealthy NOW, a reboot turns
 # one problem into two and you will not know which caused which.
-if sshq '/var/media-stack/bin/verify-host.sh --quiet'; then
+if sshq '/var/home-server/bin/verify-host.sh --quiet'; then
 	ok "verify-host passes"
 else
-	sshq '/var/media-stack/bin/verify-host.sh' 2>&1 | sed 's/^/  /'
+	sshq '/var/home-server/bin/verify-host.sh' 2>&1 | sed 's/^/  /'
 	die "the host is not healthy - fix that before rebooting into a new deployment"
 fi
 
@@ -111,7 +111,7 @@ say "Confirm"
 # halves are present - the check in required.d, and the GRUB counter in
 # custom.cfg - and either can go missing without anything else noticing.
 if sshq 'test -x /usr/libexec/greenboot/greenboot &&
-         test -e /etc/greenboot/check/required.d/40-media-stack.sh &&
+         test -e /etc/greenboot/check/required.d/40-home-server.sh &&
          test -f /boot/grub2/custom.cfg' >/dev/null 2>&1; then
 	rollback_note="greenboot is ARMED: a deployment that fails its health check rolls
   itself back. That is a net, not a guarantee - verify anyway."
@@ -180,7 +180,7 @@ say "Verifying the new deployment"
 # a failure - and this script's failure path deliberately leaves a pin behind and
 # tells you to roll back, which is an expensive thing to get wrong.
 #
-# media-stack-verify.timer also has OnBootSec=10min for the same reason.
+# home-server-verify.timer also has OnBootSec=10min for the same reason.
 # GATE ON --greenboot, NOT ON THE WHOLE BATTERY. The question this step asks is
 # "did this deployment boot correctly", and only the host-level checks answer it.
 # The full battery also covers containers, the backup and the checkout, none of
@@ -200,7 +200,7 @@ started=$(date +%s)
 printf '  waiting for the host to settle'
 while [ $(( $(date +%s) - started )) -lt "$VERIFY_MAX" ]; do
 	sleep 20
-	if sshq '/var/media-stack/bin/verify-host.sh --greenboot' >/dev/null 2>&1; then
+	if sshq '/var/home-server/bin/verify-host.sh --greenboot' >/dev/null 2>&1; then
 		verified=1
 		break
 	fi
@@ -212,10 +212,10 @@ if [ -n "$verified" ]; then
 	# Informational, and deliberately not a gate. Anything failing here is worth
 	# reading and is not a reason to roll the OS back.
 	say "Full battery (not a gate)"
-	sshq '/var/media-stack/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
+	sshq '/var/home-server/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
 else
-	sshq '/var/media-stack/bin/verify-host.sh --quiet' >/dev/null 2>&1 || true
-	sshq '/var/media-stack/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
+	sshq '/var/home-server/bin/verify-host.sh --quiet' >/dev/null 2>&1 || true
+	sshq '/var/home-server/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
 	cat <<EOF
 
   THE HOST-LEVEL CHECKS DID NOT PASS, and the pin has deliberately been left
