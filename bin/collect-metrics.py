@@ -1105,12 +1105,30 @@ def source_torrent(m):
               "VPN is forwarding: if they differ, the client is unconnectable "
               "and nothing else says so.")
 
-    forwarded = os.path.join(
-        os.environ.get("DOCKER_VOLUME_CONFIG", "/var/home-server/config"),
-        "gluetun", "forwarded_port")
-    port_value = read_int(forwarded)
-    m.add("home_server_vpn_forwarded_port", port_value, None,
-          "The port ProtonVPN is currently forwarding, as gluetun records it.")
+    # THE FORWARDED PORT HAS NO READABLE SOURCE HERE, and it is worth writing
+    # down why rather than rediscovering it. gluetun writes no port file unless
+    # VPN_PORT_FORWARDING_STATUS_FILE is set, which the quadlet does not set,
+    # and since v3.40 its control server answers 401 on everything except
+    # /v1/publicip/ip - the auth config would be a new secret for one number.
+    #
+    # What is NOT lost: gluetun pushes the forwarded port into qBittorrent on
+    # every reconnect, so home_server_torrent_listen_port above already carries
+    # the value that push produced, and home_server_torrent_connection_state
+    # reports `firewalled` when the two have drifted - which is the consequence
+    # the port number was only ever a proxy for.
+    location = api_get("gluetun", "http://127.0.0.1:8000/v1/publicip/ip")
+    if isinstance(location, dict):
+        # The exit IP is deliberately NOT a label: it changes on every
+        # reconnect, so it would mint a new series a day for ever. The region
+        # does not, and answers the question actually being asked - is the
+        # tunnel up, and is it landing where it should.
+        m.add("home_server_vpn_info", 1,
+              {"country": str(location.get("country", "")),
+               "city": str(location.get("city", "")),
+               "organization": str(location.get("organization", ""))},
+              "Where the VPN is currently exiting. The tunnel being up at all "
+              "is home_server_container_health{container=\"gluetun\"}, which "
+              "has a 5s interval because it is the kill-switch.")
 
 
 def source_tdarr(m):
