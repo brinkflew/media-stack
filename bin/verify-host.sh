@@ -1212,10 +1212,19 @@ if [ -z "$GREENBOOT" ]; then
 
 	if [ -n "$ROUTES" ]; then
 		say routes "Public routes"
-		for h in watch request id auth sonarr radarr prowlarr tdarr torrent; do
+		for h in watch request id auth sonarr radarr prowlarr tdarr torrent ntfy; do
 			code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h.avanserv.com/" 2>/dev/null)
-			case "$code" in
-				200|302|307) ok "routes.$h" "$h -> $code" ;;
+			# ntfy IS THE ONE WHOSE HEALTHY ANSWER IS A REFUSAL, and it has to be
+			# in this battery rather than left out: it is the route every alert
+			# travels, so if it breaks, the thing that would have told you is the
+			# thing that broke. An unauthenticated request to a deny-all instance
+			# is answered 403 BY NTFY, which proves DNS, TLS, Caddy's route and
+			# the backend all work. Accepting 200 here would be the bug - that
+			# would mean anonymous access had been opened.
+			case "$h:$code" in
+				ntfy:401|ntfy:403) ok "routes.$h" "$h -> $code (refused, as it must be)" ;;
+				ntfy:*) bad "routes.$h" "$h -> ${code:-no answer}, expected 401 or 403" ;;
+				*:200|*:302|*:307) ok "routes.$h" "$h -> $code" ;;
 				*) bad "routes.$h" "$h -> ${code:-no answer}" ;;
 			esac
 		done
