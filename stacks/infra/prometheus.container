@@ -115,9 +115,16 @@ Restart=always
 RestartSec=5
 # Must clear the startup check's 300s ceiling - see sonarr.container.
 TimeoutStartSec=360
-# `systemctl --user reload prometheus` rereads prometheus.yml with no restart
-# and no lifecycle endpoint.
-ReloadSignal=SIGHUP
+# `systemctl --user reload prometheus` rereads prometheus.yml and the rule
+# files with no restart and no lifecycle endpoint.
+#
+# ExecReload=, NOT ReloadSignal=. ReloadSignal= is only honoured for
+# Type=notify-reload, and quadlet generates Type=notify - so the unit had the
+# directive, systemd accepted it silently, and every reload failed with "Job
+# type reload is not applicable for unit prometheus.service". The comment here
+# documented a command that had never once worked. Signalling the container
+# explicitly does work, and is what the podman documentation recommends.
+ExecReload=/usr/bin/podman kill --signal HUP prometheus
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use, low
 # enough that a runaway is killed instead of taking the host down. Sized from

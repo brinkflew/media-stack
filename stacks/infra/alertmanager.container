@@ -89,7 +89,10 @@ Restart=always
 RestartSec=5
 # Must clear the startup check's 300s ceiling - see sonarr.container.
 TimeoutStartSec=360
-ReloadSignal=SIGHUP
+# ExecReload=, not ReloadSignal= - see prometheus.container. The latter is only
+# honoured for Type=notify-reload and quadlet generates Type=notify, so it is
+# accepted and does nothing.
+ExecReload=/usr/bin/podman kill --signal HUP alertmanager
 
 # A ceiling, not a tuning knob. This holds a handful of alerts and a
 # notification log; it is smaller than Prometheus by an order of magnitude.
