@@ -412,6 +412,96 @@ unpackerr rotate themselves, and `bin/backup-server.sh` already excludes `*.log`
 `jellyfin/log/` and `tdarr/logs/` - so they are out of the backup. `logs.config_log_size` is a
 tripwire on the NVMe, not a rotation policy.
 
+## Metrics
+
+**`status.json` answers "is this true now" and nothing else.** It cannot say when a backup started
+being stale, whether a container's memory has been climbing for a month, or what the encoder was
+doing when the host wedged - and every number this file reasons about was measured by hand, once,
+during an incident. Since 2026-08-15 there is a time-series layer: **Prometheus** on `net-metrics`,
+behind sign-on at `metrics.avanserv.com`, 400 days at a 30s scrape.
+
+```bash
+podman exec prometheus wget -q -O - 'http://127.0.0.1:9090/api/v1/query?query=<metric>' | jq .
+/var/home-server/bin/collect-metrics.py --print | head -50   # what the collector produces
+jq -r '.checks[]|select(.section=="metrics")' /var/lib/home-server/status.json
+```
+
+**The store is Prometheus rather than VictoriaMetrics, and the tag policy decided it.**
+VictoriaMetrics is lighter and was the obvious candidate, but it publishes **no `:v1` and no
+`:stable`** - only `:latest` and full triples - so `AutoUpdate=registry` would have tracked `:latest`
+on the one component holding every byte of history. Prometheus publishes `:v3`. It is also reference
+PromQL rather than a superset, so a dashboard query cannot come to depend on an extension by
+accident.
+
+**Off the shelf where an exporter measures correctly; bespoke only where one provably cannot.**
+node-exporter gives CPU, memory, load, PSI, diskstats, hwmon and vmstat for free.
+`bin/collect-metrics.py` covers the remainder, and each item is there for a measured reason rather
+than a preference:
+
+| Series | Why it cannot come from a container |
+|---|---|
+| `node_filesystem_*` | **No rootless container can run node-exporter's filesystem collector.** It reads `/proc/1/mountinfo` for the host mount table, and reading another user's `/proc` entry must pass `ptrace_may_access`: host PID 1 is real root, and rootless Podman maps container uid 0 to `core`. `User=0` does not help. It failed `EACCES` on every scrape, and because that is not `ENOENT` there is no fallback to `/proc/mounts`. |
+| `node_network_*` | `/proc/net` is a symlink to `self/net`, so it resolves in the **reader's** network namespace, not the mounted procfs. A bridge-networked node-exporter reports its own container's interfaces while looking exactly like it reports the host's. |
+| `home_server_container_memory_*` | cAdvisor exports `memory.current` and stops. Four of the five numbers that settle the "at its ceiling or actually starved" question - `pgscan`, `pgsteal`, `workingset_refault_file`, PSI - have no cAdvisor metric at all. |
+
+**The SELinux objection to containerised exporters was wrong, and it was checked rather than
+assumed.** Queried against the loaded policy: `container_t` may read `proc_t`, `sysfs_t` and
+`cgroup_t`, and `filesystem getattr` - which is what `statfs` needs - is allowed for `fs_t` and for
+`container_file_t`. So node-exporter needs no `SecurityLabelDisable=`, no relabel flag and no new
+boolean, and `ausearch -m AVC -ts boot` has stayed empty throughout. **What it cannot reach is the
+part that matters**: `container_t -> var_t` FILE READ is DENY, as is `data_home_t`, so the read-only
+`/:/host/root` bind mount cannot read `.env`, `secrets/` or the age keys - and DAC refuses a second
+time, since those are `0600 core` and the exporter runs as `nobody`.
+
+**Do not "fix" a permission problem here with `:z`.** It relabels the *source*: on `/` it fails
+against the read-only ostree `/usr` and destroys the labels it does reach, and on `/var` it would
+make the whole checkout readable by every container on the host. The one directory that does take a
+label is the textfile drop, which is small and dedicated.
+
+**The failure that is easy to misread: a DAC refusal and an SELinux refusal look identical from
+inside a container.** The filesystem collector failing was DAC, with an empty AVC log throughout.
+They need completely different fixes, and `ausearch` is what distinguishes them.
+
+**The podman socket is genuinely blocked**, and that is the one real cost. `container_t ->
+unconfined_t : unix_stream_socket connectto` is DENY and is not fixable by relabelling, because
+`systemd --user` for uid 1000 runs as `unconfined_t`. So no container can have container health
+state, restart counts or image metadata - `podman ps` from the host is the only source, which is why
+the collector reads it.
+
+**Delivery is node-exporter's textfile collector, not a push, because Prometheus pulls.** That was
+not a workaround and it pays for itself twice: `node_textfile_mtime_seconds` dates the file from
+**outside** the collector, and `node_textfile_scrape_error` flags a malformed one. The file inherits
+`container_file_t` from its directory, so the host writes it and the container reads it.
+
+**There is deliberately no `home_server_collector_up 1`.** A sample asserting liveness can only be
+written by something that is alive, so it is a tautology that reads green for ever after the
+collector dies - the same trap `verify-host.sh` documents at length about its own timer. The
+timestamp is written *into* the file the run produces, so the last value present is by construction
+the last success.
+
+**Every check in the `Metrics` section is WARN or PASS, never FAIL**, for the reason the `Logs`
+section already gives: `bin/reboot-host.sh` and `bin/reboot-when-staged.sh` refuse to act on a host
+this battery calls unhealthy, and a stopped collector must never hold up an OS security update.
+
+**The naming contract: the metric name and its label set are the id; the collection mechanism is the
+prose.** Upstream names are adopted only where the semantics match *exactly* - `node_filesystem_*`
+is `statfs`, so it is portable back to a real node-exporter the day one can run. Where they only
+almost match, a `home_server_*` name is minted instead, because **a wrong number under a right name
+is undetectable from a dashboard**, and correcting semantics under a borrowed name silently rewrites
+the whole retention window. `home_server_container_memory_high_bytes` exists rather than cAdvisor's
+`container_spec_memory_reservation_limit_bytes` for exactly this reason: that one maps to
+`memory.low`, not `memory.high`.
+
+**Identity joins on podman's own `PODMAN_SYSTEMD_UNIT` label, never on a name derived from the
+container.** That is what makes `torrent-infra` resolve to `torrent-pod.service` with no lookup
+table - and a table maintained in a script is the most driftable thing here.
+`home_server_container_identity_unresolved` counts what did not map, because the failure is
+otherwise silent: a container simply missing from every panel.
+
+**`/` is deliberately not in the filesystem allowlist.** It is the read-only composefs: 8 MB, zero
+bytes free, 100% full by design and for ever. A panel showing the root filesystem full would read as
+an emergency and mean nothing, and `statvfs` returns -1 for its inode counts.
+
 ## Commands
 
 All of these run on the server as `core`, from `/var/home-server`. **No `sudo`** - the stack is
@@ -1448,9 +1538,19 @@ Remaining, in order:
    carries `generated_at` and lives where a reboot does not reach, so this script finally has the
    marker every other job already had.
 
+   **The time-series layer is done too, 2026-08-15** - Prometheus, node-exporter and
+   `bin/collect-metrics.py`, at `metrics.avanserv.com`. See "Metrics". That closes the other half of
+   what a dashboard needs: `status.json` says what is true now, and the store says when it stopped
+   being true. Still to come there: cAdvisor for cAdvisor-named per-container series, GPU and SMART,
+   the application-level sources over `podman exec`, a `status.json` bridge so the 55 checks become
+   series, and wiring Prometheus' snapshot API into `bin/backup-server.sh` - a live TSDB cannot be
+   rsynced, and the history is backed up by choice.
+
    **What is still missing is anything that reaches a human who is not logged in.** That is now the
-   whole of this item. The dashboard reads `status.json`; a notifier would fire off the same
-   document, or off an `OnFailure=` on `home-server-verify.service`.
+   whole of this item. The dashboard reads `status.json` and queries Prometheus; a notifier would
+   fire off either, or off an `OnFailure=` on `home-server-verify.service`. Prometheus has recording
+   and alerting rules built in, which is part of why it was chosen over a store needing a second
+   container for them.
 
    **Do NOT build it on `journalctl -p err`.** Jellyfin alone emits 2,644 priority-3 lines a day of
    ffmpeg chatter and there is no lever to stop it - see Known state. Unit state and container
