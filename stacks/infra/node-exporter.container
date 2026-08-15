@@ -74,6 +74,23 @@ Environment=TZ=${TIMEZONE}
 
 # --no-collector.selinux    container_t -> selinuxfs_t read is DENY, verified
 # --no-collector.rapl       /sys/class/powercap/*/energy_uj is 0400 root
+# --no-collector.filesystem NO ROOTLESS CONTAINER CAN RUN THIS ONE. It reads
+#                           /proc/1/mountinfo to get the host's mount table, and
+#                           reading another user's /proc entry needs to pass
+#                           ptrace_may_access - host PID 1 is real root, and
+#                           rootless podman maps container uid 0 to core, so
+#                           there is no uid available here that qualifies. It
+#                           failed with EACCES on every scrape, and because that
+#                           is not ENOENT there is no fallback to /proc/mounts.
+#                           bin/collect-metrics.py emits node_filesystem_* from
+#                           the host instead, where a plain statvfs answers.
+#                           NOTE this was a DAC refusal, not an SELinux one -
+#                           ausearch stayed empty throughout, which is what
+#                           distinguishes it from the class of problem the
+#                           banner above is about.
+# --no-collector.bcachefs   no bcachefs on this host; it failed every scrape
+# --no-collector.kernel_hung  same shape as filesystem - it walks other users'
+#                           /proc entries and cannot
 # the eight network ones    wrong by construction here - see the banner
 # the rest                  subsystems this host does not have, kept out so they
 #                           cost no series and no confusion
@@ -84,6 +101,9 @@ Exec=--path.procfs=/host/proc \
      --collector.textfile.directory=/textfile \
      --no-collector.selinux \
      --no-collector.rapl \
+     --no-collector.filesystem \
+     --no-collector.bcachefs \
+     --no-collector.kernel_hung \
      --no-collector.netdev \
      --no-collector.netstat \
      --no-collector.netclass \

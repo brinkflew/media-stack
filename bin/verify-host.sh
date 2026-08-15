@@ -1022,6 +1022,23 @@ if [ -z "$GREENBOOT" ]; then
 		warn metrics.node_netns_scope "node-exporter is running namespace-scoped collectors ($netns_on) - those series describe its own container, not the host"
 	fi
 
+	# A collector that fails on every scrape emits NOTHING, which looks exactly
+	# like a metric nobody configured - no gap in a graph, no error in a
+	# dashboard, just a panel that was never built. node_exporter keeps a
+	# success flag per collector precisely so this is answerable, and it is worth
+	# asking: three of them failed on the first deploy here, one of them
+	# filesystem, and the only visible symptom was an empty query.
+	failed_cols=$(podman exec prometheus wget -q -O - \
+		'http://127.0.0.1:9090/api/v1/query?query=node_scrape_collector_success' 2>/dev/null \
+		| jq -r '[.data.result[]|select(.value[1]=="0")|.metric.collector]|sort|join(" ")' 2>/dev/null)
+	if [ -z "$prom_up" ]; then
+		warn metrics.exporter_collectors "node-exporter's collector results could not be read"
+	elif [ -z "$failed_cols" ]; then
+		ok metrics.exporter_collectors "every node-exporter collector is succeeding"
+	else
+		warn metrics.exporter_collectors "node-exporter collectors failing silently: $failed_cols - each emits no series at all, which reads as 'not configured'"
+	fi
+
 	# Cardinality is what decides whether this store stays smaller than config/.
 	# The first symptom of an unbounded label is the unit being killed at
 	# MemoryMax, not a slow dashboard, so it is worth seeing it climb.
