@@ -938,24 +938,38 @@ if [ -z "$GREENBOOT" ]; then
 	fi
 
 	# --------------------------------------------------------------------------
-	# This script's own liveness.
+	# This script's own liveness - and the one question it must NOT ask.
 	# --------------------------------------------------------------------------
-	# NOT self-grading in the sense the Boot health section warns about: this
-	# reads systemd's runtime state, not a verdict this script wrote. During the
-	# timer's own run ExecMainExitTimestamp still holds the PREVIOUS completion,
-	# which is exactly the value wanted.
+	# THERE IS DELIBERATELY NO check_timer_run FOR media-stack-verify.service
+	# HERE. It was written, it shipped, and it failed on the server within the
+	# minute, in a way worth keeping:
 	#
-	# It cannot catch its own timer being dead - nothing would be running to
-	# notice - which is the whole reason status.json carries generated_at and
-	# lives somewhere a reboot does not wipe. This catches the case one step
-	# earlier: the timer disabled while the battery is still being run by hand.
+	#   - Inside its own unit, ExecMainExitTimestamp is EMPTY - systemd clears it
+	#     when the service starts and only sets it on exit. So the check read
+	#     "has never run" and raised a FAIL.
+	#   - That FAIL made the unit exit 1. The next run then read ExecMainStatus=1
+	#     and raised "the last run FAILED". Permanently, having caused it.
+	#
+	# A self-referential FAIL that also gates bin/reboot-host.sh. This is exactly
+	# the trap the Boot health section documents - a check grading its own
+	# previous run - and the reasoning that it was somehow different here was
+	# simply wrong.
+	#
+	# A script cannot assert its own liveness: if it is not running nothing
+	# evaluates the assertion, and if it is running the answer is trivially yes.
+	# THAT is why status.json carries generated_at and lives somewhere a reboot
+	# does not wipe - a stopped timer is detectable only from outside, by a
+	# reader noticing the document has gone stale.
+	#
+	# What IS answerable from in here is the question one step earlier: is the
+	# timer even armed? That reads systemd's configuration rather than this
+	# script's own output, so it has no feedback loop.
 	say verify "Self"
 	if [ "$(systemctl --user is-enabled media-stack-verify.timer 2>/dev/null)" = enabled ]; then
 		ok verify.timer_enabled "media-stack-verify.timer enabled"
 	else
 		bad verify.timer_enabled "media-stack-verify.timer is not enabled - the MOTD and status.json silently stop being refreshed"
 	fi
-	check_timer_run verify.last_run "host verification" 3600 media-stack-verify.service --user
 
 	if [ -n "$ROUTES" ]; then
 		say routes "Public routes"
