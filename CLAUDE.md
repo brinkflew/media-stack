@@ -37,7 +37,7 @@ service definition, and the verification loop is "does the container come up and
 
 ## Deployment model
 
-This repo is the source of truth. The server runs a **git checkout of it** at `/var/media-stack`,
+This repo is the source of truth. The server runs a **git checkout of it** at `/var/home-server`,
 reachable over passwordless SSH as `home` (WAN, via the router's `9122 -> 22` forward) or
 `home.local` (direct, `192.168.0.100`). **Prefer `home.local`** - the WAN route depends on NAT
 hairpinning and on the forward still pointing at the right address.
@@ -66,7 +66,7 @@ container UID 0 to the invoking user, `core` (uid 1000), which is what owns `/mn
 the subuid range (`core:100000:65536`) and cannot read the data.
 
 ```bash
-ssh home.local 'cd /var/media-stack && git status --short'   # ALWAYS do this before editing
+ssh home.local 'cd /var/home-server && git status --short'   # ALWAYS do this before editing
 ```
 
 **The remote has drifted from git before**, and it is easy to cause. Reconcile any drift into git
@@ -87,7 +87,7 @@ render silently discards it.
 ```bash
 sops secrets/env.sops.env      # decrypts into $EDITOR, re-encrypts on save
 git commit && git push          # then on the server:
-ssh home.local 'cd /var/media-stack && git pull && ./bin/render-env.sh &&
+ssh home.local 'cd /var/home-server && git pull && ./bin/render-env.sh &&
                 systemctl --user daemon-reload && systemctl --user restart <affected units>'
 ```
 
@@ -121,15 +121,15 @@ Tdarr setup, the per-library audio whitelists, the Radarr `[VO]` rescoring, the 
 passkeys, watch state - existed in exactly one place.
 
 ```bash
-systemctl --user start media-stack-backup     # on the server; the timer runs it at 03:00
+systemctl --user start home-server-backup     # on the server; the timer runs it at 03:00
 ./bin/verify-restore.sh                       # from the WORKSTATION: does it actually restore?
 ```
 
 | Copy | Where | Written by | Protects against |
 |---|---|---|---|
-| local | `/var/backups/media-stack` on the server | `bin/backup-server.sh`, nightly | a bad change, a bad restore, an application corrupting its own database |
+| local | `/var/backups/home-server` on the server | `bin/backup-server.sh`, nightly | a bad change, a bad restore, an application corrupting its own database |
 | off-site | Scaleway `s3.fr-par.scw.cloud/home-server-backup` | the same run, by `restic copy` | the disk, the machine, the building |
-| pull | `~/backups/media-stack` on the workstation | `bin/backup-config.sh`, when you are home | the server being compromised outright |
+| pull | `~/backups/home-server` on the workstation | `bin/backup-config.sh`, when you are home | the server being compromised outright |
 
 **The local copy is on the same disk as `config/` and does not survive it.** That is deliberate -
 `/mnt/media` is kept for media - and it is why the off-site leg runs every night rather than
@@ -221,7 +221,7 @@ by hand once, with the destructive test below, and **is now re-proved every nigh
 **The nightly probe is non-destructive, and the trick is that authorization is evaluated before
 object existence.** A `DeleteObject` refused by policy returns `403 AccessDenied`; an allowed one
 returns `204 No Content`. So the probe writes a 0-byte object outside `locks/`, tries to delete it,
-and expects to be refused. It records `offsite_policy_ok_at` in `~/.cache/media-stack/backup-state`
+and expects to be refused. It records `offsite_policy_ok_at` in `~/.cache/home-server/backup-state`
 **only on a confirmed refusal**, and `bin/verify-host.sh` FAILS when that marker is more than 48h
 old - so one unreachable night reads as stale rather than as broken, and a real regression surfaces
 on the second. Two details are load-bearing:
@@ -240,7 +240,7 @@ It uses `rclone`, which uCore already ships at `/usr/bin/rclone`, with credentia
 rather than a probe. Keep it for when the policy itself has been edited:
 
 ```bash
-ssh home.local 'cd /var/media-stack && set -a && . .env && set +a &&
+ssh home.local 'cd /var/home-server && set -a && . .env && set +a &&
   AWS_ACCESS_KEY_ID="$BACKUP_OFFSITE_ACCESS_KEY" \
   AWS_SECRET_ACCESS_KEY="$BACKUP_OFFSITE_SECRET_KEY" \
   ~/.local/bin/restic -r "$BACKUP_OFFSITE_REPOSITORY" \
@@ -267,7 +267,7 @@ It records `offsite_pruned_at` on the server when it does, and `verify-host.sh` 
 
 **The off-site repository holds two snapshot chains**, and that is expected rather than a fault. The
 server stages at `/var/backups/staging/config` and the workstation at
-`~/.cache/media-stack/staging/config`; `restic forget` groups by host **and paths**, so the retention
+`~/.cache/home-server/staging/config`; `restic forget` groups by host **and paths**, so the retention
 policy applies to each chain separately - 7 daily of each, not 7 in total. More copies than the
 policy reads like, which is fine at this size. Do not "fix" it by forcing the paths to match.
 
@@ -309,7 +309,7 @@ every named database including Pocket ID's passkey store.
 
 | Copy | Proven by |
 |---|---|
-| server local | `TMPDIR=/var/tmp bin/verify-restore.sh` on the server, against `/var/backups/media-stack` |
+| server local | `TMPDIR=/var/tmp bin/verify-restore.sh` on the server, against `/var/backups/home-server` |
 | workstation pull | `bin/verify-restore.sh` |
 | **off-site** | `bin/verify-restore.sh --repo offsite` - 5.6 GB pulled back from Scaleway |
 
@@ -336,7 +336,7 @@ manager** - off-site backups you cannot decrypt are not backups.
 
 ## Logs and status
 
-**`/var/lib/media-stack/status.json` is the machine-readable interface**, rewritten hourly by
+**`/var/lib/home-server/status.json` is the machine-readable interface**, rewritten hourly by
 `bin/verify-host.sh` alongside the MOTD. It exists because the dashboard that is coming needs
 something to read, and scraping ANSI-coloured text or re-implementing 50 checks are both worse.
 
@@ -348,7 +348,7 @@ the verdict - `cdi.driver_match`, never `cdi.driver_ok`.
 ```bash
 bin/verify-host.sh --json | jq '.summary, .facts'
 jq -r '.checks[] | select(.status != "pass") | "\(.status)  \(.id)  \(.message)"' \
-  /var/lib/media-stack/status.json
+  /var/lib/home-server/status.json
 ```
 
 Four properties a consumer can rely on:
@@ -378,7 +378,7 @@ already documents. Adding a FAIL to that section needs its own written argument.
 
 Until 2026-08-15 there was **no journald configuration in this repository at all** - the host ran on
 uCore's `Storage=persistent` and inherited defaults, so retention was "10% of `/var`, capped at
-4 GB, about three weeks", true and undeclared. It is now `host/journald/10-media-stack.conf`:
+4 GB, about three weeks", true and undeclared. It is now `host/journald/10-home-server.conf`:
 **90 days, with a 16 GB cap as the runaway backstop rather than the binding constraint.**
 
 | Measured before the change, 2026-08-14 | |
@@ -414,7 +414,7 @@ tripwire on the NVMe, not a rotation policy.
 
 ## Commands
 
-All of these run on the server as `core`, from `/var/media-stack`. **No `sudo`** - the stack is
+All of these run on the server as `core`, from `/var/home-server`. **No `sudo`** - the stack is
 rootless, and `systemctl --user` is a different unit space from `systemctl`.
 
 ```bash
@@ -434,12 +434,12 @@ podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change,
 ./bin/verify-host.sh --routes                 # plus the public routes (slow)
 ./bin/verify-host.sh --json | jq .summary     # the same findings, machine-readable
 jq -r '.checks[]|select(.status!="pass")|"\(.status)  \(.id)  \(.message)"' \
-  /var/lib/media-stack/status.json            # what the hourly run last found
+  /var/lib/home-server/status.json            # what the hourly run last found
 podman auto-update --dry-run                  # 17 rows with a policy, not an empty table
 systemctl --user list-timers                  # verify hourly, backup + auto-update nightly
 
-systemctl --user start media-stack-backup     # back up now rather than waiting for 03:00
-journalctl --user -u media-stack-backup -n 50
+systemctl --user start home-server-backup     # back up now rather than waiting for 03:00
+journalctl --user -u home-server-backup -n 50
 ```
 
 **From the workstation**, because they either need credentials the server does not have or have to
@@ -456,7 +456,7 @@ outlive the machine they are talking about:
 **Updates are automatic, in two independent tracks.** Containers: `podman-auto-update.timer`
 nightly, following tags, rolling back on a failed start. Host: `rpm-ostreed-automatic.timer`
 nightly, which **stages and never reboots**. Applying it is either a deliberate human act via
-`bin/reboot-host.sh`, or `media-stack-reboot.timer` hourly from 05:00 to 09:00 on Sundays - which
+`bin/reboot-host.sh`, or `home-server-reboot.timer` hourly from 05:00 to 09:00 on Sundays - which
 applies a staged deployment only when greenboot is armed to undo it and refuses on anything else.
 **Five attempts rather than one, because the refusal that actually fires is transient**: the
 encoder gate means a Tdarr job running at 05:08 used to cost the deployment a whole week. A
@@ -516,10 +516,10 @@ whole ingress down. `acme_dns gandi` does not exist in the stock image, so valid
 custom build:
 
 ```bash
-docker run --rm -v "$PWD/apps/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+podman run --rm -v "$PWD/apps/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
   -e DOMAIN=example.com -e PORT_TDARR_WEB=8265 \
   -e PORT_QBITTORRENT_WEB=8200 -e PORT_JOAL_WEB=8221 -e GANDI_BEARER_TOKEN=dummy \
-  media-stack/caddy:latest caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  home-server/caddy:latest caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
 ## Architecture
@@ -649,7 +649,7 @@ podman exec tdarr-server curl -sf -X POST -H 'Content-Type: application/json' \
 ```
 
 `bin/promote-transcoded.py` therefore reconciles rather than promotes: it tells Radarr and Sonarr
-where Tdarr already put the file. Run every 10 minutes by `media-stack-promote.timer`.
+where Tdarr already put the file. Run every 10 minutes by `home-server-promote.timer`.
 
 **It covers all four types, and each needs BOTH root folders to exist.** Radarr owns
 `movies` + `documentaries`, Sonarr owns `series` + `anime`. It used to handle one type per
@@ -779,7 +779,7 @@ mean rescoring the whole profile, not moving the cutoff. The enabled `Anime` rel
 
 ## The transcode policy
 
-**One ffmpeg pass, defined by one tracked plugin.** `tdarr/plugins/Tdarr_Plugin_avs1_MediaStackStreamPolicy.js`
+**One ffmpeg pass, defined by one tracked plugin.** `apps/tdarr/plugins/Tdarr_Plugin_avs1_MediaStackStreamPolicy.js`
 is a *classic* Tdarr plugin - deliberately, not a flow plugin: a flow plugin must live at
 `Plugins/Local/FlowPlugins/<cat>/<name>/1.0.0/index.js` and the community ones reach `FlowHelpers`
 through relative `require`s that **do not resolve from `Local/`**. A classic plugin is one file in
@@ -1004,6 +1004,28 @@ secret can be written to disk in a public repository. `sops secrets/env.sops.env
 
 Conclusions from auditing the running host. Do not rediscover these:
 
+- **The project was `media-stack` until 2026-08-15.** The checkout moved `/var/media-stack` ->
+  `/var/home-server`, five timers and five services were renamed, `/var/lib/`, `/var/backups/` and
+  `~/.cache/` followed, and `MEDIA_STACK_*` became `HOME_SERVER_*`. **Three things deliberately did
+  not follow, so `git grep media-stack` still finds them and they are not misses:**
+  - **The Tdarr plugin**, `Tdarr_Plugin_avs1_MediaStackStreamPolicy.js`. Its filename *is* its `id`,
+    and `apps/tdarr/flows/avsOnePass1.json` references it as `Local:Tdarr_Plugin_avs1_...` - but the
+    flow that actually runs lives in Tdarr's SQLite database, not in git. Worse,
+    `tdarr-server.container` copies plugins with `cp -a`, not `rsync --delete`, so a rename would
+    leave *both* files in `Plugins/Local/` and transcodes would keep working off the stale one until
+    a config restore, then fail. The name still describes what it is: a media stream policy.
+  - **The four Stage 0/1 paths in `host/RUNBOOK.md`**, which record the Fedora 37 host destroyed on
+    2026-08-12 - they sit beside `/home/avanserv`, `/var/lib/docker` and `docker compose`.
+  - **Git history.** Use `git grep` on the working tree as the gate, never `grep -rn .`, which
+    descends into `.git/`.
+
+  The restic snapshot identity (`--tag`/`--host`) *did* follow, but only via `restic tag --add`
+  and `restic rewrite --new-host`, which rewrite the existing chain in place. **Do not simply edit
+  those strings**: `forget` groups by host *and paths*, so a plain edit orphans every existing
+  snapshot from the retention policy. `paths` is the one field `rewrite` cannot change, so the
+  workstation's chain - staged at `~/.cache/<name>/staging` - forks regardless, exactly as the
+  two-chain note under Backups describes. The old group is retired once, by hand, after the new
+  one has been restored successfully.
 - **`firewalld` now governs published ports, which is the reverse of the Docker host.** Under
   Docker a published port stayed reachable whatever the zone allowed, because Docker's DNAT ran
   ahead of firewalld's filtering. Rootless Podman publishes through a userspace `rootlessport`
@@ -1068,7 +1090,7 @@ Conclusions from auditing the running host. Do not rediscover these:
   are installed and exactly one may be armed - two would each write a deployment into a `/boot` that
   holds two kernels, and the loser fails overnight with nobody watching. Masking matters because
   `disable` only removes the `.wants` symlink and a `Wants=` elsewhere silently re-enables it, the
-  same trap that had `media-stack-promote` starting Tdarr every 10 minutes. Masking zincati also
+  same trap that had `home-server-promote` starting Tdarr every 10 minutes. Masking zincati also
   removes `--bypass-driver` from the migration.
 - **`AutomaticUpdatePolicy=stage` is uCore's own default, not something anyone set** - `/etc/rpm-ostreed.conf`
   is byte-identical to `/usr/etc/`. It is restated in `ucore.bu` anyway so the policy is a decision
@@ -1092,7 +1114,7 @@ Conclusions from auditing the running host. Do not rediscover these:
     test unit at a deliberately broken image and watching the journal restore the old one.
   - **auto-update does not trigger a `.build` unit.** Caddy is `AutoUpdate=local`, which notices a
     new image without producing one, and a `.build` unit only runs when its image is absent - so
-    without `media-stack-caddy-build.timer` Caddy alone would never update. That unit also needs
+    without `home-server-caddy-build.timer` Caddy alone would never update. That unit also needs
     `Pull=newer` in `caddy.build`, because podman build's default pull policy is `missing` and it
     would otherwise reuse a stale local `caddy:2` for ever while succeeding in four seconds.
 - **The nightly prune does not eat the rollback.** The shipped `podman-auto-update.service` runs
@@ -1296,7 +1318,7 @@ Conclusions from auditing the running host. Do not rediscover these:
   `transcodegpu:2, transcodecpu:0`, `CPUWeight`/`IOWeight`/`IOReadBandwidthMax`, and the `io`
   controller actually delegated) and the units were re-enabled. **The warning that came out of that
   period still stands: a `Wants=` on a disabled unit silently re-enables it**, which is how
-  `media-stack-promote.service` started Tdarr every 10 minutes. `After=` for ordering, never
+  `home-server-promote.service` started Tdarr every 10 minutes. `After=` for ordering, never
   `Wants=`.
 - **The ISP resolver returns a blocking page for several indexer domains.** All three distinct
   1337x hostnames resolved to one address, `193.191.210.104`, and four indexers failed as "DNS/SSL
@@ -1337,7 +1359,7 @@ Remaining, in order:
    deployment nobody applies, an update run that silently stopped, a CDI spec that no longer matches
    the driver, a backup that has stopped running, a checkout that has drifted from git.
 
-   **The data layer is done, 2026-08-15.** `/var/lib/media-stack/status.json` carries every finding
+   **The data layer is done, 2026-08-15.** `/var/lib/home-server/status.json` carries every finding
    keyed by a stable id, plus a `facts` object of the numbers, rewritten hourly - see "Logs and
    status". The journal is declared and bounded at 90 days, and 47% of its volume (podman's
    `health_status` events) is gone. **The durable-record gap named below is closed**: `status.json`
@@ -1346,7 +1368,7 @@ Remaining, in order:
 
    **What is still missing is anything that reaches a human who is not logged in.** That is now the
    whole of this item. The dashboard reads `status.json`; a notifier would fire off the same
-   document, or off an `OnFailure=` on `media-stack-verify.service`.
+   document, or off an `OnFailure=` on `home-server-verify.service`.
 
    **Do NOT build it on `journalctl -p err`.** Jellyfin alone emits 2,644 priority-3 lines a day of
    ffmpeg chatter and there is no lever to stop it - see Known state. Unit state and container
@@ -1361,7 +1383,7 @@ Remaining, in order:
 2. ~~greenboot, and only then an unattended reboot window.~~ **Done, 2026-08-14.** See
    `host/greenboot/README.md`. greenboot is layered - the one package on this host, and a
    deliberate exception to the rule below - and a rejected deployment rolls itself back. The
-   reboot window is `media-stack-reboot.timer`, hourly from 05:00 to 09:00 on Sundays, driven by
+   reboot window is `home-server-reboot.timer`, hourly from 05:00 to 09:00 on Sundays, driven by
    `bin/reboot-when-staged.sh`, which is nothing but refusals - with one deliberate exception.
 
    **A gate that is correct every time can still be wrong in aggregate, and the encoder gate
@@ -1390,7 +1412,7 @@ Remaining, in order:
      `OnFailure=`, no `redboot.target` - and every one of those facts is true and leads to the
      wrong conclusion, because the behaviour is in the binary. Reasoning from unit files about
      what a program does is how a whole afternoon gets spent.
-   - **A system unit, or a drop-in for one, cannot be a symlink into `/var/media-stack`.**
+   - **A system unit, or a drop-in for one, cannot be a symlink into `/var/home-server`.**
      SELinux is Enforcing and the checkout is `var_t`, so PID 1 cannot read it - while
      `systemctl cat` prints the file happily and no AVC is logged. The check scripts *are*
      symlinks and correctly so: greenboot execs those itself. What systemd launches or parses

@@ -2,14 +2,14 @@
 # ==============================================================================
 # Back up config/ from the server itself, nightly
 # ------------------------------------------------------------------------------
-# RUNS ON THE SERVER, from media-stack-backup.timer. This is the backup that
+# RUNS ON THE SERVER, from home-server-backup.timer. This is the backup that
 # actually happens: bin/backup-config.sh pulls from the workstation and is
 # therefore only as frequent as someone being at home, which meant a fortnight
 # away was a fortnight with no backups.
 #
 # TWO DESTINATIONS, AND THEY PROTECT AGAINST DIFFERENT THINGS:
 #
-#   /var/backups/media-stack   Local, fast, no credentials, no network. Covers a
+#   /var/backups/home-server   Local, fast, no credentials, no network. Covers a
 #                              bad change, a bad restore, an application
 #                              corrupting its own database. It is on the SAME
 #                              DISK as config/, so it does NOT survive nvme0n1
@@ -53,8 +53,8 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="${DOCKER_VOLUME_CONFIG:-$ROOT/config}"
-STAGING="${MEDIA_STACK_STAGING:-/var/backups/staging}"
-STATE="${MEDIA_STACK_BACKUP_STATE:-$HOME/.cache/media-stack/backup-state}"
+STAGING="${HOME_SERVER_STAGING:-/var/backups/staging}"
+STATE="${HOME_SERVER_BACKUP_STATE:-$HOME/.cache/home-server/backup-state}"
 DRY=""
 [ "${1:-}" = "--dry-run" ] && DRY="--dry-run"
 
@@ -116,7 +116,7 @@ fi
 # on disk can be missing commits that live in the -wal. See snapshot-databases.sh.
 say "snapshotting live databases"
 "$ROOT/bin/snapshot-databases.sh" "$CONFIG" || die "database snapshot failed"
-rsync -a "$HOME/.cache/media-stack/db-snapshot/" "$STAGING/config/" || die "overlay failed"
+rsync -a "$HOME/.cache/home-server/db-snapshot/" "$STAGING/config/" || die "overlay failed"
 
 # ------------------------------------------------------------------------------
 # 4. Local repository
@@ -126,7 +126,7 @@ rsync -a "$HOME/.cache/media-stack/db-snapshot/" "$STAGING/config/" || die "over
 # --password-command "echo $PASS" - puts both in the process table, where any
 # process on the box can read them out of ps.
 umask 077
-PWDIR=$(mktemp -d /run/user/"$(id -u)"/media-stack-backup.XXXXXX 2>/dev/null) \
+PWDIR=$(mktemp -d /run/user/"$(id -u)"/home-server-backup.XXXXXX 2>/dev/null) \
 	|| PWDIR=$(mktemp -d) || die "cannot create a private directory for the passwords"
 trap 'rm -rf "$PWDIR"' EXIT
 printf '%s' "$BACKUP_LOCAL_PASSWORD" >"$PWDIR/local"
@@ -144,14 +144,14 @@ restic cat config >/dev/null 2>&1 || {
 # machine's history into separate retention groups, each pruned independently
 # and neither holding the full chain. It also has to match what the workstation
 # writes, or the two repositories disagree about which chain is which.
-restic backup $DRY --tag media-stack --tag config --host media-stack "$STAGING/config" \
+restic backup $DRY --tag home-server --tag config --host home-server "$STAGING/config" \
 	|| die "local backup failed"
 
 if [ -z "$DRY" ]; then
 	# Keeps a year of history for a few GB. The daily tier matters most: the
 	# damage this protects against is usually noticed within a week.
 	say "local retention"
-	restic forget --tag media-stack --prune \
+	restic forget --tag home-server --prune \
 		--keep-daily 7 --keep-weekly 4 --keep-monthly 12 || die "local prune failed"
 fi
 
@@ -160,10 +160,10 @@ fi
 # holding more than one chain it returns several rows and .[0] is whichever came
 # back first, not the newest. The off-site repository holds two chains (this
 # machine stages at /var/backups/staging/config, the workstation at
-# ~/.cache/media-stack/staging/config), and recording the wrong one made the
+# ~/.cache/home-server/staging/config), and recording the wrong one made the
 # marker name a two-day-old snapshot from the other chain.
 snapshot_id() {  # <extra restic args...>
-	restic "$@" snapshots --host media-stack --path "$STAGING/config" \
+	restic "$@" snapshots --host home-server --path "$STAGING/config" \
 		--latest 1 --json 2>/dev/null | jq -r '.[0].short_id // empty'
 }
 
@@ -289,7 +289,7 @@ else
 		probe_region=$(printf '%s' "$probe_host" | awk -F. '/^s3\./ { print $2 }')
 		[ -z "$probe_region" ] || export RCLONE_S3_REGION="$probe_region"
 
-		probe=":s3:$probe_bucket/${MEDIA_STACK_DELETE_PROBE_KEY:-media-stack-delete-probe}"
+		probe=":s3:$probe_bucket/${HOME_SERVER_DELETE_PROBE_KEY:-home-server-delete-probe}"
 		if ! printf 'delete-denial probe\n' \
 			| rclone rcat "$probe" >/dev/null 2>"$PWDIR/probe.err"; then
 			# Cannot even write, so nothing was tested. Not a finding on its own:

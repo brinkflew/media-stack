@@ -12,17 +12,17 @@
 # After this runs, the old system exists only in the disk image. The primary
 # copy is /mnt/media/nvme0n1.img.zst on sda - a different physical device this
 # install does not touch - which makes it restorable from the live session with
-# no network and no workstation. MEDIA_STACK_DISK_IMAGE names a second copy, if
+# no network and no workstation. HOME_SERVER_DISK_IMAGE names a second copy, if
 # one was taken. This script reports which of them it can actually see, at the
 # moment that matters, rather than naming a path and hoping.
 # ==============================================================================
 
 set -euo pipefail
 
-TARGET_IP="${MEDIA_STACK_LIVE_IP:-192.168.0.100}"
+TARGET_IP="${HOME_SERVER_LIVE_IP:-192.168.0.100}"
 INSTALL_DEV="/dev/nvme0n1"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${MEDIA_STACK_WORK:-$HOME/.cache/media-stack/fcos}"
+WORK="${HOME_SERVER_WORK:-$HOME/.cache/home-server/fcos}"
 SSHOPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -111,7 +111,7 @@ live 'sudo vgchange -ay >/dev/null 2>&1 || true
         sudo mount -o ro /dev/mapper/vg_xfs_media-xfs_db /var/tmp/media 2>/dev/null || true' || true
 onbox=$(live 'stat -c %s /var/tmp/media/nvme0n1.img.zst 2>/dev/null || echo 0' || echo 0)
 
-IMAGE="${MEDIA_STACK_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
+IMAGE="${HOME_SERVER_DISK_IMAGE:-$HOME/backups/nvme0n1.img.zst}"
 offbox=0
 [ -f "$IMAGE" ] && offbox=$(stat -c %s "$IMAGE")
 
@@ -135,7 +135,7 @@ cat <<EOF
   ------------------------------------------------------------------------
    This writes Fedora CoreOS over $INSTALL_DEV.
 
-   DESTROYED    /var/media-stack (checkout, .env, config/)
+   DESTROYED    /var/home-server (checkout, .env, config/)
                 /home/avanserv   (including the server's age key)
                 /var/lib/docker  (images, volumes, the Minecraft world)
                 the Fedora 37 install itself

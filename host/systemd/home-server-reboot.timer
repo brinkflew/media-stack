@@ -20,8 +20,8 @@
 #
 #   00:00  podman-auto-update, +15min jitter, restarting containers as it goes
 #   00:00  rpm-ostreed-automatic, staging the deployment this may apply
-#   03:00  media-stack-backup, +5min jitter, TimeoutStartSec=45min
-#   22:00  media-stack-caddy-build, Saturdays
+#   03:00  home-server-backup, +5min jitter, TimeoutStartSec=45min
+#   22:00  home-server-caddy-build, Saturdays
 #
 # So the backup has finished with an hour to spare even at its 45 minute timeout,
 # and the reboot lands on the morning most likely to be noticed if it goes wrong.

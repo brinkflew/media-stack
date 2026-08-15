@@ -68,17 +68,17 @@ command -v restic >/dev/null || die "restic is not on PATH"
 
 case "$REPO_KIND" in
 	local)
-		export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-$HOME/backups/media-stack}"
-		export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/media-stack.pw}"
+		export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-$HOME/backups/home-server}"
+		export RESTIC_PASSWORD_FILE="${RESTIC_PASSWORD_FILE:-$HOME/.config/restic/home-server.pw}"
 		;;
 	offsite)
-		env_file="${MEDIA_STACK_OFFSITE_ENV:-$HOME/.config/restic/media-stack-offsite.env}"
+		env_file="${HOME_SERVER_OFFSITE_ENV:-$HOME/.config/restic/home-server-offsite.env}"
 		[ -s "$env_file" ] || die "no off-site config at $env_file"
 		set -a
 		# shellcheck source=/dev/null  # a runtime override, not a fixed path
 		. "$env_file"
 		set +a
-		export RESTIC_PASSWORD_FILE="${MEDIA_STACK_OFFSITE_PW:-$HOME/.config/restic/media-stack-offsite.pw}"
+		export RESTIC_PASSWORD_FILE="${HOME_SERVER_OFFSITE_PW:-$HOME/.config/restic/home-server-offsite.pw}"
 		;;
 	*) die "--repo takes 'local' or 'offsite', not '$REPO_KIND'" ;;
 esac
@@ -89,7 +89,7 @@ esac
 # obvious default would restore the whole tree INTO MEMORY, and either OOM or
 # leave the machine swapping. Default to somewhere disk-backed and let TMPDIR
 # override it deliberately.
-SCRATCH="${TMPDIR:-$HOME/.cache/media-stack}"
+SCRATCH="${TMPDIR:-$HOME/.cache/home-server}"
 mkdir -p "$SCRATCH" 2>/dev/null
 
 # Fail before downloading gigabytes rather than partway through. restic reports
@@ -113,7 +113,7 @@ case "$fstype" in
 esac
 echo "  scratch: $SCRATCH ($fstype, ${have_mb}M free, needs ~${need_mb}M)"
 
-TARGET=$(mktemp -d "$SCRATCH/media-stack-restore.XXXXXX") || die "cannot create a scratch directory"
+TARGET=$(mktemp -d "$SCRATCH/home-server-restore.XXXXXX") || die "cannot create a scratch directory"
 cleanup() { [ -n "$KEEP" ] || rm -rf "$TARGET"; }
 trap cleanup EXIT
 

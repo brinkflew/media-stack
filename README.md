@@ -1,4 +1,4 @@
-# media-stack
+# home-server
 
 A self-hosted server, defined declaratively. Media-focused today, deliberately widening.
 

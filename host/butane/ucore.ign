@@ -40,7 +40,7 @@
         "mode": 420
       },
       {
-        "path": "/etc/systemd/journald.conf.d/10-media-stack.conf",
+        "path": "/etc/systemd/journald.conf.d/10-home-server.conf",
         "contents": {
           "compression": "",
           "source": "data:,%5BJournal%5D%0ASystemMaxUse%3D16G%0AMaxRetentionSec%3D90d%0ASystemKeepFree%3D4G%0ASystemMaxFileSize%3D128M%0AMaxFileSec%3D1day%0ARateLimitIntervalSec%3D30s%0ARateLimitBurst%3D10000%0A"
@@ -72,7 +72,7 @@
         "mode": 420
       },
       {
-        "path": "/etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf",
+        "path": "/etc/systemd/system/greenboot-healthcheck.service.d/10-home-server.conf",
         "contents": {
           "compression": "gzip",
           "source": "data:;base64,H4sIAAAAAAAC/3yQMc7bMAyFd52CQNbKaAt0zNAzJEWHHxkUibaIRKRK0jZ8+6JO08FDN0l8n/Q9ffxg8lv4mdjtzOir6CMKP4lx8KQTevg+Oup/ZyMprun5LIOhLpTx77lt5thKfMpEfBwuSWNjjw0LpaHJzO/rtLco5op4ZHihQinmQlFxVLR6CLxNonnKj9hF3f5FwsfltbqFE1wrwszkYJW6AQtcqaHMfvGkfsF8hsQFrlvHszBaFQfiikpu4QTEIzH59gnWSrkCGXhFWFV4AqupI4yiYNLQK/EECe4iDmsiNxAedgWyN3ify4S+M7igbpAr5gcQg+KvmRTLUHahNbH/2YQTZGl3YiwQYVJE3h+oaS/TUaNlpe7gr14Qd/5lmXpHDSe4y8zFYHdaGXRmSA5fvn62IRz/41sjDr8DAAD//1Ps9F4wAgAA"
@@ -124,7 +124,7 @@
         "user": {
           "name": "core"
         },
-        "target": "/var/media-stack/stacks/common"
+        "target": "/var/home-server/stacks/common"
       },
       {
         "group": {
@@ -134,7 +134,7 @@
         "user": {
           "name": "core"
         },
-        "target": "/var/media-stack/stacks/torrent"
+        "target": "/var/home-server/stacks/torrent"
       },
       {
         "group": {
@@ -144,7 +144,7 @@
         "user": {
           "name": "core"
         },
-        "target": "/var/media-stack/stacks/media"
+        "target": "/var/home-server/stacks/media"
       },
       {
         "group": {
@@ -154,7 +154,7 @@
         "user": {
           "name": "core"
         },
-        "target": "/var/media-stack/stacks/infra"
+        "target": "/var/home-server/stacks/infra"
       },
       {
         "group": {
@@ -164,15 +164,15 @@
         "user": {
           "name": "core"
         },
-        "target": "/var/media-stack/host/containers/containers.conf"
+        "target": "/var/home-server/host/containers/containers.conf"
       },
       {
-        "path": "/etc/greenboot/check/wanted.d/40-media-stack.sh",
-        "target": "/var/media-stack/host/greenboot/40-media-stack.sh"
+        "path": "/etc/greenboot/check/wanted.d/40-home-server.sh",
+        "target": "/var/home-server/host/greenboot/40-home-server.sh"
       },
       {
         "path": "/etc/greenboot/red.d/50-record-red-boot.sh",
-        "target": "/var/media-stack/host/greenboot/50-record-red-boot.sh"
+        "target": "/var/home-server/host/greenboot/50-record-red-boot.sh"
       }
     ]
   },

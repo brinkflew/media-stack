@@ -30,8 +30,8 @@
 
 set -euo pipefail
 
-CONFIG="${1:-/var/media-stack/config}"
-SHADOW="${2:-$HOME/.cache/media-stack/db-snapshot}"
+CONFIG="${1:-/var/home-server/config}"
+SHADOW="${2:-$HOME/.cache/home-server/db-snapshot}"
 
 mkdir -p "$SHADOW"
 

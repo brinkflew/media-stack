@@ -31,7 +31,7 @@
 # machine with no console, effectively irreversible if it loops. So a timeout, or
 # a checkout that is not there, is recorded as inconclusive and exits 0: those
 # are conditions a rollback cannot fix, and a health check that reverts the OS
-# because /var/media-stack was missing would be doing harm confidently. The
+# because /var/home-server was missing would be doing harm confidently. The
 # hourly battery still surfaces both, via the MOTD, at a moment someone can read
 # it.
 # ==============================================================================
@@ -43,9 +43,9 @@ set -uo pipefail
 export HOME="${HOME:-/root}"
 export PATH="/usr/local/bin:/usr/bin:/usr/sbin:/usr/local/sbin"
 
-CHECK="${MEDIA_STACK_CHECK:-/var/media-stack/bin/verify-host.sh}"
-STATE="${MEDIA_STACK_BOOT_STATE:-/var/lib/media-stack/boot-state}"
-LIMIT="${MEDIA_STACK_GREENBOOT_TIMEOUT:-120}"
+CHECK="${HOME_SERVER_CHECK:-/var/home-server/bin/verify-host.sh}"
+STATE="${HOME_SERVER_BOOT_STATE:-/var/lib/home-server/boot-state}"
+LIMIT="${HOME_SERVER_GREENBOOT_TIMEOUT:-120}"
 
 # ------------------------------------------------------------------------------
 # The durable verdict
@@ -78,9 +78,9 @@ record() {  # <green|red|timeout|missing>
 # Run it
 # ------------------------------------------------------------------------------
 # A missing or non-executable checkout is not a bad deployment. Rolling the OS
-# back would not restore /var/media-stack, and would cost a reboot to prove it.
+# back would not restore /var/home-server, and would cost a reboot to prove it.
 if [ ! -x "$CHECK" ]; then
-	echo "greenboot/media-stack: $CHECK is not executable - nothing checked" >&2
+	echo "greenboot/home-server: $CHECK is not executable - nothing checked" >&2
 	record missing
 	exit 0
 fi
@@ -99,7 +99,7 @@ case "$rc" in
 	124)
 		# INCONCLUSIVE, NOT RED. rpm-ostreed can block for tens of seconds
 		# while it stages, and a slow boot must not be able to revert the OS.
-		echo "greenboot/media-stack: verify-host.sh exceeded ${LIMIT}s - inconclusive" >&2
+		echo "greenboot/home-server: verify-host.sh exceeded ${LIMIT}s - inconclusive" >&2
 		record timeout
 		exit 0
 		;;

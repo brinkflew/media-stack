@@ -35,4 +35,4 @@ Options=isolate=true
 # whole stack failed at its first dependency. Every quadlet that interpolates a
 # variable needs it, whatever its type.
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env

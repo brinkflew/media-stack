@@ -35,12 +35,12 @@ import sys
 import xml.etree.ElementTree as ET
 
 CSS = os.environ.get(
-    "JELLYFIN_CUSTOM_CSS", "/var/media-stack/apps/jellyfin/custom.css"
+    "JELLYFIN_CUSTOM_CSS", "/var/home-server/apps/jellyfin/custom.css"
 )
 BRANDING = os.environ.get(
     "JELLYFIN_BRANDING",
     os.path.join(
-        os.environ.get("DOCKER_VOLUME_CONFIG", "/var/media-stack/config"),
+        os.environ.get("DOCKER_VOLUME_CONFIG", "/var/home-server/config"),
         "jellyfin",
         "branding.xml",
     ),

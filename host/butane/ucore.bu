@@ -12,7 +12,7 @@ version: 1.5.0
 # THE TARGET IS nvme0n1. /dev/sda carries the 8TB media library as an XFS
 # filesystem on LVM (vg_xfs_media/xfs_db) and must not be touched.
 #
-# READ THIS BEFORE INSTALLING. /var/media-stack/config lives on nvme0n1p3, so
+# READ THIS BEFORE INSTALLING. /var/home-server/config lives on nvme0n1p3, so
 # the install DESTROYS it: ~6.3GB of Jellyfin metadata, the *arr databases,
 # Caddy's certificates and ACME account, and Pocket ID's passkey records. None
 # of it is in git and none of it is regenerable. The Stage 0 backup predates
@@ -144,7 +144,7 @@ storage:
     # ------------------------------------------------------------------------
     # How much log this host keeps, and for how long
     # ------------------------------------------------------------------------
-    # Kept in sync with host/journald/10-media-stack.conf, which carries the
+    # Kept in sync with host/journald/10-home-server.conf, which carries the
     # reasoning. It is duplicated rather than symlinked because journald is
     # parsed by PID 1, and SELinux will not let PID 1 read var_t - the trap
     # host/greenboot/README.md documents, where `systemctl cat` prints the file
@@ -153,7 +153,7 @@ storage:
     # IGNITION RUNS ONCE, AT FIRST BOOT, so adding this here does not configure
     # the running machine. It was applied by hand on 2026-08-15; this entry is
     # what a reinstall gets. bin/verify-host.sh asserts the values are in force.
-    - path: /etc/systemd/journald.conf.d/10-media-stack.conf
+    - path: /etc/systemd/journald.conf.d/10-home-server.conf
       mode: 0644
       contents:
         inline: |
@@ -222,7 +222,7 @@ storage:
     # ------------------------------------------------------------------------
     # Order greenboot's health check after what it asserts
     # ------------------------------------------------------------------------
-    # AN ORDINARY FILE, NOT A SYMLINK INTO /var/media-stack, AND THAT IS NOT A
+    # AN ORDINARY FILE, NOT A SYMLINK INTO /var/home-server, AND THAT IS NOT A
     # STYLE CHOICE. SELinux is Enforcing and PID 1 cannot read or exec var_t, so
     # a drop-in symlinked into the checkout is silently ignored: `systemctl cat`
     # still prints it, because the client reads it unconfined, while
@@ -248,7 +248,7 @@ storage:
     # Ordering only, never Wants=, except network-online.target which is the
     # documented way to ask for it. A Wants= on any of the others would silently
     # ENABLE a unit that is deliberately not enabled.
-    - path: /etc/systemd/system/greenboot-healthcheck.service.d/10-media-stack.conf
+    - path: /etc/systemd/system/greenboot-healthcheck.service.d/10-home-server.conf
       mode: 0644
       contents:
         inline: |
@@ -359,19 +359,19 @@ storage:
     # directories in means `git pull` + `systemctl --user daemon-reload` is the
     # whole deploy, with no copy step to forget.
     - path: /var/home/core/.config/containers/systemd/common
-      target: /var/media-stack/stacks/common
+      target: /var/home-server/stacks/common
       user: { name: core }
       group: { name: core }
     - path: /var/home/core/.config/containers/systemd/torrent
-      target: /var/media-stack/stacks/torrent
+      target: /var/home-server/stacks/torrent
       user: { name: core }
       group: { name: core }
     - path: /var/home/core/.config/containers/systemd/media
-      target: /var/media-stack/stacks/media
+      target: /var/home-server/stacks/media
       user: { name: core }
       group: { name: core }
     - path: /var/home/core/.config/containers/systemd/infra
-      target: /var/media-stack/stacks/infra
+      target: /var/home-server/stacks/infra
       user: { name: core }
       group: { name: core }
 
@@ -379,7 +379,7 @@ storage:
     # is fine here where it is not for journald above: podman reads this as
     # `core`, an ordinary user process, not as PID 1.
     - path: /var/home/core/.config/containers/containers.conf
-      target: /var/media-stack/host/containers/containers.conf
+      target: /var/home-server/host/containers/containers.conf
       user: { name: core }
       group: { name: core }
 
@@ -404,12 +404,12 @@ storage:
     # THESE ARE SYMLINKS AND THE DROP-IN IS NOT, and that asymmetry is SELinux
     # rather than taste. greenboot execs these itself, from a properly labelled
     # binary, so it runs as unconfined_service_t and may read and exec under
-    # /var/media-stack. The ordering drop-in is read by PID 1 instead, which may
+    # /var/home-server. The ordering drop-in is read by PID 1 instead, which may
     # not - so it is an ordinary file above. See the comment there.
-    - path: /etc/greenboot/check/wanted.d/40-media-stack.sh
-      target: /var/media-stack/host/greenboot/40-media-stack.sh
+    - path: /etc/greenboot/check/wanted.d/40-home-server.sh
+      target: /var/home-server/host/greenboot/40-home-server.sh
     - path: /etc/greenboot/red.d/50-record-red-boot.sh
-      target: /var/media-stack/host/greenboot/50-record-red-boot.sh
+      target: /var/home-server/host/greenboot/50-record-red-boot.sh
 
 systemd:
   units:
@@ -443,7 +443,7 @@ systemd:
     #
     # MASK rather than disable: `disable` only removes the .wants symlink, and
     # a Wants= from anything else silently re-enables it in practice - the same
-    # trap that had media-stack-promote.service starting Tdarr every 10 minutes.
+    # trap that had home-server-promote.service starting Tdarr every 10 minutes.
     - name: zincati.service
       enabled: false
       mask: true

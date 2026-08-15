@@ -6,7 +6,7 @@
 # would otherwise conspire to freeze it for ever:
 #
 #   - a quadlet .build unit only runs when its image is ABSENT. Once
-#     localhost/media-stack/caddy:latest exists, systemd never builds again.
+#     localhost/home-server/caddy:latest exists, systemd never builds again.
 #   - podman auto-update's `local` policy compares the running container against
 #     the image in local storage. It notices a newer image; it does not make one.
 #
@@ -24,7 +24,7 @@
 
 [Unit]
 Description=Rebuild the Caddy image against current upstream
-Documentation=file:/var/media-stack/apps/caddy/Dockerfile
+Documentation=file:/var/home-server/apps/caddy/Dockerfile
 
 [Service]
 Type=oneshot

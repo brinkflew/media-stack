@@ -12,7 +12,7 @@
 
 [Unit]
 Description=Promote transcoded media into the Jellyfin library
-Documentation=file:/var/media-stack/bin/promote-transcoded.py
+Documentation=file:/var/home-server/bin/promote-transcoded.py
 # After= only, NEVER Wants=. This unit had a Wants= once, and it pulled
 # tdarr-server up every ten minutes - which silently defeated having disabled it.
 # Tdarr is back in default.target now, so the immediate harm is gone, but the
@@ -22,7 +22,7 @@ After=tdarr-server.service
 
 [Service]
 Type=oneshot
-ExecStart=/var/media-stack/bin/promote-transcoded.py
+ExecStart=/var/home-server/bin/promote-transcoded.py
 # It only ever calls the *arr editor endpoints, so a failure moves nothing and
 # the next tick retries. No point restarting a oneshot on a transient API blip.
 SuccessExitStatus=0

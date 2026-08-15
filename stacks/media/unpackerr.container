@@ -65,7 +65,7 @@ Environment=UN_RADARR_0_DELETE_ORIG=false
 Environment=UN_RADARR_0_DELETE_DELAY=5m
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 Restart=always
 RestartSec=5
 

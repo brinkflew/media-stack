@@ -31,7 +31,7 @@ Image=caddy.build
 # the same name in local storage and restarts if they differ.
 #
 # IT DOES NOT TRIGGER THE BUILD. Nothing would ever produce a newer image, and
-# Caddy would silently never update - which is why media-stack-caddy-build.timer
+# Caddy would silently never update - which is why home-server-caddy-build.timer
 # exists. That rebuilds weekly; this notices the result.
 AutoUpdate=local
 ContainerName=caddy
@@ -44,7 +44,7 @@ Network=net-transcode.network
 # Mounted as a directory, not a single file, so that a `git pull` replacing the
 # Caddyfile does not leave the container holding a stale inode. Shared and
 # read-only, so :z rather than :Z.
-Volume=/var/media-stack/apps/caddy:/etc/caddy:z,ro
+Volume=/var/home-server/apps/caddy:/etc/caddy:z,ro
 Volume=${DOCKER_VOLUME_CONFIG}/caddy/data:/data:Z
 Volume=${DOCKER_VOLUME_CONFIG}/caddy/config:/config:Z
 
@@ -78,7 +78,7 @@ HealthStartupSuccess=1
 Notify=healthy
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 Restart=always
 RestartSec=5
 # First start builds the image, which compiles Caddy from source.

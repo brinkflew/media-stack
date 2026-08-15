@@ -42,7 +42,7 @@ import os
 import subprocess
 import sys
 
-ENV_FILE = "/var/media-stack/.env"
+ENV_FILE = "/var/home-server/.env"
 
 # The one tree, seen three ways: the host mounts it at /mnt/media, the *arr apps
 # see it at /data, and Tdarr at /media. Only the prefix differs.

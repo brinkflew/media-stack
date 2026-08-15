@@ -64,6 +64,12 @@ are actively reinstalling, and the alternative desensitises you on every host.
 
 `nvme0n1` is wiped in full. On it today:
 
+**The four `/var/media-stack` paths in this stage are deliberate and must not be "fixed".** The
+project was renamed to `home-server` on 2026-08-15, but this stage records the Fedora 37 host that
+was destroyed on 2026-08-12 - which is why they sit beside `/home/avanserv`, `/var/lib/docker` and
+`docker compose`, none of which exists either. Renaming them would invent a history where a
+`/var/home-server` checkout ran under Compose on a machine that never saw it.
+
 | Path | What goes | Recovered from |
 |---|---|---|
 | `/var/media-stack` | the checkout, `.env`, and `config/` (6.3 GB) | git + restic (step 1) |
@@ -84,7 +90,7 @@ The XDG directories in `/home/avanserv` are empty; there is no personal data to 
 ### 1. Take a fresh backup - immediately before, not the day before
 
 ```bash
-cd ~/repos/brinkflew/media-stack && ./bin/backup-config.sh
+cd ~/repos/brinkflew/home-server && ./bin/backup-config.sh
 ```
 
 Anything changed between the last backup and the install - a new indexer, another passkey, a
@@ -93,7 +99,7 @@ watched episode - exists only on the disk about to be wiped. The run is a few se
 Confirm it worked before continuing:
 
 ```bash
-export RESTIC_REPOSITORY=~/backups/media-stack RESTIC_PASSWORD_FILE=~/.config/restic/media-stack.pw
+export RESTIC_REPOSITORY=~/backups/home-server RESTIC_PASSWORD_FILE=~/.config/restic/home-server.pw
 restic snapshots            # newest should be minutes old
 restic check                # no errors
 ```
@@ -139,8 +145,8 @@ A **second** copy on the workstation is still worth taking, because the on-box o
 seconds rather than the whole run:
 
 ```bash
-export MEDIA_STACK_DISK_IMAGE=/mnt/e/nvme0n1.img.zst              # external drive; see below
-rsync -P home.local:/mnt/media/nvme0n1.img.zst "$MEDIA_STACK_DISK_IMAGE"
+export HOME_SERVER_DISK_IMAGE=/mnt/e/nvme0n1.img.zst              # external drive; see below
+rsync -P home.local:/mnt/media/nvme0n1.img.zst "$HOME_SERVER_DISK_IMAGE"
 ```
 
 **73 GB probably does not fit on the workstation, and `df` will lie to you about it.** Under WSL,
@@ -151,15 +157,15 @@ the copy fails partway. Check the Windows volume, not the Linux one.
 External media is the normal answer. Tell the tooling where it went:
 
 ```bash
-export MEDIA_STACK_DISK_IMAGE=/mnt/e/nvme0n1.img.zst    # wherever it actually is
+export HOME_SERVER_DISK_IMAGE=/mnt/e/nvme0n1.img.zst    # wherever it actually is
 ```
 
 Verify the copy rather than assuming it, because a transfer that runs out of space truncates
 quietly and the result still looks like a file:
 
 ```bash
-stat -c %s "$MEDIA_STACK_DISK_IMAGE"                    # 73579900029
-zstd -dc "$MEDIA_STACK_DISK_IMAGE" | wc -c              # 250059350016 - the whole device
+stat -c %s "$HOME_SERVER_DISK_IMAGE"                    # 73579900029
+zstd -dc "$HOME_SERVER_DISK_IMAGE" | wc -c              # 250059350016 - the whole device
 ```
 
 `bin/remote-install.sh` reports which copies it can actually see, on the media disk and on the
@@ -370,8 +376,8 @@ the same one as before.
 ### 10. The repository
 
 ```bash
-sudo mkdir -p /var/media-stack && sudo chown core:core /var/media-stack
-git clone https://github.com/brinkflew/media-stack /var/media-stack
+sudo mkdir -p /var/home-server && sudo chown core:core /var/home-server
+git clone https://github.com/brinkflew/home-server /var/home-server
 ```
 
 Ignition symlinked `~/.config/containers/systemd/{common,torrent,media,infra}` into this directory,
@@ -405,14 +411,14 @@ curl -sSL https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19
 puts on `PATH` itself.
 
 **restic is needed on the server since 2026-08-14**, when the backup moved off the workstation and
-onto a nightly timer here. Without it `media-stack-backup.service` fails every night and
+onto a nightly timer here. Without it `home-server-backup.service` fails every night and
 `bin/verify-host.sh` reports the backup stale 48 hours later - which is the intended behaviour, but
 it is a slow way to discover a missing binary.
 
 ### 13. Render the environment
 
 ```bash
-cd /var/media-stack && ./bin/render-env.sh      # expect "wrote /var/media-stack/.env"
+cd /var/home-server && ./bin/render-env.sh      # expect "wrote /var/home-server/.env"
 ```
 
 ### 14. Restore `config/`
@@ -424,13 +430,13 @@ quadlets correct. Restoring as root produces a config tree no container can writ
 From the workstation:
 
 ```bash
-export RESTIC_REPOSITORY=~/backups/media-stack RESTIC_PASSWORD_FILE=~/.config/restic/media-stack.pw
+export RESTIC_REPOSITORY=~/backups/home-server RESTIC_PASSWORD_FILE=~/.config/restic/home-server.pw
 restic restore latest --target /tmp/restore
 # restic recreates the full original path, so config/ lands several levels down
 # under the staging directory it was backed up from - find it rather than guess.
 SRC=$(find /tmp/restore -type d -name config -print -quit)
-rsync -a "$SRC/" core@192.168.0.100:/var/media-stack/config/
-ssh core@192.168.0.100 'du -sh /var/media-stack/config && ls /var/media-stack/config'
+rsync -a "$SRC/" core@192.168.0.100:/var/home-server/config/
+ssh core@192.168.0.100 'du -sh /var/home-server/config && ls /var/home-server/config'
 ```
 
 Caddy's certificates were captured from inside its container as root, but restore as `core`
@@ -475,31 +481,31 @@ MOTD. Run it first; it covers the address, the mount and its SELinux label, CDI 
 match, firewalld, lingering, the `io` delegation, and every unit and container.
 
 ```bash
-/var/media-stack/bin/verify-host.sh --routes     # --routes adds the public route walk
+/var/home-server/bin/verify-host.sh --routes     # --routes adds the public route walk
 ```
 
-It also writes `/var/lib/media-stack/status.json` on every non-greenboot run - the same findings
+It also writes `/var/lib/home-server/status.json` on every non-greenboot run - the same findings
 keyed by a stable id, which is what a dashboard reads and what tells you when the hourly run last
 succeeded. To see only what is wrong, without re-running the battery:
 
 ```bash
 jq -r '.checks[]|select(.status!="pass")|"\(.status)  \(.id)  \(.message)"' \
-  /var/lib/media-stack/status.json
+  /var/lib/home-server/status.json
 jq -r '"last run \(.facts.verify_last_run_at), last clean \(.facts.verify_last_ok_at)"' \
-  /var/lib/media-stack/status.json
+  /var/lib/home-server/status.json
 ```
 
 **A stale `generated_at` is the only way to notice the hourly timer has stopped.** The battery
 cannot check that itself - if it is not running, nothing evaluates the check - which is why the
 document is durable rather than living in the MOTD on tmpfs.
 
-**After editing `host/journald/10-media-stack.conf` or `host/containers/containers.conf`, a
+**After editing `host/journald/10-home-server.conf` or `host/containers/containers.conf`, a
 `git pull` is not enough.** The journald drop-in is a copy, not a symlink, because PID 1 cannot read
 `var_t`:
 
 ```bash
-sudo install -D -m 0644 /var/media-stack/host/journald/10-media-stack.conf \
-  /etc/systemd/journald.conf.d/10-media-stack.conf
+sudo install -D -m 0644 /var/home-server/host/journald/10-home-server.conf \
+  /etc/systemd/journald.conf.d/10-home-server.conf
 sudo systemctl restart systemd-journald
 systemd-analyze cat-config systemd/journald.conf | grep -E 'MaxUse|Retention|RateLimit'
 ```
@@ -508,7 +514,7 @@ containers.conf *is* a symlink and needs no copy step, but it does need to exist
 predates it:
 
 ```bash
-ln -sfn /var/media-stack/host/containers/containers.conf ~/.config/containers/containers.conf
+ln -sfn /var/home-server/host/containers/containers.conf ~/.config/containers/containers.conf
 # then prove it took effect - podman info does NOT expose healthcheck_events
 timeout 20 podman events --since=15m --until=1s --filter event=health_status | wc -l   # want 0
 timeout 20 podman events --since=15m --until=1s --format '{{.Status}}' | sort | uniq -c
@@ -564,12 +570,12 @@ done
 Containers update themselves nightly via `podman-auto-update.timer`: it pulls each tracked tag,
 restarts the unit, and - because every service with a healthcheck carries `Notify=healthy` -
 restores the previous image if the unit fails to reach healthy. Caddy is rebuilt weekly by
-`media-stack-caddy-build.timer` instead, since it is built here rather than pulled. Nothing to do.
+`home-server-caddy-build.timer` instead, since it is built here rather than pulled. Nothing to do.
 
 The OS stages a deployment nightly and **never applies it**. That is the whole policy: this machine
 has no console and no BMC, so a deployment that does not boot, or that boots without sshd, would be
 a car journey - which is what greenboot now prevents: a deployment that fails its health check
-rolls itself back, proven end to end on 2026-08-14. `media-stack-reboot.timer` applies a staged
+rolls itself back, proven end to end on 2026-08-14. `home-server-reboot.timer` applies a staged
 deployment on Sunday mornings, hourly from 05:00 to 09:00, when it is safe to; the procedure below
 is still how you do it by hand, and is still worth doing on a day you could reach the machine.
 
@@ -577,7 +583,7 @@ is still how you do it by hand, and is still worth doing on a day you could reac
 
 ```bash
 ssh home.local
-/var/media-stack/bin/verify-host.sh            # what is staged, and is everything healthy now
+/var/home-server/bin/verify-host.sh            # what is staged, and is everything healthy now
 df -h /boot                                    # >160M free
 nvidia-smi --query-gpu=utilization.encoder --format=csv,noheader   # 0% - nothing mid-encode
 
@@ -588,7 +594,7 @@ sudo ostree admin pin "$idx"
 sudo systemctl reboot
 
 until ssh -o ConnectTimeout=5 home.local true 2>/dev/null; do sleep 5; done
-/var/media-stack/bin/verify-host.sh            # must pass before you walk away
+/var/home-server/bin/verify-host.sh            # must pass before you walk away
 
 # UNPIN. This is not tidying - see below.
 idx=$(rpm-ostree status --json | jq '[.deployments[]] | map(.pinned) | index(true)')
@@ -690,7 +696,7 @@ A workstation copy is still worth keeping as a *second* one, since it is the onl
 itself fails or the install went to the wrong device:
 
 ```bash
-zstd -dc "$MEDIA_STACK_DISK_IMAGE" | ssh home-live 'sudo dd of=/dev/nvme0n1 bs=4M'
+zstd -dc "$HOME_SERVER_DISK_IMAGE" | ssh home-live 'sudo dd of=/dev/nvme0n1 bs=4M'
 ```
 
 That one *is* a long pipe from the laptop and cannot be moved server-side. Do not let the machine

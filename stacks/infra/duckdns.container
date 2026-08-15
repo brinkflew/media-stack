@@ -33,7 +33,7 @@ Environment=TOKEN=${DDNS_TOKEN}
 Environment=LOG_FILE=true
 
 [Service]
-EnvironmentFile=/var/media-stack/.env
+EnvironmentFile=/var/home-server/.env
 Restart=always
 RestartSec=5
 
