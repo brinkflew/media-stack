@@ -1599,10 +1599,12 @@ Remaining, in order:
    **The time-series layer is done too, 2026-08-15** - Prometheus, node-exporter and
    `bin/collect-metrics.py`, at `metrics.avanserv.com`. See "Metrics". That closes the other half of
    what a dashboard needs: `status.json` says what is true now, and the store says when it stopped
-   being true. Still to come there: cAdvisor for cAdvisor-named per-container series, GPU and SMART,
-   the application-level sources over `podman exec`, a `status.json` bridge so the 55 checks become
-   series, and wiring Prometheus' snapshot API into `bin/backup-server.sh` - a live TSDB cannot be
-   rsynced, and the history is backed up by choice.
+   being true. **Everything that list named as "still to come" landed the same day**: GPU, sensors
+   and SMART, the application sources over `podman exec`, all 64 checks as `home_server_check_status`
+   series, and the TSDB snapshot in both backup scripts. **cAdvisor is the one item that was dropped
+   rather than done** - the collector has to read the same cgroup files anyway for the four numbers
+   cAdvisor does not export, so a second container would have been a second source for one truth.
+   The steady-state cardinality is 2,896 series against the 4,000 the check budgets for.
 
    **What is still missing is anything that reaches a human who is not logged in.** That is now the
    whole of this item. The dashboard reads `status.json` and queries Prometheus; a notifier would

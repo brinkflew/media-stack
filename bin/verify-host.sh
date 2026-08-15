@@ -1082,14 +1082,20 @@ if [ -z "$GREENBOOT" ]; then
 	# MemoryMax, not a slow dashboard, so it is worth seeing it climb.
 	#
 	# 4000 IS DERIVED FROM A MEASUREMENT, not picked. Steady state on
-	# 2026-08-15, with every source running, is ~2650: node-exporter's own ~800,
-	# the collector's ~1050 through the textfile, and Prometheus' self-scrape
-	# ~800. That leaves about 50% headroom for the things that legitimately grow
-	# - another container, another indexer, another filesystem.
+	# 2026-08-15, with every source running, is 2896 - node-exporter's own, the
+	# collector's ~1050 through the textfile, and Prometheus' self-scrape. That
+	# leaves about 38% headroom for the things that legitimately grow - another
+	# container, another indexer, another filesystem.
 	#
-	# EXPECT A TRANSIENT BREACH AFTER ANY RENAME. A series that stops receiving
-	# samples stays in the head block until it is compacted out, roughly two
-	# hours, so during that window both the old and the new name are counted.
+	# READ THE LIVE COUNT, NOT THIS ONE, WHEN RE-DERIVING IT. This check reads
+	# head series, which counts every series in the head block whether or not it
+	# is still receiving samples; `count({__name__=~".+"})` counts only the live
+	# ones. The two agreed to within 3% once the head had compacted.
+	#
+	# EXPECT A TRANSIENT BREACH AFTER ANY RENAME, for that same reason. A series
+	# that stops receiving samples stays in the head block until it is compacted
+	# out, roughly two hours, so during that window both names are counted: the
+	# rename to upstream container_* names read 3378 against a live 2896.
 	series=$(promq prometheus_tsdb_head_series)
 	series=${series%%.*}
 	if [ -z "$series" ]; then
