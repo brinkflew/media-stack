@@ -1,0 +1,8 @@
+# The build installs from package-lock.json inside the image. Copying a
+# workstation's node_modules in would be slow, would defeat the cached install
+# layer, and can carry platform-specific binaries that do not run on Alpine.
+node_modules
+dist
+.vite
+node_modules/.tmp
+README.md

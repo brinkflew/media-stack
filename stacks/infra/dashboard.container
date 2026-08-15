@@ -1,0 +1,97 @@
+# ==============================================================================
+# The dashboard: the console this repository has been building towards
+# ------------------------------------------------------------------------------
+# A Vue 3 application served as static files. CLAUDE.md's roadmap has carried one
+# unbuilt item since the metrics work landed - "status.json for what is true now,
+# keyed by stable ids, and Prometheus for when it stopped being true" - and this
+# is it, at home.{$DOMAIN}, behind the same passkey sign-on as everything else.
+#
+# IT IS READ-ONLY, AND NOT BY OVERSIGHT. The obvious next feature is a restart
+# button, and no container here can have one: container_t -> unconfined_t :
+# unix_stream_socket connectto is DENY, systemd --user for uid 1000 runs as
+# unconfined_t, and that is not fixable by relabelling. Actions would need a
+# privileged host-side surface reachable from a browser, which is a decision to
+# take on its own rather than a checkbox to smuggle in behind a dashboard.
+#
+# IT REACHES NOTHING. The container joins net-dashboard, whose only other member
+# is Caddy, and it holds no credential of any kind. Prometheus and Alertmanager
+# are reached BY THE BROWSER, same-origin, through Caddy - which is what keeps
+# the /api/v1/admin/* refusal in front of the store. See net-dashboard.network.
+#
+# Image: built from apps/dashboard/Dockerfile by dashboard.build
+# ==============================================================================
+
+[Unit]
+Description=Home server dashboard
+# Not Requires=: the dashboard is useful before Prometheus answers - it renders
+# the check battery from status.json and says plainly that the series are
+# unreachable. A hard dependency would take the one page that can explain an
+# outage down with it.
+After=caddy.service
+
+[Container]
+# Built, not pulled. The unit name is the reference; quadlet wires the
+# dependency so systemd runs the build first.
+Image=dashboard.build
+# `local` rather than `registry`: there is no registry to poll. It notices a new
+# image without producing one, which is why home-server-dashboard-build.timer
+# exists - the same pairing caddy.build documents.
+AutoUpdate=local
+ContainerName=dashboard
+Network=net-dashboard.network
+
+# The host's copy of status.json, which bin/verify-host.sh writes hourly.
+#
+# THE CANONICAL FILE CANNOT BE MOUNTED. /var/lib/home-server/status.json is
+# written through sudo and is root-owned inside a var_lib_t directory, and `:z`
+# cannot rescue it: relabelling is done by the invoking user, and `core` does
+# not own that directory, so chcon fails EPERM. So verify-host.sh writes a
+# second copy, as core, into this small dedicated directory - the same shape as
+# node-exporter's textfile drop, and safe to relabel for the same reason.
+#
+# ro because nothing in this container has any business writing to it.
+Volume=${DOCKER_VOLUME_CACHE}/dashboard:/srv/data:z,ro
+
+Environment=TZ=${TIMEZONE}
+
+# 8080 is a literal here, in apps/dashboard/Caddyfile and in the reverse_proxy
+# in apps/caddy/Caddyfile. A PORT_ variable would reach the first two and NOT
+# this line - a quadlet HealthCmd cannot carry a ${VAR} - so it would leave
+# exactly the drift it was added to prevent. Same argument node-exporter makes
+# for its 9100. The port is never published and no CNAME depends on it.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=10s
+HealthRetries=3
+HealthStartupCmd=wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+# What makes podman-auto-update's rollback real: without it systemd calls the
+# container started the moment it runs, so a broken image passes and nothing is
+# restored.
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+
+# Podman does not create a missing bind-mount source; Docker did. Without this
+# the unit is a silent five-second restart loop on a fresh host, because
+# verify-host.sh has not run yet and nothing else creates the directory.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CACHE}/dashboard
+
+Restart=always
+RestartSec=5
+# Must clear the startup check's 300s ceiling - see sonarr.container.
+TimeoutStartSec=360
+
+# A ceiling, not a tuning knob: high enough never to bite in normal use,
+# low enough that a runaway is killed instead of taking the host down.
+# This one serves a 110 KB bundle and a 30 KB JSON from a Caddy that is not
+# terminating TLS, and measures around 14 MB.
+MemoryHigh=64M
+MemoryMax=128M
+
+[Install]
+WantedBy=default.target

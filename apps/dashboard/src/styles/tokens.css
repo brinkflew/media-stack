@@ -1,0 +1,159 @@
+/* ==========================================================================
+   The design system, as tokens
+   --------------------------------------------------------------------------
+   Lifted from the design document rather than re-derived, so that a change
+   there is a change here and not a reinterpretation. Three rules from its
+   own brief govern everything below:
+
+     1. Geist for labels and prose, Azeret Mono for EVERY number, id and
+        path. Nothing above 22px.
+     2. Status has three colours only - teal healthy, amber degraded, red
+        failing. Everything else is grey. A fourth status colour would make
+        the first three mean less.
+     3. One accent, teal, reserved for healthy state and focus. It is not a
+        brand colour to sprinkle.
+
+   THERE IS NO LIGHT THEME, and that is a decision. This is one operator on
+   one machine, the design commits to a green-leaning near black, and a
+   second palette would be a second set of contrast ratios nobody checks.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* --- Ground ---------------------------------------------------------
+     Five surfaces, and they are ordered: the page is darkest, panels sit
+     above it, a row sits above a panel. Anything that needs to read as
+     "inset" goes DOWN the scale rather than gaining a border. */
+  --bg: oklch(0.125 0.006 168);
+  --surface-sunken: oklch(0.155 0.008 168);
+  --surface: oklch(0.175 0.008 168);
+  --surface-raised: oklch(0.195 0.009 168);
+  --surface-high: oklch(0.225 0.009 168);
+  --surface-chip: oklch(0.245 0.01 168);
+
+  --row: linear-gradient(oklch(0.205 0.009 168), oklch(0.185 0.008 168));
+  --field: oklch(0.185 0.008 168);
+
+  /* --- Hairlines and overlays -----------------------------------------
+     White at very low alpha rather than a lighter grey, so a border keeps
+     working whatever surface it lands on. */
+  --line: oklch(1 0 0 / 0.07);
+  --line-strong: oklch(1 0 0 / 0.12);
+  --line-faint: oklch(1 0 0 / 0.045);
+  --fill: oklch(1 0 0 / 0.06);
+  --fill-hover: oklch(1 0 0 / 0.11);
+  --track: oklch(1 0 0 / 0.09);
+
+  /* --- Text -----------------------------------------------------------
+     Six steps. --fg-dim is the floor: anything quieter stops being
+     readable on --bg and should be removed rather than dimmed further. */
+  --fg: oklch(0.96 0.004 168);
+  --fg-2: oklch(0.9 0.004 168);
+  --fg-3: oklch(0.8 0.008 168);
+  --fg-4: oklch(0.66 0.008 168);
+  --fg-5: oklch(0.58 0.008 168);
+  --fg-dim: oklch(0.52 0.008 168);
+
+  /* --- Status: exactly three ------------------------------------------
+     `ok` doubles as the accent because in this design healthy IS the
+     brand. `off` is the unlit LED and the "not measured" state - grey,
+     never green, because an unrun check must not read as a passing one. */
+  --ok: #00b3a4;
+  --ok-hover: oklch(0.8 0.1 183);
+  --ok-tint: oklch(0.68 0.11 183 / 0.14);
+  --ok-tint-strong: oklch(0.68 0.11 183 / 0.3);
+  --ok-edge: oklch(0.68 0.11 183 / 0.32);
+
+  --warn: oklch(0.8 0.14 78);
+  --warn-tint: oklch(0.8 0.14 78 / 0.08);
+  --warn-edge: oklch(0.8 0.14 78 / 0.24);
+
+  --fail: oklch(0.66 0.17 22);
+  --fail-text: oklch(0.82 0.12 22);
+  --fail-tint: oklch(0.66 0.17 22 / 0.1);
+  --fail-edge: oklch(0.66 0.17 22 / 0.28);
+
+  --off: oklch(0.3 0.008 168);
+
+  /* --- Type ------------------------------------------------------------ */
+  --font-ui: "Geist", system-ui, -apple-system, sans-serif;
+  --font-mono: "Azeret Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --t-label: 500 10px/1.2 var(--font-mono);
+  --t-mono-xs: 400 9.5px/1.3 var(--font-mono);
+  --t-mono-sm: 400 10px/1.4 var(--font-mono);
+  --t-mono: 400 10.5px/1.45 var(--font-mono);
+  --t-mono-md: 500 11px/1.3 var(--font-mono);
+  --t-mono-lg: 500 14px/1.2 var(--font-mono);
+  --t-mono-xl: 500 15px/1.2 var(--font-mono);
+  --t-ui-sm: 400 11px/1.4 var(--font-ui);
+  --t-ui: 400 12px/1.45 var(--font-ui);
+  --t-ui-md: 500 12px/1.35 var(--font-ui);
+  --t-ui-lg: 500 14px/1.3 var(--font-ui);
+  --track-label: 0.12em;
+
+  /* --- Geometry -------------------------------------------------------- */
+  --r-lg: 12px;
+  --r-md: 10px;
+  --r-sm: 7px;
+  --r-xs: 5px;
+  --r-dot: 3px;
+
+  --pad-page: 22px;
+  --gap: 10px;
+  --gap-sm: 6px;
+  --gap-lg: 16px;
+
+  --shadow-node: 0 2px 10px oklch(0 0 0 / 0.35);
+}
+
+/* --------------------------------------------------------------------------
+   Motion. The brief: "live means motion that carries data". These three are
+   the whole vocabulary - a breathing dot for something in progress, a sweep
+   for a live axis, a caret for a stream. Nothing else animates, so when
+   something moves it means something.
+
+   All of it is switched off under prefers-reduced-motion. The information is
+   in the colour and the number; the motion is emphasis, so losing it costs
+   nothing.
+   -------------------------------------------------------------------------- */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+@keyframes caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

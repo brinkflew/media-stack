@@ -38,3 +38,13 @@ cache/
 # only ever produced by importing it - but a .pyc was committed once already.
 __pycache__/
 *.pyc
+
+# apps/dashboard/ is the one thing here with a build step. Both of these are
+# produced from package-lock.json and src/, and both are produced INSIDE the
+# image at deploy time - the server never runs npm outside a build container.
+# A committed dist/ would also be the only tracked file nobody reviews, and
+# bin/lint-repo.sh would then be asserting ASCII over a minified bundle.
+node_modules/
+dist/
+.vite/
+

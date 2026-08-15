@@ -19,10 +19,10 @@ QUADLET_UNIT_DIRS="$PWD/stacks/common:$PWD/stacks/torrent:$PWD/stacks/media:$PWD
 
 | Directory | Contents |
 |---|---|
-| `common/` | the eight `.network` units, one per trust boundary |
+| `common/` | the nine `.network` units, one per trust boundary |
 | `torrent/` | `torrent.pod` and its three members: gluetun, qBittorrent, JOAL |
 | `media/` | the media applications |
-| `infra/` | ingress, identity, dynamic DNS and the metrics stack |
+| `infra/` | ingress, identity, dynamic DNS, the metrics stack and the dashboard |
 
 **The metrics units are in `infra/` rather than a new `observability/` directory**, and that is a
 decision rather than laziness. A new directory here needs a matching symlink in
@@ -122,12 +122,21 @@ in CLAUDE.md under "Logs and status".
 **`duckdns` and `unpackerr` define no healthcheck**, so they get no rollback beyond "did it crash
 immediately". That is accepted, not overlooked.
 
-**Caddy is built here, so it takes `AutoUpdate=local`** - and `local` policy notices a new image
-without ever *producing* one, while a `.build` unit only runs when its image is absent. Left alone,
-the one built image would have been the only thing in the stack that never updated.
-`home-server-caddy-build.timer` rebuilds it weekly, and `caddy.build` carries `Pull=newer` because
-podman build's default pull policy is `missing` - it would otherwise reuse a stale local `caddy:2`
-for ever while succeeding in four seconds.
+**Two images are built here rather than pulled, and both take `AutoUpdate=local`** - `local` policy
+notices a new image without ever *producing* one, while a `.build` unit only runs when its image is
+absent. Left alone, a built image is the one thing in the stack that never updates. Both carry
+`Pull=newer`, because podman build's default pull policy is `missing` - it would otherwise reuse a
+stale local base image for ever while succeeding in four seconds.
+
+| Unit | Rebuilt by | Cadence | Why that cadence |
+|---|---|---|---|
+| `caddy.build` | `home-server-caddy-build.timer` | Sat 22:00 | It compiles Caddy with xcaddy to add `caddy-dns/gandi`, and Caddy does not release daily. The build is also the safety net: an upstream release that will not compile against the DNS module fails there, while the running proxy keeps serving. |
+| `dashboard.build` | `home-server-dashboard-build.timer` | nightly 23:00 | **Its input is the checkout, not an upstream release**, and `dist/` is not committed - so this timer is also the deploy path. A `git pull` touching `apps/dashboard/src/` deploys nothing until it runs. A weekly cadence would mean a commit taking up to seven days to appear, silently. |
+
+Both deliberately do **not** restart their container. The build is the check - `xcaddy` compiles for
+one, `vue-tsc` type-checks for the other - so a bad commit fails at build time while the previous
+image keeps serving. The nightly `podman-auto-update` run is what swaps them, and `Notify=healthy`
+is what rolls back an image that will not come up.
 
 **Old images survive the nightly prune.** The shipped `podman-auto-update.service` runs
 `podman image prune -f` afterwards, but a superseded image keeps its repository digest and so is not

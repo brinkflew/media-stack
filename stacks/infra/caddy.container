@@ -41,6 +41,10 @@ Network=net-download.network
 Network=net-media.network
 Network=net-transcode.network
 Network=net-metrics.network
+# The seventh, and the cheapest: net-dashboard holds only this proxy and a
+# static file server. Caddy has to be on it because it is the only way in, and
+# the dashboard is deliberately NOT on net-metrics - see that network's unit.
+Network=net-dashboard.network
 
 # Mounted as a directory, not a single file, so that a `git pull` replacing the
 # Caddyfile does not leave the container holding a stale inode. Shared and

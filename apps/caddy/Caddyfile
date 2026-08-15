@@ -224,15 +224,98 @@ metrics.{$DOMAIN} {
 	reverse_proxy prometheus:9090
 }
 
+# THE DASHBOARD, and the one block here that is three upstreams rather than one.
+#
+# The reason it is three is that they are ONE ORIGIN. The page is a Vue
+# application in a browser, and everything it reads has to arrive somewhere it
+# is allowed to read from - so the bundle, the query API and the alert API are
+# all served from this hostname, past this single forward_auth. The alternative
+# is the application holding credentials for three services and the browser
+# making cross-origin requests to two more names, which is more moving parts,
+# more sign-on boundaries, and a CORS policy to maintain.
+#
+# THE DASHBOARD CONTAINER ITSELF REACHES NOTHING. It serves static files and one
+# read-only JSON on net-dashboard, whose only other member is Caddy. It is not
+# on net-metrics on purpose - see stacks/common/net-dashboard.network.
+#
+# A NOTE FOR WHOEVER DEBUGS THIS FIRST: an expired session here is a 302, not a
+# 401. forward_auth redirects the browser to auth.{$DOMAIN}, and `fetch` follows
+# redirects - so an XHR resolves with res.ok true and an HTML sign-in page as
+# its body, and JSON.parse throws somewhere unrelated. The application detects
+# it in one place (src/api/http.ts) and reloads the page, because a passkey
+# prompt cannot be completed inside an XHR.
+home.{$DOMAIN} {
+	import protected
+
+	# EACH GUARD LIVES INSIDE ITS OWN handle BLOCK, AND THAT IS NOT A STYLE
+	# CHOICE - IT IS THE ONLY PLACE IT WORKS. Caddy executes directives in ITS
+	# order, not the order they are written, and `handle` sorts BEFORE
+	# `respond`. Written at the top level of this block, next to the handles,
+	# both matchers below are dead code: the first `handle` that matches
+	# terminates the request and `respond` is never reached.
+	#
+	# That was not a theory. Written the obvious way, a GET of
+	# /api/prom/api/v1/admin/tsdb/snapshot returned 200 and a POST to
+	# /api/alerts/api/v2/silences returned 200 - a guard that reads correctly,
+	# adapts without error, validates clean, and protects nothing. It is the
+	# same shape as the shellcheck leg that reported "all checks passed" over
+	# 2,224 lines it had never looked at.
+	#
+	# Inside a handle, `respond` DOES sort before `reverse_proxy`, which is why
+	# the identical construction on metrics.{$DOMAIN} has always worked.
+	#
+	# TEST IT AFTER TOUCHING IT. `caddy validate` cannot see this class of
+	# mistake; only a request can.
+
+	# handle_path strips the prefix before the handlers inside it run, so the
+	# matcher below is written against the STRIPPED path - /api/v1/admin/*, not
+	# /api/prom/api/v1/admin/*. Getting that wrong is the second way to write a
+	# guard that never fires.
+	handle_path /api/prom/* {
+		# THE SAME REFUSAL metrics.{$DOMAIN} CARRIES, AND FOR THE SAME REASON.
+		# Prometheus runs with --web.enable-admin-api because the nightly
+		# backup needs /api/v1/admin/tsdb/snapshot, and that API also carries
+		# delete_series. This block is a SECOND public entrance to the same
+		# store, so it needs its own copy - a matcher on the other hostname
+		# protects nothing here.
+		@admin path /api/v1/admin/*
+		respond @admin "not through here" 403
+
+		reverse_proxy prometheus:9090
+	}
+
+	handle_path /api/alerts/* {
+		# Alertmanager has had no route at all until now, and it is not getting
+		# a writable one. POST /api/v2/silences is how an alert is muted, and
+		# muting an alert from a dashboard - without the argument, the duration
+		# or the record that goes with it - is precisely how a channel stops
+		# being read. ntfy-alertmanager's Silence button was declined for the
+		# same reason.
+		@write not method GET HEAD
+		respond @write "read only" 405
+
+		reverse_proxy alertmanager:9093
+	}
+
+	# The bundle. Last, because handle blocks are matched in source order among
+	# themselves and this one matches everything.
+	handle {
+		reverse_proxy dashboard:8080
+	}
+}
+
 # ------------------------------------------------------------------------------
 # Deliberately absent
 # ------------------------------------------------------------------------------
-# `docker` (Portainer) and `home` (Heimdall) have no block. Portainer is being
-# removed along with its docker.sock mount, and Heimdall has been commented out
-# of the stack for a long time. Without a block neither name gets a certificate,
-# so both stop answering.
+# `docker` (Portainer) has no block, and is being removed along with its
+# docker.sock mount. Without a block it gets no certificate, so it stops
+# answering.
 #
-# `watch` and `request` are the only routes reachable without signing in. Both
-# authenticate their own users, and their clients - TVs, phones, the Jellyfin
-# apps - have no browser in which to complete a passkey prompt.
+# `home` WAS in this list, as Heimdall's old name. It is now the dashboard's,
+# which is the thing Heimdall was meant to be and never was.
+#
+# `watch`, `request` and `ntfy` are the only routes reachable without signing
+# in. All three authenticate their own users, and their clients - TVs, phones,
+# the Jellyfin apps, the ntfy app - have no browser in which to complete a
+# passkey prompt.
 # ------------------------------------------------------------------------------

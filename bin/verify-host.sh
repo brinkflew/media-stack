@@ -648,13 +648,24 @@ if [ -z "$GREENBOOT" ]; then
 		bad update.caddy_build_timer "home-server-caddy-build.timer is off - Caddy will never be rebuilt"
 	fi
 
+	# The dashboard is the second built image, and its timer carries MORE than
+	# Caddy's does: this image's content comes from the checkout, so this timer
+	# is also the deploy path. Without it a `git pull` that changes
+	# apps/dashboard/src/ deploys nothing at all - silently, while every other
+	# kind of change in the same commit takes effect on daemon-reload.
+	if [ "$(systemctl --user is-enabled home-server-dashboard-build.timer 2>/dev/null)" = enabled ]; then
+		ok update.dashboard_build_timer "home-server-dashboard-build.timer enabled"
+	else
+		bad update.dashboard_build_timer "home-server-dashboard-build.timer is off - the dashboard will never pick up a commit"
+	fi
+
 	# Every container that can be auto-updated should be. A unit that lost its
 	# policy would simply never appear here again, silently.
 	au_count=$(podman auto-update --dry-run 2>/dev/null | grep -cE 'registry|local' || true)
-	if [ "${au_count:-0}" -ge 19 ]; then
+	if [ "${au_count:-0}" -ge 20 ]; then
 		ok update.policy_count "$au_count containers carry an auto-update policy"
 	else
-		bad update.policy_count "only ${au_count:-0} containers carry an auto-update policy, expected 19"
+		bad update.policy_count "only ${au_count:-0} containers carry an auto-update policy, expected 20"
 	fi
 
 	# ------------------------------------------------------------------------------
@@ -1212,7 +1223,14 @@ if [ -z "$GREENBOOT" ]; then
 
 	if [ -n "$ROUTES" ]; then
 		say routes "Public routes"
-		for h in watch request id auth sonarr radarr prowlarr tdarr torrent ntfy; do
+		# `home` answers 302 to auth.<domain>, like every other protected route.
+		# NOTE what that does and does not prove: a 302 from a protected route
+		# says DNS, TLS, Caddy's block and the forward_auth to Tinyauth all
+		# work, and says NOTHING about the backend, because an unauthenticated
+		# request never reaches it. qBittorrent was crash-looping behind a
+		# healthy-looking 302 once already. The dashboard's own health check is
+		# what covers the container.
+		for h in watch request id auth home sonarr radarr prowlarr tdarr torrent ntfy; do
 			code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h.avanserv.com/" 2>/dev/null)
 			# ntfy IS THE ONE WHOSE HEALTHY ANSWER IS A REFUSAL, and it has to be
 			# in this battery rather than left out: it is the route every alert
@@ -1410,6 +1428,33 @@ if [ -z "$GREENBOOT" ]; then
 			# status file is exactly what a dashboard misreads as current.
 			printf 'verify-host: could not write %s - any dashboard reading it is seeing stale data\n' \
 				"$status_file" >&2
+		fi
+
+		# THE SERVED COPY, and it is a copy rather than a mount for a reason
+		# that is not obvious.
+		#
+		# The file above is written through `priv`, i.e. sudo, so it is
+		# root-owned inside a var_lib_t directory. container_t may not read
+		# var_lib_t, and `:z` cannot rescue it: relabelling on a rootless
+		# podman mount is performed by the INVOKING user, and `core` does not
+		# own /var/lib/home-server, so chcon fails EPERM. The mount would be
+		# accepted and the container would get permission denied.
+		#
+		# So the same bytes are written a second time, as core, into a small
+		# dedicated directory that the dashboard bind-mounts :z,ro. That is the
+		# identical shape as node-exporter's textfile drop, which CLAUDE.md
+		# already names as the one directory here that may safely take a label.
+		#
+		# Best-effort, and deliberately so: this is a convenience for one
+		# container, and the canonical file above is what everything else -
+		# bin/collect-metrics.py included - reads. A dashboard showing a stale
+		# document says so on its own, because generated_at travels inside it.
+		served_dir="${DOCKER_VOLUME_CACHE:-/var/home-server/cache}/dashboard"
+		if mkdir -p "$served_dir" 2>/dev/null; then
+			if printf '%s\n' "$doc" >"$served_dir/status.json.tmp" 2>/dev/null; then
+				mv "$served_dir/status.json.tmp" "$served_dir/status.json" 2>/dev/null || :
+			fi
+			rm -f "$served_dir/status.json.tmp" 2>/dev/null || :
 		fi
 	fi
 fi

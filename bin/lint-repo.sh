@@ -112,6 +112,122 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+say "Topology"
+# ------------------------------------------------------------------------------
+# apps/dashboard/src/topology.ts is a SECOND COPY of the Network=, Pod= and
+# PublishPort= lines in stacks/. CLAUDE.md has a name for that shape - when it
+# rejects split-horizon DNS it calls a hand-maintained duplicate of the
+# Caddyfile's site blocks "the most driftable shape this repository has a name
+# for" - and the objection is correct.
+#
+# The duplicate exists because no container may run `podman network inspect`:
+# the podman socket is SELinux-denied from container_t, which is the same
+# constraint that makes the whole dashboard read-only. Discovering the topology
+# at run time is not available, and these files ARE the authority anyway.
+#
+# So it is allowed to exist only on condition that it cannot quietly become
+# fiction. This leg parses both and fails on any difference. A drawing of the
+# network that is wrong is worse than no drawing at all, because it is used to
+# reason about what can reach what.
+topo=apps/dashboard/src/topology.ts
+if [ -f "$topo" ] && command -v python3 >/dev/null 2>&1; then
+	drift=$(python3 - "$topo" <<-'PY'
+		import re, sys, pathlib
+
+		topo = pathlib.Path(sys.argv[1]).read_text()
+
+		# --- what stacks/ actually declares ---------------------------------
+		declared = {}
+		pods = {}
+		published = set()
+		for path in sorted(pathlib.Path("stacks").rglob("*")):
+		    if path.suffix not in (".container", ".pod"):
+		        continue
+		    text = path.read_text()
+		    name = re.search(r"^\s*(?:ContainerName|PodName)=(.+)$", text, re.M)
+		    if not name:
+		        continue
+		    name = name.group(1).strip()
+		    declared[name] = {
+		        m.group(1).strip().removesuffix(".network")
+		        for m in re.finditer(r"^\s*Network=(.+)$", text, re.M)
+		    }
+		    pod = re.search(r"^\s*Pod=(.+)$", text, re.M)
+		    if pod:
+		        pods[name] = pod.group(1).strip().removesuffix(".pod")
+		    for m in re.finditer(r"^\s*PublishPort=(.+)$", text, re.M):
+		        # Keep only the container-side port: the host side is a ${VAR}
+		        # and the bind address is another, neither of which this file
+		        # can resolve. What matters is that a publish EXISTS.
+		        published.add((name, m.group(1).strip().rsplit(":", 1)[-1]))
+
+		networks = {
+		    p.stem for p in pathlib.Path("stacks").rglob("*.network")
+		}
+
+		# --- what topology.ts claims ---------------------------------------
+		ts_networks = set(re.findall(r'id:\s*"([^"]+)"', topo))
+
+		ts_nodes = {}
+		ts_pods = {}
+		ts_published = set()
+		for block in re.finditer(
+		    r'name:\s*"([^"]+)"[^}]*?networks:\s*\[([^\]]*)\]([^}]*)', topo, re.S
+		):
+		    node = block.group(1)
+		    ts_nodes[node] = set(re.findall(r'"([^"]+)"', block.group(2)))
+		    tail = block.group(3)
+		    pod = re.search(r'pod:\s*"([^"]+)"', tail)
+		    if pod:
+		        ts_pods[node] = pod.group(1)
+		    pub = re.search(r"publishes:\s*\[([^\]]*)\]", tail, re.S)
+		    if pub:
+		        for mapping in re.findall(r'"([^"]+)"', pub.group(1)):
+		            ts_published.add((node, mapping.split("->")[-1].strip()))
+
+		problems = []
+
+		for missing in sorted(networks - ts_networks):
+		    problems.append(f"network {missing} is in stacks/ and not in topology.ts")
+		for extra in sorted(ts_networks - networks):
+		    problems.append(f"network {extra} is in topology.ts and not in stacks/")
+
+		for missing in sorted(set(declared) - set(ts_nodes)):
+		    problems.append(f"container {missing} is in stacks/ and not in topology.ts")
+		for extra in sorted(set(ts_nodes) - set(declared)):
+		    problems.append(f"container {extra} is in topology.ts and not in stacks/")
+
+		for node in sorted(set(declared) & set(ts_nodes)):
+		    if declared[node] != ts_nodes[node]:
+		        want = " ".join(sorted(declared[node])) or "(none)"
+		        got = " ".join(sorted(ts_nodes[node])) or "(none)"
+		        problems.append(f"{node} networks: stacks/ says [{want}], topology.ts says [{got}]")
+
+		if pods != ts_pods:
+		    problems.append(f"pod membership: stacks/ says {pods}, topology.ts says {ts_pods}")
+
+		if published != ts_published:
+		    problems.append(
+		        f"published ports: stacks/ says {sorted(published)}, "
+		        f"topology.ts says {sorted(ts_published)}"
+		    )
+
+		print("\n".join(problems))
+	PY
+	)
+	if [ -z "$drift" ]; then
+		ok "topology.ts matches stacks/"
+	else
+		bad "topology.ts has drifted from stacks/"
+		printf '%s\n' "$drift" | sed 's/^/    /'
+	fi
+elif [ ! -f "$topo" ]; then
+	skip "no $topo"
+else
+	skip "python3 is not installed"
+fi
+
+# ------------------------------------------------------------------------------
 say "Quadlets"
 # ------------------------------------------------------------------------------
 # Catches syntax errors, NOT unset variables - systemd expands an unset ${VAR}

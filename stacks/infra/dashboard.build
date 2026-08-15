@@ -1,0 +1,36 @@
+# ==============================================================================
+# Build: the dashboard bundle
+# ------------------------------------------------------------------------------
+# The second image here that is built rather than pulled, and for a different
+# reason from Caddy's: there is no upstream to pull. apps/dashboard/ is a Vue 3
+# application, and this is what turns a checkout of it into something a browser
+# can be served.
+#
+# The build is two stages - node compiles, stock Caddy serves - so the running
+# image contains no toolchain. See apps/dashboard/Dockerfile.
+#
+# NOTHING IS COMMITTED TO GIT BUT SOURCE. dist/ and node_modules/ are ignored,
+# which means this unit is the only thing that produces a deployable artefact,
+# and `npm ci` inside it is what makes the artefact match package-lock.json. A
+# committed bundle would be the one tracked file nobody reviews, and would put a
+# minified blob inside bin/lint-repo.sh's ASCII assertion.
+#
+# A .build unit makes it part of the dependency graph rather than a step someone
+# has to remember: dashboard.container references this image by unit name, so
+# systemd builds it before starting the container.
+# ==============================================================================
+
+[Unit]
+Description=Build the home-server dashboard bundle
+
+[Build]
+ImageTag=localhost/home-server/dashboard:latest
+File=/var/home-server/apps/dashboard/Dockerfile
+SetWorkingDirectory=/var/home-server/apps/dashboard
+
+# The same trap caddy.build documents: podman build's default pull policy is
+# `missing`, so once node:24-alpine and caddy:2-alpine exist in local storage
+# they are never reconsidered. The weekly rebuild would keep succeeding against
+# a base image that had stopped receiving security updates months ago, and
+# nothing would say so.
+Pull=newer

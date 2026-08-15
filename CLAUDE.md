@@ -663,6 +663,102 @@ write it - while the rendered file sat in `/alertmanager`. Every container healt
 `SUCCESS`, Prometheus discovering the Alertmanager, and every notification failing with a 401
 recorded nowhere but Alertmanager's own log. **Fire a real alert and look for it at the other end.**
 
+## The dashboard
+
+**Since 2026-08-15 there is somewhere to look that is not an ssh session.** A Vue 3 application at
+`home.avanserv.com`, behind the same passkey sign-on as everything else, built from
+`apps/dashboard/` and served by its own container. It closes the last roadmap item: `status.json`
+for what is true now, Prometheus for when it stopped being true.
+
+```bash
+systemctl --user start home-server-dashboard-build.service   # the deploy; see below
+cd apps/dashboard && npm run dev                             # fixtures, no server needed
+```
+
+**The first cut is the shell, System and Services.** Home and Library are routed stubs that name
+what they will read; everything they need is an application API that nothing currently collects.
+
+**It is READ-ONLY, and that is structural rather than a v1 shortcut.** The design has restart, pull
+and approve buttons, and no container here can have them: `container_t -> unconfined_t :
+unix_stream_socket connectto` is DENY and is not fixable by relabelling. Actions need a privileged
+host-side surface reachable from a browser, which is a decision to take on its own merits.
+
+**Three sources, and the split is the point:**
+
+| Source | Carries |
+|---|---|
+| **Prometheus**, proxied same-origin at `/api/prom` | every number and every history, including `home_server_container_info{container,unit,image,pod}` - podman's own identity join, so the pod rack needs no lookup table |
+| **`status.json`**, served as a file at `/data/status.json` | the **prose** of the findings. The metric carries the verdict and deliberately not the message; the id is the join |
+| **`apps/dashboard/src/topology.ts`**, compiled in | the network graph and the published-port table. The topology *is* static - it is `stacks/`, in git - and only the node colouring is live |
+
+**`status.json` is COPIED into a served directory, not mount-mapped, and `:z` cannot fix the
+alternative.** The canonical file is written through `sudo`, so it is root-owned inside a `var_lib_t`
+directory that `container_t` may not read - and relabelling on a rootless mount is performed by the
+*invoking* user, so `chcon` fails `EPERM` because `core` does not own `/var/lib/home-server`. The
+mount is accepted and the container gets permission denied. `bin/verify-host.sh` therefore writes
+the same bytes a second time, as `core`, into `${DOCKER_VOLUME_CACHE}/dashboard/`. That is the same
+shape as node-exporter's textfile drop, which is the one directory here that may safely take a label.
+
+**There is deliberately no log stream**, and the design's slot for one holds Alertmanager instead.
+Jellyfin alone emits 2,644 priority-3 lines a day of ffmpeg chatter with no lever to stop it, so a
+live tail is noise with a cursor on it. Alertmanager groups, suppresses repeats and reports
+resolution - and had no interface at all before this, because its silence endpoint was declined a
+public route. It still is: Caddy refuses anything that is not GET or HEAD on that path with a 405.
+
+**`home-server-dashboard-build.timer` IS THE DEPLOY PATH, not just an updater.** This image's
+content comes from the checkout rather than an upstream release, and `dist/` is not committed - so a
+`git pull` touching `apps/dashboard/src/` deploys **nothing at all** until that timer runs, silently,
+while every other change in the same commit takes effect on `daemon-reload`. Nightly rather than
+weekly for that reason. `verify-host.sh` asserts it is armed.
+
+**A GUARD THAT ADAPTS, VALIDATES AND DOES NOTHING.** The `home.{$DOMAIN}` block carries two
+refusals - 403 on Prometheus' admin API, 405 on Alertmanager's write paths. Written the obvious way,
+at the top level of the site block alongside the `handle` directives, **both were dead code**:
+Caddy executes directives in *its* order, not source order, and `handle` sorts before `respond`, so
+the first matching `handle` terminated the request and neither matcher ever ran. A GET of
+`/api/prom/api/v1/admin/tsdb/snapshot` returned **200**. Two things follow, and both are the same
+lesson this file keeps rediscovering:
+
+- **The guards live inside their `handle_path` blocks**, where `respond` does sort before
+  `reverse_proxy` - which is why the identical construction on `metrics.{$DOMAIN}` has always
+  worked. And the matcher there is written against the **stripped** path (`/api/v1/admin/*`), because
+  `handle_path` rewrites before the handlers inside it run.
+- **`caddy validate` cannot see this class of mistake.** It adapted cleanly both ways. Only a
+  request tells them apart, so test the refusals with `curl` after touching that block.
+
+**An expired session is a 302, not a 401, and it is the thing most likely to make this look broken.**
+`forward_auth` redirects to `auth.avanserv.com` and `fetch` follows redirects, so an XHR *resolves*
+with `res.ok` true and an HTML sign-in page as its body; `JSON.parse` then throws somewhere
+unrelated and every panel silently shows nothing. `src/api/http.ts` is the single place that detects
+it - a cross-origin redirect, or a `text/html` content type - and it reloads the page, because a
+passkey prompt cannot be completed inside an XHR. The reload is rate-limited to once per 30s so a
+502 page from a restarting upstream cannot become an infinite refresh.
+
+**A stale dashboard must read as stale, never as healthy**, which is the trap this whole repository
+is written around. `src/stores/host.ts` tracks **three independent** freshness primitives, because
+each fails in a way the others cannot see: `generated_at` read from the file (not from its
+Prometheus mirror, so a dead collector and a dead battery stay distinguishable), the collector's
+last success, and `up`. Past threshold the banner appears, panels dim rather than blanking, and the
+verdict is `unknown` - **not folded into `fail`**, because "the battery says everything passed" and
+"nobody has asked the battery" must not look alike. The same reason `mode.routes: false` is rendered
+as "not measured" rather than omitted.
+
+**`src/topology.ts` duplicates what `stacks/` already declares**, which is the shape this file calls
+the most driftable thing it has a name for when it rejects split-horizon DNS. It is allowed to exist
+only because `bin/lint-repo.sh` parses both and fails on any difference. Discovering it at run time
+is not available - no container may run `podman network inspect` - and these files are the authority
+anyway, so reading git is more honest than re-deriving it.
+
+**No chart library, and the reason is the gap.** The design is hand-drawn SVG throughout, so
+matching it exactly costs less than bending a library into it. What that arithmetic has to get right
+is that a Prometheus range query returns *nothing* for a timestamp where the series did not exist,
+and `polyline` cannot express a break - it would draw a straight line across an outage, which reads
+as "steady" when it means "absent". Lines are built as a `path` with a fresh `M` after every gap.
+
+**Fonts are vendored, not fetched.** `@fontsource/*` self-hosts Geist and Azeret Mono in the bundle,
+for the reason `apps/jellyfin/custom.css` records at length about the sixteen `@import` URLs it used
+to carry.
+
 ## Commands
 
 All of these run on the server as `core`, from `/var/home-server`. **No `sudo`** - the stack is
@@ -679,6 +775,8 @@ systemctl --user list-units --failed          # the fastest health check
 podman ps --filter health=unhealthy           # the one that catches a live-but-broken service
 
 systemctl --user start caddy-build            # after editing apps/caddy/Dockerfile (~75s)
+systemctl --user start home-server-dashboard-build.service   # THE DEPLOY for apps/dashboard/
+systemctl --user restart dashboard            # then swap onto the new bundle
 podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change, no downtime
 
 ./bin/verify-host.sh                          # the whole battery; also writes the MOTD
@@ -795,10 +893,20 @@ other by container name (`http://sonarr:8989`), but only where they share a netw
 | `net-transcode` | caddy, tdarr-server, tdarr-node-01 |
 | `net-egress` | duckdns |
 | `net-metrics` | caddy, prometheus, node-exporter, alertmanager, ntfy-alertmanager, ntfy |
+| `net-dashboard` | caddy, dashboard |
 
 Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individually** - a shared
 "proxy" network holding everything with a UI would re-flatten the topology and buy nothing. It is
-deliberately absent from `net-solver`.
+deliberately absent from `net-solver` and from `net-egress`.
+
+**`net-dashboard` holds two containers and exists so that it can hold two.** The obvious home for
+the dashboard was `net-metrics`, since Prometheus is what it reads, and that is the wrong answer:
+membership there would let it open a connection to `prometheus:9090` **directly**, behind the
+`/api/v1/admin/*` refusal the Caddyfile puts at every public entrance - and Prometheus runs with
+`--web.enable-admin-api`, which carries `delete_series`. So the dashboard queries Prometheus the
+same way the browser does, through Caddy, past the guard. It holds no credential, makes no outbound
+request, and serves a static bundle plus one read-only JSON, which is what makes a segment of its
+own cheap rather than fussy.
 
 **`net-metrics` is the one segment that could re-create that mistake, and the design inverts it to
 avoid doing so.** The obvious metrics topology puts an exporter for each application on both
@@ -1738,8 +1846,15 @@ Remaining, in order:
    was chosen over a store needing a second container for them, and that paid off exactly as
    expected.
 
-   **What remains is the dashboard**, which was the original point of the metrics work: `status.json`
-   for what is true now, keyed by stable ids, and Prometheus for when it stopped being true.
+   **The dashboard is done too, 2026-08-15, and this item is now closed.** A Vue 3 application at
+   `home.avanserv.com`, in `apps/dashboard/`, built on the server from the checkout. It is what
+   every keyed id and every series was for. See "The dashboard".
+
+   **The first cut is the shell, System and Services; Home and Library are stubs**, because they
+   need Jellyfin sessions, Jellyseerr requests, poster images and the \*arr queues, none of which is
+   collected today. **It is read-only, structurally**: no container can reach the podman socket, so
+   restart and pull would need a privileged host-side surface reachable from a browser - the next
+   deliberate decision here, not an oversight in this one.
 
    **Do NOT build either on `journalctl -p err`.** Jellyfin alone emits 2,644 priority-3 lines a day
    of ffmpeg chatter and there is no lever to stop it - see Known state. Unit state and container

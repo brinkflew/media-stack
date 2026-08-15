@@ -1,0 +1,27 @@
+{
+  "name": "home-server-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Read-only console for the home-server stack: status.json findings and Prometheus series",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --build && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --build"
+  },
+  "dependencies": {
+    "@fontsource/azeret-mono": "^5.2.5",
+    "@fontsource/geist-sans": "^5.2.5",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "~5.9.2",
+    "vite": "^7.0.0",
+    "vue-tsc": "^3.0.0"
+  }
+}

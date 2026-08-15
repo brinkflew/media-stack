@@ -1,0 +1,122 @@
+/* ==========================================================================
+   Reset and the handful of global rules
+   --------------------------------------------------------------------------
+   Everything else is scoped to a component. This file exists for the things
+   that genuinely cannot be: the box model, the page background, focus, and
+   the two utility classes that would otherwise be repeated in forty places.
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tabular figures everywhere a number lives, so a value that ticks does not
+   reflow the column it sits in. This is why the design puts every number in
+   Azeret Mono in the first place. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The section label: 10px mono, wide tracking, uppercase, dim. It appears
+   above almost every panel in the design. */
+.label {
+  font: var(--t-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--fg-5);
+}
+
+.truncate {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+a {
+  color: var(--ok);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--ok-hover);
+}
+
+/* Keyboard focus only. A mouse click on a panel header should not draw a
+   ring, but tabbing to it must. */
+:focus-visible {
+  outline: 2px solid var(--ok);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
+}
+
+/* Scrollbars, because the default light one on a near-black page is the
+   single most obvious tell that a dark UI was not finished. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(1 0 0 / 0.14) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: oklch(1 0 0 / 0.14);
+  border-radius: 5px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: oklch(1 0 0 / 0.22);
+}

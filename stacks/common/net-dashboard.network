@@ -1,0 +1,42 @@
+# ==============================================================================
+# net-dashboard
+# ------------------------------------------------------------------------------
+# Caddy and the dashboard, and nothing else. The ninth segment, and the smallest
+# thing in this repository that still gets a trust boundary of its own.
+#
+# THE OBVIOUS CHOICE WAS net-metrics, AND IT IS THE WRONG ONE. The dashboard
+# reads Prometheus, Prometheus lives on net-metrics, so putting it there would
+# let it query the store directly and save a segment. What that also does is let
+# it open a connection to prometheus:9090 - and Prometheus runs with
+# --web.enable-admin-api, because the nightly backup needs
+# /api/v1/admin/tsdb/snapshot. That API also carries delete_series.
+#
+# apps/caddy/Caddyfile closes that path at every public entrance, twice: once on
+# metrics.{$DOMAIN} and once on home.{$DOMAIN}. Membership of net-metrics would
+# have quietly re-opened it from inside, for a container whose whole job is to
+# serve files to a browser. So the dashboard queries Prometheus the same way the
+# browser does - through Caddy, past the guard - and this bridge holds exactly
+# one route.
+#
+# The container reaches NOTHING from here. It has no credential, makes no
+# outbound request, and serves a static bundle plus one read-only JSON. That is
+# the entire reason it is cheap to expose.
+#
+# Members: caddy, dashboard.
+# ==============================================================================
+
+[Network]
+NetworkName=net-dashboard
+Subnet=${NET_SUBNET_DASHBOARD}
+
+# See net-metrics.network for why this is not optional. Netavark does not
+# inherit Docker's inter-bridge isolation, so without it this segment would be
+# routable to every other one and the paragraph above would be decoration.
+Options=isolate=true
+
+# Without this, Subnet= expands to an empty string rather than failing, and
+# podman rejects it with "Error: invalid CIDR address:" - three units away from
+# the cause. Every quadlet that interpolates a variable needs it, .network
+# units included.
+[Service]
+EnvironmentFile=/var/home-server/.env

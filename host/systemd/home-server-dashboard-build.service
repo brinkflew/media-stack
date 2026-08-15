@@ -1,0 +1,42 @@
+# ==============================================================================
+# Rebuild the dashboard, so the second built image is not the second one that
+# never updates
+# ------------------------------------------------------------------------------
+# Exactly the trap home-server-caddy-build.service documents, and it applies here
+# for a second reason on top of that one:
+#
+#   - a quadlet .build unit only runs when its image is ABSENT. Once
+#     localhost/home-server/dashboard:latest exists, systemd never builds again.
+#   - AutoUpdate=local compares the running container against the image in local
+#     storage. It notices a newer image; it does not make one.
+#   - AND NOTHING ELSE WOULD EVER REBUILD IT. Caddy at least has an upstream
+#     release to chase. This image's content comes from a git checkout, so
+#     without this unit a `git pull` that changes apps/dashboard/src/ would
+#     deploy nothing at all, silently, while every other kind of change in the
+#     same commit took effect.
+#
+# So it is also the deploy path: pull, and the next run of this builds the new
+# bundle. To see a change immediately, run it by hand -
+#   systemctl --user start home-server-dashboard-build.service
+#
+# IT DELIBERATELY DOES NOT RESTART THE DASHBOARD. The build is the check: vue-tsc
+# runs inside it, so a type error fails HERE while the running container keeps
+# serving the previous bundle. The nightly podman-auto-update run is what swaps
+# it, and Notify=healthy is what rolls it back if the new one will not come up.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Rebuild the dashboard image from the checkout
+Documentation=file:/var/home-server/apps/dashboard/Dockerfile
+
+[Service]
+Type=oneshot
+# `restart`, not `start`: the generated dashboard-build.service is a oneshot
+# that sits `inactive (dead)` after it has run once, and `start` on it is a
+# no-op. This is the mistake that made the Caddy timer decorative for a week.
+ExecStart=/usr/bin/systemctl --user restart dashboard-build.service
+# npm ci plus a Vite build. Well under caddy's source build, but the first run
+# on a cold image cache pulls two base images and 60-odd packages.
+TimeoutStartSec=900

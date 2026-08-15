@@ -1,0 +1,75 @@
+# ==============================================================================
+# The dashboard's own file server - NOT the ingress Caddyfile
+# ------------------------------------------------------------------------------
+# This one is baked into the image and serves the built bundle on plain HTTP
+# inside net-dashboard. The public one is apps/caddy/Caddyfile, which terminates
+# TLS, applies single sign-on and proxies here.
+#
+# THE PORT IS A LITERAL 8080, DELIBERATELY, and this is the same argument
+# node-exporter.container makes for its 9100. It appears in three places - here,
+# the reverse_proxy in apps/caddy/Caddyfile, and the HealthCmd in
+# dashboard.container - and a quadlet HealthCmd cannot carry a ${VAR}. So a
+# PORT_ variable would reach two of the three and leave the drift it exists to
+# prevent, while costing a sops edit and two Environment= lines. It is never
+# published to the host and no CNAME depends on it.
+# ==============================================================================
+
+{
+	# No TLS here: the only thing that can open a connection to this container
+	# is Caddy on net-dashboard, and it has already terminated TLS.
+	auto_https off
+
+	# The admin API would be a second, unauthenticated way to reconfigure this
+	# server from anywhere on the segment. Nothing reloads it - a config change
+	# means a new image - so it has no reason to be listening.
+	admin off
+
+	# STDOUT, NOT THE DEFAULT STDERR: podman's journald driver maps a
+	# container's stderr to journal priority 3, so every access log line would
+	# be recorded as an ERROR. apps/caddy/Caddyfile documents what that cost.
+	log {
+		output stdout
+	}
+}
+
+:8080 {
+	log {
+		output stdout
+	}
+
+	# Liveness only. It answers before anything else is checked, so a healthy
+	# container means "the server is up", not "the data is fresh" - freshness
+	# is asserted in the UI against generated_at, where it belongs.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	# The host's copy of status.json, bind-mounted read-only at /srv/data.
+	#
+	# no-store IS LOAD-BEARING. This file is the freshness signal for the whole
+	# page: a cached copy would let the UI report a stale battery as current,
+	# which is the exact failure this repository is written around. It is 30 KB
+	# once an hour, so there is nothing to save by caching it.
+	handle /data/* {
+		root * /srv
+		file_server
+		header Cache-Control "no-store"
+	}
+
+	handle {
+		root * /srv/dist
+		encode zstd gzip
+
+		# Vite fingerprints everything under assets/, so those are immutable
+		# and index.html must never be, or a deploy is invisible until someone
+		# hard-reloads.
+		@immutable path /assets/*
+		@entry not path /assets/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+		header @entry Cache-Control "no-cache"
+
+		# Client-side routing: /system and /services are not files.
+		try_files {path} /index.html
+		file_server
+	}
+}

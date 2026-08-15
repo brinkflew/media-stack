@@ -1,0 +1,30 @@
+# ==============================================================================
+# Rebuild the dashboard nightly, an hour before the auto-update run
+# ------------------------------------------------------------------------------
+# NIGHTLY, NOT WEEKLY, which is where this differs from the Caddy timer. That one
+# is chasing an upstream release and compiles Go to do it, so weekly is the right
+# cadence. This image's content comes from the checkout, so its input changes
+# whenever someone commits - and a deploy that takes up to seven days to appear
+# is a deploy nobody trusts.
+#
+# 23:00 against podman-auto-update.timer's `OnCalendar=daily`, i.e. midnight with
+# jitter: the image is built, and the run an hour later restarts onto it. Neither
+# is load-bearing - a late image is picked up the next night, not lost - it just
+# keeps "rebuilt" and "running the rebuild" in the same night for anyone reading
+# the journal.
+#
+# Persistent=true so a machine that was off overnight rebuilds when it comes
+# back rather than skipping the day.
+# ==============================================================================
+
+[Unit]
+Description=Rebuild the dashboard image nightly
+
+[Timer]
+OnCalendar=*-*-* 23:00
+Persistent=true
+RandomizedDelaySec=15min
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

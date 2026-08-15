@@ -1,0 +1,641 @@
+<script setup lang="ts">
+/**
+ * Services: the pod rack, the segmentation, and the published ports.
+ *
+ * Every row is assembled from home_server_container_info's label set, which is
+ * podman's own PODMAN_SYSTEMD_UNIT join - so `torrent-infra` resolves to
+ * torrent-pod.service with no lookup table anywhere. CLAUDE.md is emphatic
+ * about that: a table maintained in a script is the most driftable thing here.
+ *
+ * home_server_container_identity_unresolved counts what did not map, and it is
+ * shown rather than ignored, because the failure is otherwise silent - a
+ * container simply missing from the rack.
+ */
+import { computed, watch } from "vue";
+
+import PanelBox from "@/components/PanelBox.vue";
+import StatusDot from "@/components/StatusDot.vue";
+import ActivityBars from "@/components/ActivityBars.vue";
+import NetworkGraph from "@/components/NetworkGraph.vue";
+
+import { usePoll } from "@/composables/usePoll";
+import { useTimeWindow } from "@/composables/useTimeWindow";
+import { useHostStore } from "@/stores/host";
+import { instant, instantBy, labelsBy, range, value } from "@/api/prometheus";
+import { SERVICES } from "@/queries";
+import { toPoints } from "@/charts";
+import { NETWORKS, PUBLISHED, nodeByName } from "@/topology";
+import * as fmt from "@/format";
+
+const host = useHostStore();
+const { window: win, windows, active, setWindow } = useTimeWindow();
+
+type Tone = "ok" | "warn" | "fail" | "off";
+
+interface Row {
+  name: string;
+  unit: string;
+  image: string;
+  pod: string;
+  running: boolean;
+  /** undefined when the container defines no health check at all. */
+  health?: number;
+  restarts: number;
+  cpu: number;
+  memory: number;
+  memoryHigh: number;
+  /** Pages faulted back in after being reclaimed: the difference between a
+   *  cgroup holding cold cache and one that is actually starved. */
+  refault: number;
+  uptime: number;
+  activity: number[];
+  networks: string[];
+  role: string;
+  tone: Tone;
+  state: string;
+}
+
+const ACTIVITY_BARS = 24;
+
+const rack = usePoll(async (signal) => {
+  const end = Math.floor(Date.now() / 1000);
+  const step = Math.max(60, Math.round(win.value.seconds / ACTIVITY_BARS));
+
+  const [info, running, health, restarts, startTime, cpu, memory, memHigh, refault, unresolved, activity] =
+    await Promise.all([
+      labelsBy(SERVICES.info, "container", signal),
+      instantBy(SERVICES.running, "container", signal),
+      instantBy(SERVICES.health, "container", signal),
+      instantBy(SERVICES.restarts, "container", signal),
+      instantBy(SERVICES.startTime, "container", signal),
+      instantBy(SERVICES.cpu, "container", signal),
+      instantBy(SERVICES.memory, "container", signal),
+      instantBy(SERVICES.memoryHigh, "container", signal),
+      instantBy(SERVICES.memoryRefault, "container", signal),
+      instant(SERVICES.identityUnresolved, signal),
+      range(SERVICES.cpu, { window: step * ACTIVITY_BARS, step, signal }),
+    ]);
+
+  const bars = new Map<string, number[]>();
+  for (const s of activity) {
+    const key = s.metric.container;
+    if (key) bars.set(key, toPoints(s.values).map(([, v]) => v));
+  }
+
+  const rows: Row[] = [...info.entries()].map(([name, labels]) => {
+    const isRunning = (running.get(name) ?? 0) === 1;
+    const h = health.get(name);
+    const declared = nodeByName(name);
+
+    let tone: Tone = "off";
+    let state = "no health check";
+    if (!isRunning) {
+      tone = "fail";
+      state = "stopped";
+    } else if (h === undefined) {
+      // duckdns and unpackerr serve no HTTP and define no health check. Their
+      // series is ABSENT rather than zero, which is what lets one alert rule
+      // cover every container without naming any. Grey, never green.
+      tone = "off";
+      state = "running, unchecked";
+    } else if (h === 0) {
+      tone = "ok";
+      state = "healthy";
+    } else if (h === 1) {
+      tone = "warn";
+      state = "starting";
+    } else {
+      tone = "fail";
+      state = "unhealthy";
+    }
+
+    return {
+      name,
+      unit: labels.unit ?? "",
+      image: labels.image ?? "",
+      pod: labels.pod ?? "",
+      running: isRunning,
+      health: h,
+      restarts: restarts.get(name) ?? Number.NaN,
+      cpu: cpu.get(name) ?? Number.NaN,
+      memory: memory.get(name) ?? Number.NaN,
+      memoryHigh: memHigh.get(name) ?? Number.NaN,
+      refault: refault.get(name) ?? Number.NaN,
+      uptime: end - (startTime.get(name) ?? Number.NaN),
+      activity: bars.get(name) ?? [],
+      networks: declared?.networks ?? [],
+      role: declared?.role ?? "",
+      tone,
+      state,
+    };
+  });
+
+  // Worst first, then busiest. A rack sorted alphabetically buries the one row
+  // worth looking at somewhere in the middle.
+  //
+  // `off` and `ok` deliberately TIE. duckdns, unpackerr and the pod infra have
+  // no health check to fail, so ranking "unchecked" above "healthy" would pin
+  // the same three rows to the top for ever - which is how a sort order stops
+  // being read. They sort in by activity like everything else.
+  const rank: Record<Tone, number> = { fail: 0, warn: 1, off: 2, ok: 2 };
+  rows.sort((a, b) => rank[a.tone] - rank[b.tone] || b.cpu - a.cpu);
+
+  return { rows, unresolved: value(unresolved[0]?.value) };
+}, 30_000);
+
+watch(win, () => {
+  void rack.refresh();
+});
+
+const rows = computed(() => rack.data.value?.rows ?? []);
+
+const tally = computed(() => {
+  const r = rows.value;
+  const counts = { ok: 0, warn: 0, fail: 0, off: 0 };
+  for (const row of r) counts[row.tone] += 1;
+  return counts;
+});
+
+/** For the topology graph, which colours its nodes live. */
+const tones = computed(() => {
+  const map = new Map<string, Tone>();
+  for (const row of rows.value) map.set(row.name, row.tone);
+  return map;
+});
+
+const memoryRatio = (row: Row): number =>
+  Number.isFinite(row.memoryHigh) && row.memoryHigh > 0 ? row.memory / row.memoryHigh : Number.NaN;
+
+/**
+ * A CONTAINER AT ITS MemoryHigh IS NOT NEWS, and colouring it amber is the
+ * single most likely way this page would cry wolf.
+ *
+ * CLAUDE.md spends a section on it: Jellyfin sits at exactly 3.00G against a
+ * 3G watermark with 6,398 `high` events seven minutes after a restart, and it
+ * is fine - 0.385G of that is its working set and the rest is cold streaming
+ * page cache the kernel reclaims for free. "A cgroup doing file I/O will
+ * always sit at its MemoryHigh and always accumulate high events, because that
+ * is what the watermark is for."
+ *
+ * So the ratio alone decides nothing. The second signal is the refault rate -
+ * pages being read back in after reclaim, which is what actual starvation
+ * looks like - and a restart, which is what it looks like once it has already
+ * gone wrong.
+ */
+function memoryTone(row: Row): Tone {
+  const ratio = memoryRatio(row);
+  if (!Number.isFinite(ratio)) return "off";
+
+  const thrashing = Number.isFinite(row.refault) && row.refault > 0;
+  if (ratio >= 0.98 && (thrashing || row.restarts > 0)) return "fail";
+  if (thrashing) return "warn";
+  return "ok";
+}
+
+// --- the applications, as a strip ------------------------------------------
+const apps = usePoll(async (signal) => {
+  const [indexers, indexerUp, queue, sessions, tdarr, torrent, torrentRate, vpn] = await Promise.all([
+    instantBy(SERVICES.arrIndexers, "service", signal),
+    instantBy(SERVICES.indexerUp, "indexer", signal),
+    instantBy(SERVICES.arrQueue, "service", signal),
+    instant(SERVICES.jellyfinSessions, signal),
+    instant(SERVICES.tdarrQueue, signal),
+    instant(SERVICES.torrentState, signal),
+    instantBy(SERVICES.torrentRate, "direction", signal),
+    labelsBy(SERVICES.vpnInfo, "__name__", signal),
+  ]);
+
+  const up = [...indexerUp.values()].filter((v) => v === 1).length;
+  const vpnLabels = [...vpn.values()][0];
+
+  return {
+    indexers: { up, total: indexerUp.size, perService: indexers },
+    queue,
+    sessions: value(sessions[0]?.value),
+    tdarr: value(tdarr[0]?.value),
+    torrentState: value(torrent[0]?.value),
+    down: torrentRate.get("download") ?? Number.NaN,
+    upRate: torrentRate.get("upload") ?? Number.NaN,
+    vpn: vpnLabels ? `${vpnLabels.city ?? ""} ${vpnLabels.country ?? ""}`.trim() : "",
+  };
+}, 60_000);
+
+const TORRENT_STATE = ["connected", "firewalled", "disconnected"];
+
+const metricsStale = computed(() => {
+  if (host.prometheusDown) return "prometheus is unreachable; this is the last answer it gave";
+  const f = host.collectorFreshness;
+  if (f.missing) return "the collector has never reported";
+  if (f.stale) return `the collector last ran ${fmt.duration(f.age)} ago; these numbers are frozen`;
+  return null;
+});
+</script>
+
+<template>
+  <div class="page">
+    <Teleport defer to="#toolbar">
+      <span class="mono note">read only</span>
+      <div class="picker">
+        <button
+          v-for="w in windows"
+          :key="w.id"
+          class="pick mono"
+          :class="{ on: active === w.id }"
+          @click="setWindow(w.id)"
+        >
+          {{ w.label }}
+        </button>
+      </div>
+    </Teleport>
+
+    <!-- The rack -->
+    <section class="rack-head">
+      <span class="label">Containers</span>
+      <span class="mono counts">
+        {{ rows.length }} units / {{ tally.ok }} healthy / {{ tally.warn }} starting /
+        {{ tally.fail }} failing / {{ tally.off }} unchecked
+      </span>
+    </section>
+
+    <p v-if="metricsStale" class="rack-stale mono">{{ metricsStale }}</p>
+
+    <div class="rack" :class="{ dim: !!metricsStale }">
+      <div class="row head mono">
+        <span>LED</span>
+        <span>CONTAINER</span>
+        <span>IMAGE</span>
+        <span>ACTIVITY</span>
+        <span class="r">CPU</span>
+        <span class="r">MEMORY</span>
+        <span class="r">RESTARTS</span>
+        <span class="r">UPTIME</span>
+      </div>
+
+      <div v-for="row in rows" :key="row.name" class="row" :style="{ borderLeftColor: `var(--${row.tone})` }">
+        <div class="leds">
+          <StatusDot :tone="row.tone" :live="row.tone === 'fail'" glow :size="7" />
+          <StatusDot :tone="row.running ? 'ok' : 'off'" :size="7" />
+          <StatusDot :tone="row.restarts > 0 ? 'warn' : 'off'" :size="7" />
+        </div>
+
+        <div class="ident">
+          <div class="name">{{ row.name }}</div>
+          <div class="state mono" :style="{ color: `var(--${row.tone})` }">{{ row.state }}</div>
+        </div>
+
+        <div class="meta">
+          <div class="mono image truncate" :title="row.image">{{ fmt.shortImage(row.image) }}</div>
+          <div class="mono sub">
+            <span>{{ fmt.unitName(row.unit) }}</span>
+            <span v-if="row.pod">pod {{ row.pod }}</span>
+            <span v-else-if="row.networks.length">{{ row.networks.join(" ") }}</span>
+          </div>
+        </div>
+
+        <ActivityBars :values="row.activity" :tone="row.tone === 'off' ? 'off' : row.tone" :height="20" />
+
+        <div class="mono num">{{ fmt.percent(row.cpu, 1) }}</div>
+
+        <div class="mono num mem">
+          <span>{{ fmt.bytes(row.memory) }}</span>
+          <span class="cap" :style="{ color: `var(--${memoryTone(row)})` }">
+            {{ fmt.percent(memoryRatio(row), 0) }} of high
+          </span>
+        </div>
+
+        <div class="mono num" :style="{ color: row.restarts > 0 ? 'var(--warn)' : 'var(--fg-5)' }">
+          {{ fmt.number(row.restarts) }}
+        </div>
+
+        <div class="mono num dim">{{ fmt.duration(row.uptime) }}</div>
+      </div>
+    </div>
+
+    <p v-if="(rack.data.value?.unresolved ?? 0) > 0" class="unresolved mono">
+      {{ rack.data.value?.unresolved }} container(s) could not be mapped to a systemd unit, so they are
+      absent from this table. That is what home_server_container_identity_unresolved counts.
+    </p>
+
+    <!-- Topology and the two side panels -->
+    <section class="lower">
+      <PanelBox label="Network" :stale="metricsStale">
+        <template #aside>
+          <span>{{ NETWORKS.length }} bridges, all isolate=true</span>
+        </template>
+        <NetworkGraph :tones="tones" />
+      </PanelBox>
+
+      <div class="side">
+        <PanelBox label="Published ports">
+          <template #aside>
+            <span>{{ PUBLISHED.length }} in the whole stack</span>
+          </template>
+          <ul class="ports">
+            <li v-for="p in PUBLISHED" :key="`${p.node}-${p.mapping}`" class="port mono">
+              <span class="pmap">{{ p.mapping }}</span>
+              <span class="pnode">{{ p.node }}</span>
+            </li>
+          </ul>
+          <p class="hint mono">
+            Everything else is reached by container name over its own bridge. firewalld governs these
+            two: a new publish needs a matching rule or the port is closed while the container looks
+            healthy.
+          </p>
+        </PanelBox>
+
+        <PanelBox label="Applications" :stale="metricsStale">
+          <div class="apps mono">
+            <div class="app">
+              <span>indexers up</span>
+              <span
+                class="av"
+                :style="{
+                  color:
+                    (apps.data.value?.indexers.up ?? 0) * 2 < (apps.data.value?.indexers.total ?? 0)
+                      ? 'var(--warn)'
+                      : 'var(--fg-2)',
+                }"
+              >
+                {{ apps.data.value?.indexers.up ?? "-" }} of {{ apps.data.value?.indexers.total ?? "-" }}
+              </span>
+            </div>
+            <div class="app">
+              <span>sonarr queue</span>
+              <span class="av">{{ fmt.number(apps.data.value?.queue.get("sonarr") ?? Number.NaN) }}</span>
+            </div>
+            <div class="app">
+              <span>radarr queue</span>
+              <span class="av">{{ fmt.number(apps.data.value?.queue.get("radarr") ?? Number.NaN) }}</span>
+            </div>
+            <div class="app">
+              <span>tdarr queue</span>
+              <span class="av">{{ fmt.number(apps.data.value?.tdarr ?? Number.NaN) }}</span>
+            </div>
+            <div class="app">
+              <span>jellyfin sessions</span>
+              <span class="av">{{ fmt.number(apps.data.value?.sessions ?? Number.NaN) }}</span>
+            </div>
+            <div class="app">
+              <span>torrent</span>
+              <span
+                class="av"
+                :style="{
+                  color: (apps.data.value?.torrentState ?? 0) === 0 ? 'var(--ok)' : 'var(--warn)',
+                }"
+              >
+                {{ TORRENT_STATE[apps.data.value?.torrentState ?? 2] ?? "unknown" }}
+              </span>
+            </div>
+            <div class="app">
+              <span>torrent rate</span>
+              <span class="av">
+                {{ fmt.rate(apps.data.value?.down ?? Number.NaN) }} /
+                {{ fmt.rate(apps.data.value?.upRate ?? Number.NaN) }}
+              </span>
+            </div>
+            <div class="app">
+              <span>vpn exit</span>
+              <span class="av">{{ apps.data.value?.vpn || "-" }}</span>
+            </div>
+          </div>
+        </PanelBox>
+      </div>
+    </section>
+  </div>
+</template>
+
+<style scoped>
+.page {
+  padding: 16px var(--pad-page) var(--pad-page);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.note {
+  font: var(--t-mono-sm);
+  color: var(--fg-dim);
+}
+
+.picker {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-sm);
+  background: var(--field);
+  border: 1px solid var(--line);
+}
+
+.pick {
+  padding: 5px 11px;
+  border-radius: var(--r-xs);
+  font: var(--t-mono-md);
+  color: var(--fg-5);
+}
+
+.pick:hover {
+  color: var(--fg);
+}
+
+.pick.on {
+  background: oklch(1 0 0 / 0.09);
+  color: var(--fg);
+}
+
+.rack-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.counts {
+  font: var(--t-mono-sm);
+  color: var(--fg-5);
+}
+
+.rack-stale {
+  font: var(--t-mono-sm);
+  color: var(--warn);
+}
+
+.rack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rack.dim {
+  opacity: 0.45;
+  filter: saturate(0.5);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 56px 148px minmax(0, 1fr) 90px 74px 128px 84px 92px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  background: var(--row);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--off);
+}
+
+.row:hover {
+  border-color: oklch(1 0 0 / 0.2);
+}
+
+.row.head {
+  background: none;
+  border: 0;
+  padding: 0 14px 4px;
+  font: var(--t-mono-xs);
+  letter-spacing: 0.1em;
+  color: var(--fg-dim);
+}
+
+.r {
+  text-align: right;
+}
+
+.leds {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.name {
+  font: var(--t-ui-md);
+}
+
+.state {
+  font: var(--t-mono-xs);
+  margin-top: 2px;
+}
+
+.meta {
+  min-width: 0;
+}
+
+.image {
+  font: var(--t-mono-sm);
+  color: var(--fg-3);
+}
+
+.sub {
+  display: flex;
+  gap: 10px;
+  margin-top: 3px;
+  font: var(--t-mono-xs);
+  color: var(--fg-5);
+}
+
+.num {
+  text-align: right;
+  font: var(--t-mono-md);
+  color: var(--fg-2);
+}
+
+.dim {
+  color: var(--fg-5);
+  font-weight: 400;
+}
+
+.mem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cap {
+  font: var(--t-mono-xs);
+}
+
+.unresolved {
+  font: var(--t-mono-sm);
+  color: var(--warn);
+}
+
+.lower {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 10px;
+  margin-top: 8px;
+  align-items: start;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ports {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.port {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 9px;
+  padding: 5px 4px;
+  border-radius: var(--r-xs);
+  font: var(--t-mono-sm);
+}
+
+.port:hover {
+  background: oklch(1 0 0 / 0.04);
+}
+
+.pmap {
+  color: var(--fg-2);
+}
+
+.pnode {
+  color: var(--fg-5);
+}
+
+.hint {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  font: var(--t-mono-xs);
+  color: var(--fg-5);
+}
+
+.apps {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.app {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font: var(--t-mono-sm);
+  color: var(--fg-5);
+}
+
+.av {
+  color: var(--fg-2);
+  font-weight: 500;
+}
+
+@media (max-width: 1400px) {
+  .lower {
+    grid-template-columns: 1fr;
+  }
+
+  .side {
+    flex-direction: row;
+  }
+
+  .side > * {
+    flex: 1;
+  }
+}
+</style>
