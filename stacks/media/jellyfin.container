@@ -86,6 +86,18 @@ EnvironmentFile=/var/home-server/.env
 # never be able to take the media server down. It logs to the journal instead.
 ExecStartPre=-/var/home-server/bin/render-jellyfin-branding.py
 
+# The same contract for the encoding settings that are decisions rather than
+# defaults - see apps/jellyfin/encoding.conf. It writes ONLY the elements named
+# there and never creates the document, because encoding.xml has ~50 elements
+# that are genuinely Jellyfin's to own.
+#
+# THE ONE THAT MATTERS IS AllowOnDemandMetadataBasedKeyframeExtractionForExtensions.
+# It is what makes Jellyfin build a keyframe-accurate HLS playlist for mkv, and
+# it was invisible to `git grep` while deciding how every browser plays every
+# file. Same leading `-`: a config renderer must not be able to take Jellyfin
+# down either.
+ExecStartPre=-/var/home-server/bin/render-jellyfin-encoding.py
+
 Restart=always
 RestartSec=5
 # Must clear the startup check's 300s ceiling - see sonarr.container.

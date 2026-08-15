@@ -435,6 +435,8 @@ podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change,
 ./bin/verify-host.sh --json | jq .summary     # the same findings, machine-readable
 jq -r '.checks[]|select(.status!="pass")|"\(.status)  \(.id)  \(.message)"' \
   /var/lib/home-server/status.json            # what the hourly run last found
+./bin/verify-media.sh "/mnt/media/library/transcoded/movies/<film>/<film>.mkv"
+./bin/verify-media.sh --library movies        # will these drift in a browser?
 podman auto-update --dry-run                  # 17 rows with a policy, not an empty table
 systemctl --user list-timers                  # verify hourly, backup + auto-update nightly
 
@@ -791,6 +793,23 @@ It is **tracked in git** and copied into the gitignored `config/` tree by an `Ex
 
 Things in it that are not obvious and cost time to find:
 
+- **The keyframe interval is PINNED at just over 6 seconds, and it is not a tuning knob.**
+  `keyframeSeconds` (default 6) becomes `-g N -keyint_min N -no-scenecut 1`, with `N` derived from
+  the source frame rate - 145 at 23.976 fps, 151 at 25, 181 at 29.97. Left to itself NVENC uses a
+  250-frame cap plus adaptive I-frames at scene cuts, which produces gaps anywhere from 0.2 s to
+  10.4 s and breaks browser playback outright - see the drift entry under Known state.
+  **`-no-scenecut 1` is the load-bearing half**: without it NVENC keeps inserting keyframes at cuts,
+  the gaps fall back below 6 s and the whole failure returns. It works because `-rc-lookahead 32` is
+  already set; the option is ignored without lookahead. The frame rate is parsed from
+  `r_frame_rate`, which ffprobe reports as the **rational string** `"24000/1001"` - `parseFloat` on
+  that yields 24000 and would put the interval out by a factor of a thousand.
+
+  **It costs nothing; it SAVES about 5%.** Measured on the same 90 s clip at CQ 26, preset p6:
+  19,989,619 bytes with the old arguments against **18,997,172 with the new ones**, and the keyframe
+  gaps went from 1.6-6.0 s to a flat 6.047-6.048 s. An I-frame is far more expensive than the P and
+  B frames it displaces, so dropping the adaptive ones more than pays for having no keyframe exactly
+  on a cut. The expectation going in was a small loss; measure this sort of thing rather than
+  reasoning about it.
 - **10-bit is done with `-vf scale_cuda=format=p010le`, NOT `-pix_fmt p010le`.** With
   `-hwaccel_output_format cuda` the frames never leave GPU memory, so a pixel-format conversion has
   nowhere to happen and ffmpeg fails with *"Impossible to convert between the formats supported by
@@ -929,6 +948,7 @@ had, now used for all of them:
 | `apps/tdarr/plugins/` | `config/tdarr/server/Tdarr/Plugins/Local/` | `cp -a` |
 | `apps/sonarr/scripts/` | `config/sonarr/scripts/` | `cp -a` |
 | `apps/jellyfin/custom.css` | `config/jellyfin/branding.xml` | `bin/render-jellyfin-branding.py` |
+| `apps/jellyfin/encoding.conf` | `config/jellyfin/encoding.xml` | `bin/render-jellyfin-encoding.py` |
 | `apps/tdarr/flows/` | nowhere - **a record, not a deployment** | by hand; see that directory's README |
 
 **Two things are tracked that nothing deploys, and the distinction matters.** `apps/tdarr/flows/`
@@ -938,12 +958,20 @@ is reviewable and diffable at all - it decides what happens to every file in the
 previously recoverable from nothing but a backup of gitignored state. **Re-export it after any
 edit**, or the copy in git silently becomes fiction.
 
-**The same gap is still open for Jellyfin.** `config/jellyfin/system.xml`, `encoding.xml` and
-`network.xml` hold real decisions - whether trickplay uses the GPU, which codecs decode in hardware,
-which proxies are trusted - and none of them is in git, so a `git grep` does not find them and a
-restore brings back whatever was there. Only the Custom CSS half of Jellyfin's configuration is
-under this contract. Treat those three files the way the Sonarr download-client settings are
-treated: check them through the API rather than assuming.
+**Jellyfin's `encoding.xml` came under the contract on 2026-08-15, and only in part.**
+`apps/jellyfin/encoding.conf` names the elements that are decisions rather than defaults - the
+keyframe-extraction extension list, throttling, the hardware-decode codec list - and
+`bin/render-jellyfin-encoding.py` writes **only those**, never creating the document. That
+restriction is the design, not laziness: `encoding.xml` has ~50 elements (tonemapping, VAAPI
+device, CRF targets, deinterlacing) that are genuinely Jellyfin's to own, and authoring it from a
+handful of tracked keys would reset every one of them by omission. **A list element must be declared
+`Element[] = a,b,c`**, because an emptied list is written `<Foo />` and cannot be told from a scalar
+by inspection - which is precisely the state the renderer exists to repair.
+
+**`system.xml` and `network.xml` are still outside it**, and they hold real decisions - whether
+trickplay uses the GPU, which proxies are trusted - so a `git grep` does not find them and a restore
+brings back whatever was there. Treat them the way the Sonarr download-client settings are treated:
+check them through the API rather than assuming.
 
 **Git is authoritative, so editing the copy on the server is pointless** - it is overwritten on the
 next start. Two consequences that are easy to be surprised by:
@@ -1260,6 +1288,39 @@ Conclusions from auditing the running host. Do not rediscover these:
   not: h264, hevc, vc1, av1, vp9, vp8 and mpeg2video are all enabled, confirmed against
   `/System/Configuration/encoding`. **Read a config through the API, or with `sed -n '/<tag>/,/<\/tag>/p'`
   - a line-matching grep cannot show you an XML element's contents.**
+- **An IRREGULAR KEYFRAME INTERVAL breaks browser playback, and the symptom names neither cause.**
+  Watching *Backrooms (2026)* in Chrome, the picture jumped forward a few seconds at 42:18 and the
+  subtitles then no longer matched the audio; reloading the page fixed it until the next time. That
+  is not corruption - the file is clean, all streams start at 0.000, no `Non-monotonous DTS`, and
+  ffmpeg's frame count matches its playlist to 0.1 s. It is two grids disagreeing:
+  - **Jellyfin plays an MKV in a browser as DirectStream** - `-codec:v copy`, audio E-AC3 to AAC
+    because Chrome cannot decode E-AC3, packaged as fMP4 HLS.
+  - **Its playlist advertises one segment per source keyframe**, from the `KeyframeData` table in
+    `jellyfin.db`, because `AllowOnDemandMetadataBasedKeyframeExtractionForExtensions` lists `mkv`.
+  - **ffmpeg is told `-hls_time 6` and can only cut on a keyframe**, so it MERGES consecutive
+    shorter GOPs. Segment N stops being segment N from the **second segment of every session**, and
+    the error accumulates: measured +3.838 s after one segment, +22.397 s after twenty-five.
+
+  So `currentTime` stops matching the picture. Text subtitles are stripped from the stream
+  (`-map -0:s`) and timed against `currentTime`, which is why they detach and stay detached, and why
+  a reload - a fresh ffmpeg whose first segment is aligned - appears to fix it.
+
+  **We caused it.** `hevc_nvenc` with no `-g` uses a 250-frame cap plus scene-cut I-frames; this
+  file's keyframes ran 0.375 s to 10.427 s apart. The plugin now pins the interval - see The
+  transcode policy. **`bin/verify-media.sh` is the check**, and it found **9 of the first 10 films
+  affected**, so this is library-wide rather than one bad encode. *Flow (2024)* passes with a flat
+  10.000 s grid, because it is a restored original that our pipeline never re-encoded.
+
+  Three things that will waste time if not written down:
+  - **Throttling is not the cause.** `EnableThrottling` does fire (`Transcoding is paused. Press [u]
+    to resume.`), and it only pauses a process - it moves no timestamp, and the drift is measurable
+    inside one uninterrupted session. It was the obvious suspect and it is innocent.
+  - **The `-ss` values in the FFmpeg logs are `keyframe + 0.500 s` exactly, and that is by design.**
+    `-noaccurate_seek` snaps back to the keyframe. It looks like a systematic half-second error and
+    is not; do not chase it.
+  - **The fix only applies to files encoded after it.** Everything already in `transcoded/` keeps
+    its irregular grid. A native Jellyfin client direct-plays the MKV with no HLS involved, so the
+    problem is browser-only, which is why re-transcoding the library has not been done.
 - **Jellyfin sits AT its `MemoryHigh` with a fast-climbing throttle counter, and that is FINE.**
   `memory.current` 3.00G against `MemoryHigh=3G`, `MemoryPeak` **2 MB above the watermark**, and
   `memory.events` `high` at 6,398 within seven minutes of a restart. It looks exactly like the

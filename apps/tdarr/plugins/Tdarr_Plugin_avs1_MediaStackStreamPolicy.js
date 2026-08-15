@@ -79,6 +79,18 @@ const details = () => ({
       tooltip: 'p1 (fastest) .. p7 (slowest). p6 measured 162 fps on 1080p; p7 buys little.',
     },
     {
+      name: 'keyframeSeconds',
+      type: 'string',
+      defaultValue: '6',
+      inputUI: { type: 'text' },
+      tooltip:
+        'Seconds between keyframes. MUST NOT be below Jellyfin\'s HLS segment length (6s), or '
+        + 'browser playback drifts: on its stream-copy path Jellyfin advertises one segment per '
+        + 'keyframe but tells ffmpeg -hls_time 6, so ffmpeg MERGES shorter GOPs and segment N '
+        + 'stops being segment N. Measured on Backrooms (2026): +3.8s after one segment, +22.4s '
+        + 'after twenty-five. Set 0 to leave keyframe placement to NVENC (the old behaviour).',
+    },
+    {
       name: 'skipIfHevcBelowBitrate',
       type: 'string',
       defaultValue: '8000000',
@@ -130,6 +142,21 @@ const langOf = (stream) => {
 // fre and fra are the same language in two ISO-639-2 flavours. Treating them as
 // distinct is how a "keep French" rule silently drops French.
 const normLang = (lang) => (lang === 'fra' ? 'fre' : lang);
+
+// ffprobe reports frame rate as a RATIONAL STRING, "24000/1001", not a number.
+// parseFloat() on that yields 24000, which would put the keyframe interval out by
+// a factor of a thousand - so parse the fraction. r_frame_rate first: avg_frame_rate
+// is total frames over duration, which a variable-rate source skews.
+const frameRateOf = (stream) => {
+  const candidates = [stream.r_frame_rate, stream.avg_frame_rate];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const parts = String(candidates[i] || '').split('/');
+    const num = parseFloat(parts[0]);
+    const den = parts.length > 1 ? parseFloat(parts[1]) : 1;
+    if (num > 0 && den > 0) return num / den;
+  }
+  return 0;
+};
 
 const opusBitrateFor = (channels, inputs) => {
   if (channels >= 7) return String(inputs.opusBitrate71);
@@ -234,6 +261,42 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       + ` -cq ${inputs.cq} -b:v 0 -profile:v main10`
       + ' -bf 4 -b_ref_mode middle -rc-lookahead 32'
       + ' -spatial-aq 1 -temporal-aq 1 -aq-strength 8');
+
+    // A REGULAR KEYFRAME INTERVAL, AND IT IS NOT A TUNING KNOB. Left to itself
+    // NVENC places keyframes on scene cuts, which on Backrooms (2026) put them
+    // 0.375s to 10.427s apart. Jellyfin's HLS STREAM-COPY path cannot segment
+    // that consistently: it advertises one segment per keyframe (from its own
+    // KeyframeData index) but passes ffmpeg -hls_time 6, and ffmpeg - unable to
+    // cut anywhere but a keyframe - MERGES consecutive short GOPs until it has
+    // 6s. So from the second segment of every session, ffmpeg's file N holds
+    // different media than playlist entry N, and the error accumulates: +3.838s
+    // after one segment, +22.397s after twenty-five. The picture jumps forward,
+    // and text subtitles - which Jellyfin strips from the stream (-map -0:s) and
+    // times against the player's currentTime - detach and stay detached until
+    // the page is reloaded. Keyframes at or above hls_time make ffmpeg's cuts
+    // and Jellyfin's playlist the same list.
+    //
+    // AND IT IS NOT A TRADE. The same 90s clip at CQ 26 / p6 came out 19,989,619
+    // bytes without these and 18,997,172 with them - about 5% SMALLER - because
+    // an I-frame costs far more than the P and B frames it displaces, so dropping
+    // the adaptive ones more than pays for having none exactly on a cut.
+    const kfSeconds = parseFloat(String(inputs.keyframeSeconds)) || 0;
+    const fps = frameRateOf(video);
+    if (kfSeconds > 0 && fps > 0) {
+      // +1 frame so the interval lands just ABOVE hls_time rather than exactly on
+      // it: at 6.000s the muxer's ">= 6" test can round either way and merge two
+      // GOPs after all, which is the whole failure again at half the amplitude.
+      const gop = Math.round(fps * kfSeconds) + 1;
+      // -no-scenecut is the load-bearing half. Without it NVENC keeps inserting
+      // adaptive I-frames at cuts, gaps fall back below hls_time, and the merging
+      // returns. It needs lookahead, which -rc-lookahead 32 above already gives.
+      out.push(`-g ${gop} -keyint_min ${gop} -no-scenecut 1`);
+      response.infoLog += `Keyframes every ${gop} frames = ${(gop / fps).toFixed(3)}s `
+        + `at ${fps.toFixed(3)} fps (>= ${kfSeconds}s, so Jellyfin can stream-copy it).\n`;
+    } else if (kfSeconds > 0) {
+      response.infoLog += 'Could not read a frame rate, so keyframe placement is left to NVENC. '
+        + 'Browser playback of this file may drift - see keyframeSeconds.\n';
+    }
   }
 
   let oa = 0;
