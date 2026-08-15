@@ -713,8 +713,11 @@ def source_smart(m):
     if not devices:
         raise RuntimeError("no SMART-capable devices")
     for dev in devices:
-        out = run(["sudo", "-n", "smartctl", "-j", "-n", "standby", "-A", "-H",
-                   dev], timeout=20)
+        # -i as well as -A -H: without it the JSON carries no model_name or
+        # firmware_version and home_server_disk_info comes out with empty
+        # labels, which is worse than no info series at all.
+        out = run(["sudo", "-n", "smartctl", "-j", "-n", "standby", "-i", "-A",
+                   "-H", dev], timeout=20)
         if out is None:
             continue
         try:
@@ -848,10 +851,17 @@ def source_status(m):
             m.add("home_server_" + key, 1 if value else 0, None,
                   "From status.json facts.")
         elif isinstance(value, (int, float)):
-            # _mb in a name is a permanent wart; base units only.
+            # status.json's keys carry their unit in the name - boot_free_mb,
+            # uptime_s - which is fine for a JSON document whose keys are the
+            # stable interface, and a permanent wart in a metric name. Convert
+            # to base units here rather than forking the fact keys, because
+            # those are the contract the battery publishes.
             if key.endswith("_mb"):
                 m.add("home_server_%s_bytes" % key[:-3], value * (1 << 20),
                       None, "From status.json facts, converted to bytes.")
+            elif key.endswith("_s"):
+                m.add("home_server_%s_seconds" % key[:-2], value, None,
+                      "From status.json facts.")
             else:
                 m.add("home_server_" + key, value, None,
                       "From status.json facts.")
