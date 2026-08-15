@@ -55,7 +55,15 @@ groups:
         # The collector runs every 30s and stamps its own success into the
         # textfile it produces, so the last value present is by construction
         # the last success. 10 minutes is twenty missed runs.
-        expr: time() - home_server_metrics_last_ok_timestamp_seconds > 600
+        #
+        # NOT home_server_metrics_last_ok_timestamp_seconds, WHICH IS A
+        # DIFFERENT CLOCK. That one is a fact lifted out of status.json, so it
+        # is only refreshed when bin/verify-host.sh runs - hourly. Against a
+        # 600s threshold it crosses on every single cycle, and this rule fired
+        # four times in its first hour before the names were told apart. Two
+        # metrics, both plausibly named, one of them measuring the wrong thing:
+        # the same trap as badges.providers under "providers currently usable".
+        expr: time() - home_server_collector_last_success_timestamp_seconds > 600
         for: 5m
         labels:
           severity: critical

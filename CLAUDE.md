@@ -48,9 +48,26 @@ here is a CNAME to `avanserv.duckdns.org`, which resolves to the server's own WA
 router and back in through NAT loopback. Measured against `/web/index.html`: **12-16 ms direct
 against 74-79 ms proxied, about 5x per request** - and a Jellyfin page is ~29 JS bundles plus 30-60
 images, so a full load went 283-684 ms direct against 898-1612 ms proxied. Nothing is misconfigured;
-the packets are simply taking a long way round. The fix is split-horizon DNS pointing the public
-names at `192.168.0.100` for LAN clients, which keeps TLS, the certificate and sign-on working
-unchanged because Caddy listens on that address too.
+the packets are simply taking a long way round.
+
+**Split-horizon DNS would fix it, and was CONSIDERED AND DECLINED on 2026-08-15.** Recorded here
+because the measurement above reads like a pending action item and will otherwise be re-proposed
+every time someone rediscovers it. Three things settled it:
+
+- **It is not perceptible.** 5x on a number that starts at 12 ms is still under a tenth of a second,
+  and nobody browsing has ever noticed. The measurement is real; the complaint was theoretical.
+- **A blanket override is unavailable.** `*.avanserv.com` serves a DIFFERENT machine, so the
+  override cannot be `avanserv.com` -> `192.168.0.100`; it has to enumerate the twelve hostnames
+  Caddy answers for. That is a second list of the Caddyfile's site blocks, maintained by hand, in a
+  place nothing validates - the most driftable shape this repository has a name for.
+- **Both places to put it are worse than the problem.** On the router it is unversioned state this
+  repo cannot see, verify or restore, which is the whole reason `host/butane/ucore.bu` exists. On
+  the server it is a resolver container the whole house then depends on for DNS, so the machine
+  going down stops being "the media stack is offline" and starts being "the internet is broken".
+
+It would also silently change what `bin/verify-host.sh --routes` measures, since that battery
+resolves the same public names from the server itself - it would stop proving the WAN path and
+nothing would say so.
 
 `~/.config/containers/systemd/{common,torrent,media,infra}` are symlinks into `stacks/`, so
 `git pull && systemctl --user daemon-reload` is the entire deploy - there is no copy step.
@@ -560,6 +577,92 @@ second file is simply served unchanged in between.
 **Backing up a live TSDB is the trap this arrangement exists around**, and it is documented under
 Backups rather than here because it breaks the backup rather than the metrics.
 
+## Alerting
+
+**Since 2026-08-15 something finally leaves the house.** Everything above is only legible to someone
+who has already logged in to find out whether anything is wrong, which was the last open item on the
+roadmap. The chain is four hops, and each exists for a reason:
+
+```
+prometheus --rules--> alertmanager --webhook--> ntfy-alertmanager --> ntfy --> phone
+```
+
+```bash
+podman exec prometheus wget -q -O - http://127.0.0.1:9090/api/v1/rules | jq -r '.data.groups[].name'
+podman exec alertmanager wget -q -O - http://127.0.0.1:9093/api/v2/alerts | jq length
+podman exec alertmanager amtool --alertmanager.url=http://127.0.0.1:9093 silence add <matcher>
+```
+
+**Alertmanager rather than a script polling `status.json`**, because three of its behaviours would
+otherwise have been reinvented badly: **grouping**, so twenty checks failing at once is one
+notification; **repeat suppression**, so a condition that stays true does not notify every 30
+seconds; and **resolution**, so you are told when it stops. The first two are what decide whether a
+channel is still being read in six months - the same argument this file already makes about
+`journalctl -p err`. `repeat_interval` is **12h for warnings, 4h for critical**.
+
+**The bridge is the only image here with no rolling major tag**, which is the objection that ruled
+out VictoriaMetrics for the store. It is accepted on a distinction that holds: VictoriaMetrics would
+have held every byte of history, and `ntfy-alertmanager` holds **nothing** - it is stateless glue
+with an in-memory cache, so a bad unattended update costs a restart rather than a retention window.
+ntfy has no native Alertmanager receiver and is not about to: its own documentation lists four
+third-party bridges and no first-party option.
+
+**Its health check asserts a 401, not a 200, and that is the interesting part.** The only endpoint
+is the webhook, so there is nothing to GET successfully - but a 401 proves the process is up, the
+config parsed *and* that basic auth is switched on. A check that accepted any response would go
+green against a bridge that had silently lost its credentials.
+
+**`ntfy` is the third route that skips sign-on**, alongside `watch` and `request`, for the identical
+reason: the client is an app with no browser in which to complete a passkey prompt. It authenticates
+its own users instead, `auth-default-access` is `deny-all`, and **neither declared account is an
+admin** - the phone's account is read-write on one topic, the publisher's is write-only on the same
+one. Proven rather than assumed: anonymous publish 403, publisher read 403, human read 200.
+
+**Two containers here read a config file and substitute nothing in it**, the same trap
+`prometheus.yml` already documents. `bin/render-template.py` writes both from tracked templates plus
+`.env`. It exists because a **bcrypt hash cannot travel through `Environment=`**: it is full of `$`,
+and it would cross systemd's expansion and ntfy's own `$$` unescaping, so the value in sops would
+have to be double-escaped and would stop matching what `ntfy user hash` printed.
+
+**THE FIRST RULE GROUP IS NOT OPTIONAL, AND IT IS FIRST.** Every other rule reads a series that
+arrives through node-exporter's textfile collector, and **a rule whose expression matches nothing
+does not fire** - so if the collector or the scrape stops, the whole battery goes silent, and silence
+is exactly what healthy looks like. Same trap `verify-host.sh` documents about its own timer, and the
+same reason there is deliberately no `home_server_collector_up 1`. `TargetDown`,
+`MetricsCollectorStale`, `VerifyBatteryStale` and `AlertDeliveryFailing` cover it.
+
+**Nothing can notify you that the notifier is down**, and the design says so rather than pretending
+otherwise. `AlertDeliveryFailing` fires so that it is recorded and arrives when delivery recovers;
+the channel that actually covers a dead notifier is out-of-band - `metrics.alert_rules`,
+`metrics.alertmanager_up` and `metrics.alert_delivery` in `verify-host.sh`, which reach the MOTD and
+`status.json`.
+
+**Degradation alerts are deliberately slack, and two of them are aggregates rather than per-item.**
+Any single indexer or subtitle provider backing off is ordinary - a free daily quota runs out most
+days - so the rules fire on `sum(...) == 0` for providers and on fewer than half the indexers being
+up. The failure mode being designed against is not missing one, it is sending enough of them that the
+critical ones stop being read.
+
+**`systemctl --user reload prometheus` needs `ExecReload=`, not `ReloadSignal=`.** The latter is only
+honoured for `Type=notify-reload` and quadlet generates `Type=notify`, so systemd accepts the
+directive and refuses every reload with *"Job type reload is not applicable"*. It had never once
+worked.
+
+**Check rules before deploying them.** A malformed file makes the reload fail and leaves the previous
+rules running - safe, but not what you asked for:
+
+```bash
+podman exec prometheus promtool check rules /etc/prometheus/rules/*.yml
+podman run --rm -v "$PWD/apps/alertmanager/alertmanager.yml:/c.yml:z" \
+  --entrypoint amtool quay.io/prometheus/alertmanager:v0 check-config /c.yml
+```
+
+**None of that proves delivery, and the deployment proved it the hard way.** Alertmanager named its
+webhook password on `/etc/alertmanager` - the read-only `apps/` mount, where `ExecStartPre=` cannot
+write it - while the rendered file sat in `/alertmanager`. Every container healthy, both configs
+`SUCCESS`, Prometheus discovering the Alertmanager, and every notification failing with a 401
+recorded nowhere but Alertmanager's own log. **Fire a real alert and look for it at the other end.**
+
 ## Commands
 
 All of these run on the server as `core`, from `/var/home-server`. **No `sudo`** - the stack is
@@ -691,7 +794,7 @@ other by container name (`http://sonarr:8989`), but only where they share a netw
 | `net-media` | caddy, jellyfin, jellyseerr |
 | `net-transcode` | caddy, tdarr-server, tdarr-node-01 |
 | `net-egress` | duckdns |
-| `net-metrics` | caddy, prometheus, node-exporter |
+| `net-metrics` | caddy, prometheus, node-exporter, alertmanager, ntfy-alertmanager, ntfy |
 
 Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individually** - a shared
 "proxy" network holding everything with a UI would re-flatten the topology and buy nothing. It is
@@ -1075,8 +1178,12 @@ Two things about this that are easy to get wrong, both learned the hard way:
   separately. A mismatch fails registration at `/api/webauthn/register/finish` with an unhelpful
   "couldn't process the response from your passkey".
 
-`watch` and `request` are the only routes not behind sign-on: both authenticate their own users,
-and their clients have no browser in which to complete a passkey prompt.
+`watch`, `request` and `ntfy` are the only routes not behind sign-on: each authenticates its own
+users, and their clients have no browser in which to complete a passkey prompt. **`ntfy` is the one
+that looks wrong and is not** - an alerting endpoint outside sign-on invites the obvious objection,
+but the client is a phone app in exactly the position a TV is, and `auth-default-access: deny-all`
+means the hostname on its own reaches nothing. Alertmanager and the bridge get **no** public route;
+the bridge's Silence button would require one, and that trade was declined. See "Alerting".
 
 **Almost nothing publishes a host port.** Caddy reaches each service by name over its network, so
 admin ports were a second path in that sign-on did not cover. **Two publishes remain**, each for
@@ -1557,6 +1664,25 @@ Conclusions from auditing the running host. Do not rediscover these:
   sinkhole reaches the real Cloudflare-fronted host and returns a 403 challenge, which is exactly
   what FlareSolverr is on `net-solver` to solve. **A DNS failure here looks like an application
   fault, so compare a suspect hostname against a public resolver before believing the site is down.**
+- **THE DNS OVERRIDE WORKS, AND IT IS NO LONGER THE EXPLANATION FOR A DOWN INDEXER.** The entry above
+  is why the override exists and stays true as history; it stopped being the diagnosis. Checked on
+  2026-08-15 when `home_server_indexer_up` read 0 for six of seventeen: `DNS=9.9.9.9` **is** in
+  effect - aardvark-dns records `9.9.9.9,1.1.1.1` as prowlarr's upstream, and a container's
+  `resolv.conf` naming the bridge gateway is normal rather than evidence against it - FlareSolverr
+  was healthy and solving challenges in ~11 s, and every failing hostname resolved to a plausible
+  public address. **The six zeros were five unrelated causes**, none of them DNS: a dead mirror
+  (`1337x.st`, cert name mismatch), its exact duplicate, two Pirate Bay entries that query the same
+  `apibay.org` host as a third and so tripled the load on something already returning 503, a 502 and
+  a 403. Four entries were deleted; the remaining zeros are other people's sites being down, and are
+  now *correct*.
+- **Prowlarr pushes every indexer to every application and retries the refused ones for ever.** One
+  indexer, `Nyaa Trusted - Live Action`, returned results in Prowlarr category `129933` - the
+  unmapped `>=100000` range - which is neither `5000:TV` nor `2000:Movies`, so Sonarr and Radarr both
+  refused it correctly and Prowlarr re-offered it every six hours, four `400 BadRequest` at a time,
+  at WARN. It had never delivered anything. **The gap is invisible by design**: nothing compares the
+  three indexer counts, which is why `home_server_arr_indexers{service=...}` now reports all three.
+  **Some gap is correct** - a movies-only indexer belongs in Radarr and not Sonarr - so read the
+  three numbers and the log; do not alert on equality.
 
 ## Target architecture
 
@@ -1606,17 +1732,21 @@ Remaining, in order:
    cAdvisor does not export, so a second container would have been a second source for one truth.
    The steady-state cardinality is 2,896 series against the 4,000 the check budgets for.
 
-   **What is still missing is anything that reaches a human who is not logged in.** That is now the
-   whole of this item. The dashboard reads `status.json` and queries Prometheus; a notifier would
-   fire off either, or off an `OnFailure=` on `home-server-verify.service`. Prometheus has recording
-   and alerting rules built in, which is part of why it was chosen over a store needing a second
-   container for them.
+   **The notification path is done too, 2026-08-15**, which closes this item. Prometheus rules ->
+   Alertmanager -> ntfy-alertmanager -> ntfy -> phone, 17 rules in five groups, at
+   `ntfy.avanserv.com`. See "Alerting". Prometheus having alerting rules built in is part of why it
+   was chosen over a store needing a second container for them, and that paid off exactly as
+   expected.
 
-   **Do NOT build it on `journalctl -p err`.** Jellyfin alone emits 2,644 priority-3 lines a day of
-   ffmpeg chatter and there is no lever to stop it - see Known state. Unit state and container
+   **What remains is the dashboard**, which was the original point of the metrics work: `status.json`
+   for what is true now, keyed by stable ids, and Prometheus for when it stopped being true.
+
+   **Do NOT build either on `journalctl -p err`.** Jellyfin alone emits 2,644 priority-3 lines a day
+   of ffmpeg chatter and there is no lever to stop it - see Known state. Unit state and container
    health are the signal. Note also that `duckdns` and `unpackerr` never report health - neither
    serves HTTP - so a check assuming every container has a health status reports them broken for
-   ever.
+   ever. `home_server_container_health` is **absent** for those two rather than zero, which is what
+   lets the `ContainerUnhealthy` rule cover every container without naming any.
 
    **The generalisable lesson from the backup work: an automated job needs a durable record of its
    last success, not just a unit that exits 0.** `ExecMainExitTimestamp` is wiped by a reboot, and a

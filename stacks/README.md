@@ -93,6 +93,9 @@ and all three were wrong at first guess:
 | `prowlarr` | `:develop` | Where it was before pinning. Moving it to the release branch would be a downgrade. |
 | `prometheus` | `:v3` | Checked before choosing the store, and it decided the choice. VictoriaMetrics is lighter and was the obvious candidate, but it publishes **no `:v1` and no `:stable`** - only `:latest` and full triples - so `AutoUpdate=registry` would have tracked `:latest` on the one component holding every byte of history. |
 | `node-exporter` | `:v1` | The busybox variant, so `wget` exists for `HealthCmd=`. Verified by running it, not assumed - the distroless variants of several exporters have no shell at all, which costs them `Notify=healthy`. |
+| `alertmanager` | `:v0` | A rolling major tag despite looking like a pin - Alertmanager has been pre-1.0 for its whole life, and `:v0` tracks the newest 0.x exactly as `prometheus:v3` tracks 3.x. Checked against the registry, because a tag that silently never moves is indistinguishable from one that does not exist. |
+| `ntfy` | `:v2` | Publishes a rolling major, so it clears the bar the row above sets. |
+| `ntfy-alertmanager` | **`:latest`** | **The one exception, and it is the objection that ruled out VictoriaMetrics.** Accepted on a distinction that holds: VictoriaMetrics would have held every byte of history, and this holds **nothing** - stateless glue with an in-memory cache, so a bad update costs a restart rather than a retention window. Its `HealthCmd=` asserts a **401**, not a 200: the only endpoint is the webhook, so a 401 proves the process is up, the config parsed *and* that auth is on, where accepting any response would go green against a bridge that had lost its credentials. |
 
 **`Notify=healthy` is what makes the rollback real, and without it the rollback is decorative.**
 `podman auto-update` restores the previous image only if the unit fails to **start**, and by default

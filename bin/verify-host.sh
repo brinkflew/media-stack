@@ -1035,6 +1035,59 @@ if [ -z "$GREENBOOT" ]; then
 	fact metrics_targets_total "${tgt_total:-}" num
 	fact metrics_targets_down "${tgt_down:-}" num
 
+	# --------------------------------------------------------------------------
+	# The alerting path, which cannot be trusted to report its own failure
+	# --------------------------------------------------------------------------
+	# EVERY OTHER CHECK IN THIS SCRIPT IS WATCHED BY THE ALERTING CHAIN. This one
+	# watches the chain, and it has to live here rather than in a Prometheus rule
+	# for the obvious reason: a rule about a broken notifier cannot be delivered
+	# by the notifier. status.json and the MOTD are the out-of-band channel, so
+	# these three findings are the only warning that alerting has stopped.
+	#
+	# It is also the exact failure this deployment actually hit. Alertmanager
+	# named a password file on the read-only mount, where ExecStartPre= cannot
+	# write it - so every container stayed healthy, promtool and amtool both
+	# passed, Prometheus discovered the Alertmanager, and every notification
+	# failed with a 401 recorded nowhere but Alertmanager's own log.
+	rules_n=
+	[ -z "$prom_up" ] || rules_n=$(podman exec prometheus wget -q -O - \
+		http://127.0.0.1:9090/api/v1/rules 2>/dev/null \
+		| jq -r '[.data.groups[].rules[]]|length' 2>/dev/null)
+	if [ -z "${rules_n:-}" ]; then
+		warn metrics.alert_rules "the alerting rules could not be read"
+	elif [ "$rules_n" -gt 0 ]; then
+		ok metrics.alert_rules "$rules_n alerting rules loaded"
+	else
+		warn metrics.alert_rules "no alerting rules are loaded - nothing can fire"
+	fi
+	fact metrics_alert_rules "${rules_n:-}" num
+
+	am_n=
+	[ -z "$prom_up" ] || am_n=$(podman exec prometheus wget -q -O - \
+		http://127.0.0.1:9090/api/v1/alertmanagers 2>/dev/null \
+		| jq -r '.data.activeAlertmanagers|length' 2>/dev/null)
+	if [ -z "${am_n:-}" ]; then
+		warn metrics.alertmanager_up "the Alertmanager list could not be read"
+	elif [ "$am_n" -gt 0 ]; then
+		ok metrics.alertmanager_up "$am_n Alertmanager reachable from prometheus"
+	else
+		warn metrics.alertmanager_up "prometheus has no Alertmanager - rules evaluate and go nowhere"
+	fi
+
+	# Delivery, as opposed to configuration. A rising error counter is the
+	# signature of a bridge that is refusing or unreachable, and it is the only
+	# place that shows up short of reading the journal.
+	notify_err=$(promq 'increase(prometheus_notifications_errors_total[1h])')
+	notify_err=${notify_err%%.*}
+	if [ -z "${notify_err:-}" ]; then
+		note metrics.alert_delivery "notification errors not measured"
+	elif [ "$notify_err" -eq 0 ]; then
+		ok metrics.alert_delivery "no alert delivery errors in the last hour"
+	else
+		warn metrics.alert_delivery "$notify_err alert deliveries failed in the last hour - alerts are being evaluated and dropped"
+	fi
+	fact metrics_notify_errors "${notify_err:-}" num
+
 	# node-exporter's namespace-scoped collectors must stay off. /proc/net is a
 	# symlink to self/net, so it resolves in the READER's network namespace and
 	# not in the mounted procfs - a bridge-networked node-exporter therefore

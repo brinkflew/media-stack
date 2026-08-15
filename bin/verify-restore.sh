@@ -293,6 +293,12 @@ WANTED = {
     "prowlarr/prowlarr.db":     "the indexer definitions and their credentials",
     "pocket-id/pocket-id.db":   "EVERY REGISTERED PASSKEY - sign-on dies without it",
     "jellyfin/data/data/jellyfin.db": "Jellyfin's users and watch state",
+    # Not because it is precious - apps/ntfy/server.yml declares both accounts,
+    # so a lost auth.db is rebuilt on the next start. It is here because losing
+    # it is INVISIBLE: every phone keeps its subscription and simply stops
+    # authenticating, and the first thing you notice is an alert that never
+    # arrived. Nothing else in this file has that shape.
+    "ntfy/auth.db":             "the alerting accounts - a phone stops authenticating with no error",
 }
 for rel, what in WANTED.items():
     if any(n == rel or n.endswith("/" + rel) for n in names):
