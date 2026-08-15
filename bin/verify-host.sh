@@ -17,9 +17,16 @@
 # checker that stopped running are otherwise indistinguishable, and the second
 # one is the failure that hides every other failure.
 #
+# It also writes /var/lib/media-stack/status.json on every non-greenboot run -
+# the same findings, keyed by a STABLE ID rather than by prose, for a dashboard
+# to read. That file is additionally this script's own durable record: it was
+# the only automated job here that wrote no marker of its last success, and a
+# MOTD on tmpfs does not survive a reboot.
+#
 # Usage:
 #   bin/verify-host.sh              check, print, write the MOTD; exit 1 on FAIL
 #   bin/verify-host.sh --quiet      MOTD only, no stdout - what the timer runs
+#   bin/verify-host.sh --json       the same findings as JSON on stdout
 #   bin/verify-host.sh --routes     also walk the public route battery (slow)
 #   bin/verify-host.sh --greenboot  host-level checks ONLY, for greenboot
 #
@@ -29,7 +36,14 @@
 # able to do that. It answers "did the OS come up correctly", nothing more.
 #
 # It is silent on success and prints its FAILs to stderr, which is what puts the
-# reason for a rollback in the journal rather than only in the MOTD.
+# reason for a rollback in the journal rather than only in the MOTD. It writes no
+# JSON at all, and --json --greenboot together is an error: that mode's stdout
+# and exit code are load-bearing in the rollback decision.
+#
+# Overrides, for exercising branches without waiting for the real thing:
+#   MEDIA_STACK_STATUS_FILE   where status.json goes
+#   MEDIA_STACK_BOOT_STATE    greenboot's verdict file
+#   MEDIA_STACK_GREENBOOT_BIN / _ETC, MEDIA_STACK_GRUB_CUSTOM
 # ==============================================================================
 
 set -uo pipefail
@@ -44,26 +58,67 @@ set -uo pipefail
 # over ssh as `core`, where HOME is set.
 export PATH="${HOME:-/root}/.local/bin:$PATH"
 
-QUIET="" ROUTES="" GREENBOOT=""
+QUIET="" ROUTES="" GREENBOOT="" JSON=""
 while [ $# -gt 0 ]; do
 	if   [ "${1:-}" = "--quiet" ];     then QUIET=1
 	elif [ "${1:-}" = "--routes" ];    then ROUTES=1
+	elif [ "${1:-}" = "--json" ];      then JSON=1; QUIET=1
 	elif [ "${1:-}" = "--greenboot" ]; then GREENBOOT=1; QUIET=1
 	else echo "verify-host: unknown argument: $1" >&2; exit 2
 	fi
 	shift
 done
 
+# Refused rather than silently ignored. Under --greenboot this script's stdout
+# is where the reason for an OS rollback is recorded, and its exit code is what
+# decides on one - so a JSON document on that stream would displace the only
+# legible account of why the machine reverted. See the emit block at the end.
+if [ -n "$JSON" ] && [ -n "$GREENBOOT" ]; then
+	echo "verify-host: --json and --greenboot are mutually exclusive" >&2
+	exit 2
+fi
+
 # Root when greenboot calls us, `core` otherwise. Passwordless sudo is available
 # but -n means we never hang waiting for a password prompt nobody can answer.
 if [ "$(id -u)" = 0 ]; then priv() { "$@"; }; else priv() { sudo -n "$@"; }; fi
 
+# ------------------------------------------------------------------------------
+# Findings, and their machine-readable shadow
+# ------------------------------------------------------------------------------
+# THE FIRST ARGUMENT IS A STABLE ID; THE PROSE IS NOT. A dashboard keys on
+# `cdi.driver_match` and never on the sentence after it, so rewording a message
+# whenever the message is wrong costs nothing. The id is a bare word rather than
+# a quoted string so it reads as a key rather than as more prose, and so
+# bin/lint-repo.sh can grep the whole set out and prove it is unique.
+#
+# PARALLEL ARRAYS rather than one array of delimited records. Not because a
+# delimiter would be hard to pick, but because the encoding then lives in one
+# place - the emit block - instead of at 95 call sites.
 fails=() warns=() notes=()
-say()  { [ -n "$QUIET" ] || printf '\n\033[1m==> %s\033[0m\n' "$*"; }
-ok()   { [ -n "$QUIET" ] || printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
-bad()  { fails+=("$1"); [ -n "$QUIET" ] || printf '  \033[31mFAIL\033[0m  %s\n' "$1"; }
-warn() { warns+=("$1"); [ -n "$QUIET" ] || printf '  \033[33mWARN\033[0m  %s\n' "$1"; }
-note() { notes+=("$1"); }
+sect_id=() sect_title=()
+chk_sect=() chk_id=() chk_status=() chk_msg=()
+fact_k=() fact_t=() fact_v=()
+cur_sect=none
+
+record() {  # <status> <id> <message>
+	chk_sect+=("$cur_sect") chk_id+=("$2") chk_status+=("$1") chk_msg+=("$3")
+}
+say()  { cur_sect="$1"; sect_id+=("$1") sect_title+=("$2")
+         [ -n "$QUIET" ] || printf '\n\033[1m==> %s\033[0m\n' "$2"; }
+ok()   { record pass "$1" "$2"; [ -n "$QUIET" ] || printf '  \033[32mPASS\033[0m  %s\n' "$2"; }
+bad()  { record fail "$1" "$2"; fails+=("$2"); [ -n "$QUIET" ] || printf '  \033[31mFAIL\033[0m  %s\n' "$2"; }
+warn() { record warn "$1" "$2"; warns+=("$2"); [ -n "$QUIET" ] || printf '  \033[33mWARN\033[0m  %s\n' "$2"; }
+note() { record note "$1" "$2"; notes+=("$2"); }
+
+# A number a dashboard would otherwise have to parse back out of prose. Type is
+# str (default), num or bool; an EMPTY value becomes JSON null, which is how
+# "not measured" stays distinct from zero.
+#
+# ALWAYS PASS ${var:-}. Under `set -u` a fact() naming a variable some branch
+# did not set aborts the script - after every check has run and before the MOTD
+# is written, with an exit code bin/reboot-host.sh reads as an unhealthy host.
+# That is the sharpest edge in this file.
+fact() { fact_k+=("$1") fact_t+=("${3:-str}") fact_v+=("$2"); }
 
 uptime_s=$(cut -d. -f1 /proc/uptime)
 
@@ -77,21 +132,21 @@ uptime_s=$(cut -d. -f1 /proc/uptime)
 # false alarm for up to a day, which is exactly how a person learns to ignore
 # this line. So it is only a finding once the machine has been up longer than
 # the timer's period.
-check_timer_run() {  # <label> <period-seconds> <unit> [--user]
-	local label="$1" period="$2" unit="$3"
+check_timer_run() {  # <id> <label> <period-seconds> <unit> [--user]
+	local id="$1" label="$2" period="$3" unit="$4"
 	local run rc age stale_h
 	# An array rather than a bare $scope: the argument is absent for system
 	# units, and an unquoted empty variable is the one spelling that both
 	# disappears and splits on whitespace when it does not.
 	local scope=()
-	[ -z "${4:-}" ] || scope=("$4")
+	[ -z "${5:-}" ] || scope=("$5")
 	run=$(systemctl "${scope[@]}" show "$unit" -p ExecMainExitTimestamp --value 2>/dev/null)
 	rc=$(systemctl "${scope[@]}" show "$unit" -p ExecMainStatus --value 2>/dev/null)
 	if [ -z "$run" ]; then
 		if [ "$uptime_s" -lt "$period" ]; then
-			ok "$label has not run since boot ($((uptime_s / 60))m ago) - not yet due"
+			ok "$id" "$label has not run since boot ($((uptime_s / 60))m ago) - not yet due"
 		else
-			bad "$label has never run, and this machine has been up $((uptime_s / 3600))h"
+			bad "$id" "$label has never run, and this machine has been up $((uptime_s / 3600))h"
 		fi
 		return
 	fi
@@ -106,11 +161,11 @@ check_timer_run() {  # <label> <period-seconds> <unit> [--user]
 		# No "- nothing is updating" tail here: this helper is shared with the
 		# backup, and a failed backup run reporting that nothing is updating
 		# sends you to look at entirely the wrong subsystem.
-		bad "the last $label run FAILED (exit $rc, ${age}h ago)"
+		bad "$id" "the last $label run FAILED (exit $rc, ${age}h ago)"
 	elif [ "$age" -gt "$stale_h" ]; then
-		bad "the last $label run was ${age}h ago - the timer has stopped firing"
+		bad "$id" "the last $label run was ${age}h ago - the timer has stopped firing"
 	else
-		ok "last $label run ${age}h ago, exit 0"
+		ok "$id" "last $label run ${age}h ago, exit 0"
 	fi
 }
 
@@ -119,21 +174,21 @@ check_timer_run() {  # <label> <period-seconds> <unit> [--user]
 # so if it moved you want to know inside the session you already have rather
 # than discovering it the next time you try to connect.
 # ------------------------------------------------------------------------------
-say "Network"
+say net "Network"
 if ip -4 -o addr show scope global | grep -q '192\.168\.0\.100/24'; then
-	ok "192.168.0.100/24 held"
+	ok net.lan_address "192.168.0.100/24 held"
 else
-	bad "the LAN address moved - the router's port forward now points nowhere"
+	bad net.lan_address "the LAN address moved - the router's port forward now points nowhere"
 fi
 
 # ------------------------------------------------------------------------------
 # Deployment. `stage` means updates are downloaded and written but never applied
 # unattended; the reboot is a separate, human act.
 # ------------------------------------------------------------------------------
-say "Deployment"
+say deploy "Deployment"
 status_json=$(rpm-ostree status --json 2>/dev/null)
 if [ -z "$status_json" ]; then
-	bad "rpm-ostree status returned nothing"
+	bad deploy.booted "rpm-ostree status returned nothing"
 	booted_ver="?" staged_ver="" pinned_count=0
 else
 	booted_ver=$(jq -r '.deployments[] | select(.booted) | .version' <<<"$status_json")
@@ -149,52 +204,74 @@ else
 	pinned_count=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 	depl_count=$(jq '.deployments | length' <<<"$status_json")
 
-	ok "booted $booted_ver"
+	ok deploy.booted "booted $booted_ver"
 
 	# The whole point of a signed ref: the OS image is verified against ublue's
 	# cosign keys rather than merely fetched over TLS.
 	case "$booted_ref" in
-		ostree-image-signed:*) ok "image signature verification is on" ;;
-		*)                     warn "booted from an UNVERIFIED ref ($booted_ref)" ;;
+		ostree-image-signed:*) ok deploy.image_signed "image signature verification is on" ;;
+		*)                     warn deploy.image_signed "booted from an UNVERIFIED ref ($booted_ref)" ;;
 	esac
 
 	# Not the tag we think we are on is worth catching: stable-nvidia and
 	# stable-nvidia-lts differ only by the NVIDIA driver branch, and the kernel
 	# is identical, so nothing else would reveal a silent swap.
 	case "$booted_ref" in
-		*:stable-nvidia-lts) ok "tracking stable-nvidia-lts (driver 580 branch)" ;;
-		*) warn "tracking an unexpected image: ${booted_ref##*ucore}" ;;
+		*:stable-nvidia-lts) ok deploy.image_tag "tracking stable-nvidia-lts (driver 580 branch)" ;;
+		*) warn deploy.image_tag "tracking an unexpected image: ${booted_ref##*ucore}" ;;
 	esac
 
-	[ "$pinned_count" -eq 0 ] || warn "$pinned_count deployment(s) PINNED - a forgotten pin fills /boot"
+	# An if/else rather than the `||` this used to be. A check that speaks only
+	# when it fails is, from the JSON's side, indistinguishable from a check
+	# that did not run - so every id now reports on both branches.
+	if [ "$pinned_count" -eq 0 ]; then
+		ok deploy.pinned "no deployment is pinned"
+	else
+		warn deploy.pinned "$pinned_count deployment(s) PINNED - a forgotten pin fills /boot"
+	fi
 fi
+
+# OUTSIDE the if/else on purpose, so these keys are present-and-null when
+# rpm-ostree returned nothing rather than vanishing from the document. A
+# dashboard can then tell "not measured" from "measured as empty"; a key that
+# comes and goes forces it to guess.
+fact booted_version  "${booted_ver:-}"
+fact staged_version  "${staged_ver:-}"
+fact deployments     "${depl_count:-}"   num
+fact pinned          "${pinned_count:-}" num
 
 # The effective policy, from rpm-ostree rather than from the file, so a config
 # that failed to parse shows up as the default rather than as what we wrote.
 policy=$(rpm-ostree status 2>/dev/null | sed -n 's/^AutomaticUpdates: *\([a-z]*\).*/\1/p')
 if [ "$policy" = "stage" ]; then
-	ok "automatic updates: stage (never reboots on its own)"
+	ok deploy.update_policy "automatic updates: stage (never reboots on its own)"
 else
-	bad "automatic update policy is '${policy:-none}', expected 'stage'"
+	bad deploy.update_policy "automatic update policy is '${policy:-none}', expected 'stage'"
 fi
 
 # THE CHECK THAT CATCHES A SILENTLY-STOPPED UPDATER. If ublue ever rotates its
 # signing key, or /boot fills, nothing stages - and that is indistinguishable
 # from a stream with no new releases unless the run's exit status is asserted.
 if [ "$(systemctl is-enabled rpm-ostreed-automatic.timer 2>/dev/null)" = enabled ]; then
-	ok "rpm-ostreed-automatic.timer enabled"
+	ok deploy.update_timer "rpm-ostreed-automatic.timer enabled"
 else
-	bad "rpm-ostreed-automatic.timer is not enabled - nothing checks for updates"
+	bad deploy.update_timer "rpm-ostreed-automatic.timer is not enabled - nothing checks for updates"
 fi
-check_timer_run "OS update check" 86400 rpm-ostreed-automatic.service
+check_timer_run deploy.update_run "OS update check" 86400 rpm-ostreed-automatic.service
 
 # Only ONE updater may be armed. Two would both write deployments into a /boot
 # that holds two kernels, and the loser fails overnight with nobody watching.
-for u in zincati.service bootc-fetch-apply-updates.timer; do
+#
+# The list is id:unit pairs rather than bare unit names, because the id cannot
+# be derived from the unit: bootc-fetch-apply-updates.timer would mangle into
+# something nobody would grep for.
+for pair in deploy.rival_zincati:zincati.service \
+            deploy.rival_bootc:bootc-fetch-apply-updates.timer; do
+	id="${pair%%:*}" u="${pair#*:}"
 	st=$(systemctl is-enabled "$u" 2>/dev/null || true)
 	case "$st" in
-		masked|disabled|"") ok "$u is $st" ;;
-		*) bad "$u is $st - a second updater is armed" ;;
+		masked|disabled|"") ok "$id" "$u is $st" ;;
+		*) bad "$id" "$u is $st - a second updater is armed" ;;
 	esac
 done
 
@@ -202,8 +279,9 @@ done
 # cannot be shrunk by any tool, so enlarging it means repartitioning the disk
 # that carries config/.
 boot_free=$(df -Pm /boot | awk 'NR==2 {print $4}')
+fact boot_free_mb "${boot_free:-}" num
 if [ "$boot_free" -ge 160 ]; then
-	ok "/boot ${boot_free}M free, ${depl_count:-?} deployment(s)"
+	ok deploy.boot_free "/boot ${boot_free}M free, ${depl_count:-?} deployment(s)"
 elif [ "${pinned_count:-0}" -gt 0 ]; then
 	# A PIN IS THE USUAL CAUSE, AND IT IS NOT THE SAME PROBLEM. Pinning the
 	# booted deployment is free until you reboot; after that, if the deployment
@@ -218,35 +296,36 @@ elif [ "${pinned_count:-0}" -gt 0 ]; then
 	# next anyway - which makes it a WARN with the remedy attached, not a FAIL.
 	# As a FAIL it told bin/reboot-host.sh that a perfectly good deployment was
 	# bad, and that script's failure path advises a rollback.
-	warn "/boot only ${boot_free}M free, but ${pinned_count} deployment(s) pinned - unpin and 'sudo rpm-ostree cleanup -r' reclaims it"
+	warn deploy.boot_free "/boot only ${boot_free}M free, but ${pinned_count} deployment(s) pinned - unpin and 'sudo rpm-ostree cleanup -r' reclaims it"
 else
-	bad "/boot only ${boot_free}M free - the next staged update cannot write its kernel"
+	bad deploy.boot_free "/boot only ${boot_free}M free - the next staged update cannot write its kernel"
 fi
 
 # ------------------------------------------------------------------------------
 # Storage. The label matters as much as the mount: without context= every
 # container start would relabel 7.3 TB, so it is set once here and nowhere else.
 # ------------------------------------------------------------------------------
-say "Storage"
+say storage "Storage"
 mopts=$(findmnt -n -o OPTIONS /var/mnt/media 2>/dev/null)
 if [ -z "$mopts" ]; then
-	bad "/var/mnt/media is not mounted"
+	bad storage.media_mount "/var/mnt/media is not mounted"
 elif [[ "$mopts" == *context=system_u:object_r:container_file_t:s0* ]]; then
-	ok "/mnt/media mounted with the container SELinux label"
+	ok storage.media_mount "/mnt/media mounted with the container SELinux label"
 else
-	bad "/mnt/media is mounted WITHOUT context= - containers cannot read it"
+	bad storage.media_mount "/mnt/media is mounted WITHOUT context= - containers cannot read it"
 fi
 
 # ------------------------------------------------------------------------------
 # GPU and CDI. This is the group that does not exist anywhere else and is the
 # reason this script was written.
 # ------------------------------------------------------------------------------
-say "GPU / CDI"
+say gpu_cdi "GPU / CDI"
 gpu_count=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)
+fact gpu_count "${gpu_count:-}" num
 if [ "${gpu_count:-0}" -eq 2 ]; then
-	ok "2 GPUs visible to the host"
+	ok gpu.count "2 GPUs visible to the host"
 else
-	bad "nvidia-smi lists ${gpu_count:-0} GPU(s), expected 2"
+	bad gpu.count "nvidia-smi lists ${gpu_count:-0} GPU(s), expected 2"
 fi
 
 # EXACTLY ONE SPEC. uCore ships nvidia-cdi-refresh.{path,service}, which writes
@@ -258,9 +337,9 @@ specs=()
 [ -f /etc/cdi/nvidia.yaml ] && specs+=(/etc/cdi/nvidia.yaml)
 [ -f /run/cdi/nvidia.yaml ] && specs+=(/run/cdi/nvidia.yaml)
 case ${#specs[@]} in
-	1) ok "one CDI spec (${specs[0]})" ;;
-	0) bad "no CDI spec at all - no container can get a GPU" ;;
-	*) bad "TWO CDI specs (${specs[*]}) - they will conflict at the next driver change" ;;
+	1) ok cdi.spec_count "one CDI spec (${specs[0]})" ;;
+	0) bad cdi.spec_count "no CDI spec at all - no container can get a GPU" ;;
+	*) bad cdi.spec_count "TWO CDI specs (${specs[*]}) - they will conflict at the next driver change" ;;
 esac
 
 # The spec hardcodes the driver version in dozens of paths, so a spec that was
@@ -269,60 +348,76 @@ if [ ${#specs[@]} -gt 0 ]; then
 	spec_drv=$(grep -om1 'host-driver-version=[0-9.]*' "${specs[0]}" | cut -d= -f2)
 	live_drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)
 	if [ -n "$spec_drv" ] && [ "$spec_drv" = "$live_drv" ]; then
-		ok "CDI spec matches the running driver ($live_drv)"
+		ok cdi.driver_match "CDI spec matches the running driver ($live_drv)"
 	else
-		bad "CDI spec names driver ${spec_drv:-?} but the running driver is ${live_drv:-?}"
+		bad cdi.driver_match "CDI spec names driver ${spec_drv:-?} but the running driver is ${live_drv:-?}"
 	fi
 fi
 
+fact driver_version "${live_drv:-}"
+
 if systemctl is-active --quiet nvidia-cdi-refresh.path 2>/dev/null; then
-	ok "nvidia-cdi-refresh.path is watching for driver changes"
+	ok cdi.refresh_watcher "nvidia-cdi-refresh.path is watching for driver changes"
 else
-	warn "nvidia-cdi-refresh.path is not active - the spec will go stale on update"
+	warn cdi.refresh_watcher "nvidia-cdi-refresh.path is not active - the spec will go stale on update"
 fi
 
 # ------------------------------------------------------------------------------
 # Host prerequisites. Every one of these has failed silently at least once.
 # ------------------------------------------------------------------------------
-say "Host prerequisites"
+say host "Host prerequisites"
 
 # Rootless Podman publishes through a userspace process that binds like any
 # other daemon, so firewalld's INPUT rules apply normally - ports are closed by
 # default here, which is the reverse of the Docker host.
 fw_svc=$(priv firewall-cmd --list-services 2>/dev/null)
 fw_prt=$(priv firewall-cmd --list-ports 2>/dev/null)
+#
+# COLLECTED INTO ONE FINDING rather than emitted per rule. This used to print up
+# to three separate `bad`s and one collective `ok`, so the outcomes and the
+# checks did not line up: there is no id that is emitted on every path when four
+# calls can fire in six combinations. Naming what is missing in a single message
+# says the same thing, and means host.firewalld reports exactly once whatever
+# happens - including the unreadable case, which is the same question answered
+# "do not know" rather than a different question.
+fw_missing=""
 if [ -z "$fw_svc$fw_prt" ]; then
-	warn "could not read firewalld (needs sudo -n)"
+	warn host.firewalld "could not read firewalld (needs sudo -n)"
 else
 	for want in http https ssh; do
-		case " $fw_svc " in *" $want "*) ;; *) bad "firewalld is missing the $want service" ;; esac
+		case " $fw_svc " in *" $want "*) ;; *) fw_missing="$fw_missing $want" ;; esac
 	done
-	case " $fw_prt " in *" 8096/tcp "*) ok "firewalld allows http, https, ssh and 8096/tcp" ;;
-		*) bad "firewalld is missing 8096/tcp - Jellyfin is unreachable on the LAN" ;; esac
+	case " $fw_prt " in *" 8096/tcp "*) ;; *) fw_missing="$fw_missing 8096/tcp" ;; esac
+	if [ -z "$fw_missing" ]; then
+		ok host.firewalld "firewalld allows http, https, ssh and 8096/tcp"
+	else
+		bad host.firewalld "firewalld is missing:$fw_missing - 8096/tcp means Jellyfin is unreachable on the LAN"
+	fi
 fi
 
 if [ "$(loginctl show-user core -p Linger --value 2>/dev/null)" = yes ]; then
-	ok "lingering enabled - the stack starts without a login"
+	ok host.linger "lingering enabled - the stack starts without a login"
 else
-	bad "lingering is OFF - the stack will not start at boot"
+	bad host.linger "lingering is OFF - the stack will not start at boot"
 fi
 
 if [ "$(getsebool container_use_devices 2>/dev/null | awk '{print $3}')" = on ]; then
-	ok "container_use_devices is on - gluetun can open /dev/net/tun"
+	ok host.container_use_devices "container_use_devices is on - gluetun can open /dev/net/tun"
 else
-	bad "container_use_devices is off - the VPN cannot create its TUN device"
+	bad host.container_use_devices "container_use_devices is off - the VPN cannot create its TUN device"
 fi
 
 # io is NOT delegated by default, and an undelegated controller is accepted
 # silently and does nothing. The failure is silence, so it must be asserted.
 if [[ "$(systemctl show user@1000.service -p DelegateControllers --value 2>/dev/null)" == *io* ]]; then
-	ok "the io controller is delegated - IOWeight= actually applies"
+	ok host.io_delegated "the io controller is delegated - IOWeight= actually applies"
 else
-	bad "io is NOT delegated - every IOWeight= and IOReadBandwidthMax= is inert"
+	bad host.io_delegated "io is NOT delegated - every IOWeight= and IOReadBandwidthMax= is inert"
 fi
 
 sysfailed=$(systemctl list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ' -)
-if [ -z "$sysfailed" ]; then ok "no failed system units"; else bad "failed system units: $sysfailed"; fi
+if [ -z "$sysfailed" ]; then ok host.failed_units "no failed system units"
+else bad host.failed_units "failed system units: $sysfailed"; fi
 
 # ==============================================================================
 # Everything below is the APPLICATION stack, and greenboot must not see it. A
@@ -340,7 +435,7 @@ if [ -z "$GREENBOOT" ]; then
 	# check that has stopped running, a symlink that was never made, and a
 	# rollback path that cannot fire all look exactly like a host that keeps
 	# booting cleanly.
-	say "Boot health"
+	say greenboot "Boot health"
 	# Overridable so this section's own branches can be exercised without a
 	# reboot. "Armed" is the claim here that fails silently, so being able to
 	# test the logic that reports it is worth three variables.
@@ -358,10 +453,26 @@ if [ -z "$GREENBOOT" ]; then
 	# this mark is also what stops bin/reboot-when-staged.sh rebooting into the
 	# same image tonight - so it is cleared by a person, not aged out.
 	gb_red=$(sed -n 's/^red_boot_at=//p' "$boot_state" 2>/dev/null | tail -1)
-	[ -z "$gb_red" ] || bad "greenboot REJECTED a boot at $gb_red - unattended reboots are held; clear red_boot_at in $boot_state once understood"
+	fact red_boot_at "${gb_red:-}"
+	if [ -z "$gb_red" ]; then
+		ok greenboot.red_boot "no boot has been rejected"
+	else
+		bad greenboot.red_boot "greenboot REJECTED a boot at $gb_red - unattended reboots are held; clear red_boot_at in $boot_state once understood"
+	fi
+
+	# Hoisted out of the chain below so greenboot.installed reports on both
+	# branches. It used to be the first arm of an if/elif, which meant it spoke
+	# only when greenboot was missing - and everything downstream of it was
+	# skipped, so a host without greenboot produced one WARN and then silence
+	# where seven checks should have been.
+	if [ -x "$gb_bin" ]; then
+		ok greenboot.installed "greenboot is installed"
+	else
+		warn greenboot.installed "greenboot is not installed - a bad deployment cannot roll itself back"
+	fi
 
 	if [ ! -x "$gb_bin" ]; then
-		warn "greenboot is not installed - a bad deployment cannot roll itself back"
+		: # nothing further to say; the WARN above is the whole finding
 	elif [ ! -r "$boot_state" ]; then
 		# NO VERDICT IS TWO DIFFERENT THINGS, and conflating them deadlocks.
 		# If greenboot ran this boot and recorded nothing, the check is broken
@@ -374,9 +485,9 @@ if [ -z "$GREENBOOT" ]; then
 		# reboot can produce the verdict whose absence made it unhealthy. Found
 		# exactly that way, by the pre-flight correctly refusing.
 		if [ -n "$(systemctl show greenboot-healthcheck.service -p ExecMainExitTimestamp --value 2>/dev/null)" ]; then
-			bad "greenboot ran but recorded no verdict - is the check symlinked into /etc/greenboot/check/?"
+			bad greenboot.verdict_present "greenboot ran but recorded no verdict - is the check symlinked into /etc/greenboot/check/?"
 		else
-			warn "greenboot has not run since this boot - the next reboot is its first"
+			warn greenboot.verdict_present "greenboot has not run since this boot - the next reboot is its first"
 		fi
 	else
 		gb_result=$(sed -n 's/^greenboot_result=//p' "$boot_state" | tail -1)
@@ -390,14 +501,14 @@ if [ -z "$GREENBOOT" ]; then
 		# multi-user transaction, so anything under five minutes is a race
 		# against ourselves rather than a finding.
 		if [ "$uptime_s" -gt 300 ] && [ "$gb_epoch" -lt "$(( $(date +%s) - uptime_s ))" ]; then
-			bad "greenboot recorded no verdict for this boot (last was ${gb_at:-never}) - the check is not running"
+			bad greenboot.verdict "greenboot recorded no verdict for this boot (last was ${gb_at:-never}) - the check is not running"
 		else
 			case "$gb_result" in
-				green)   ok "greenboot verified this boot healthy" ;;
-				red)     bad "greenboot FAILED this boot's health check" ;;
-				timeout) warn "greenboot's health check timed out - inconclusive, nothing was rolled back" ;;
-				missing) warn "greenboot found no checkout to run - nothing was verified this boot" ;;
-				*)       warn "greenboot recorded an unrecognised verdict '${gb_result:-none}'" ;;
+				green)   ok greenboot.verdict "greenboot verified this boot healthy" ;;
+				red)     bad greenboot.verdict "greenboot FAILED this boot's health check" ;;
+				timeout) warn greenboot.verdict "greenboot's health check timed out - inconclusive, nothing was rolled back" ;;
+				missing) warn greenboot.verdict "greenboot found no checkout to run - nothing was verified this boot" ;;
+				*)       warn greenboot.verdict "greenboot recorded an unrecognised verdict '${gb_result:-none}'" ;;
 			esac
 		fi
 
@@ -418,9 +529,9 @@ if [ -z "$GREENBOOT" ]; then
 		# and none of it applied. Checking that the file exists would have
 		# passed throughout. Ask systemd what it actually loaded instead.
 		if systemctl show greenboot-healthcheck.service -p After --value 2>/dev/null | grep -q 'firewall-stack-ports.service'; then
-			ok "greenboot's ordering drop-in is loaded"
+			ok greenboot.ordering_dropin "greenboot's ordering drop-in is loaded"
 		else
-			bad "greenboot's ordering drop-in is NOT loaded - the check races the units it asserts"
+			bad greenboot.ordering_dropin "greenboot's ordering drop-in is NOT loaded - the check races the units it asserts"
 		fi
 
 		# Enabled is separate from installed, and FCOS ships
@@ -428,13 +539,13 @@ if [ -z "$GREENBOOT" ]; then
 		# its units disabled and nothing runs at boot. Silent, and it looks
 		# exactly like a host that has never had a bad deployment.
 		if [ "$(systemctl is-enabled greenboot-healthcheck.service 2>/dev/null)" = enabled ]; then
-			ok "greenboot-healthcheck.service is enabled"
+			ok greenboot.unit_enabled "greenboot-healthcheck.service is enabled"
 		else
-			bad "greenboot-healthcheck.service is not enabled - no check runs at boot"
+			bad greenboot.unit_enabled "greenboot-healthcheck.service is not enabled - no check runs at boot"
 		fi
 
 		if [ "$gb_dir" = absent ]; then
-			bad "the media-stack check is in neither required.d nor wanted.d - greenboot is not checking this host"
+			bad greenboot.armed "the media-stack check is in neither required.d nor wanted.d - greenboot is not checking this host"
 		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ] && [ "${depl_count:-0}" -lt 2 ]; then
 			# ARMED WITH NOWHERE TO GO, which is the NORMAL state here rather
 			# than a fault: an attended reboot ends in `rpm-ostree cleanup -r`,
@@ -449,13 +560,17 @@ if [ -z "$GREENBOOT" ]; then
 			# is set only on the first boot into a NEW deployment, so with one
 			# deployment a red boot costs GREENBOOT_MAX_BOOT_ATTEMPTS reboots and
 			# then stops, rather than looping.
-			warn "greenboot is armed but there is only ${depl_count:-?} deployment - nothing to roll back to until one stages"
+			warn greenboot.armed "greenboot is armed but there is only ${depl_count:-?} deployment - nothing to roll back to until one stages"
 		elif [ "$gb_dir" = required ] && [ "$gb_grub" = yes ]; then
-			ok "greenboot is armed - a failed check reverts the deployment"
+			ok greenboot.armed "greenboot is armed - a failed check reverts the deployment"
 		else
-			warn "greenboot is observe-only (${gb_dir}.d, GRUB counter: ${gb_grub}) - a bad deployment will NOT roll back"
+			warn greenboot.armed "greenboot is observe-only (${gb_dir}.d, GRUB counter: ${gb_grub}) - a bad deployment will NOT roll back"
 		fi
 	fi
+
+	# After the block, not inside it: gb_result is only assigned on one path, and
+	# a key that appears and disappears forces a reader to guess which it is.
+	fact greenboot_result "${gb_result:-}"
 
 	# --------------------------------------------------------------------------
 	# The reboot window. greenboot judges a deployment AFTER the reboot; this is
@@ -468,27 +583,27 @@ if [ -z "$GREENBOOT" ]; then
 	# was layered to fix. Every other timer here already has this check; this one
 	# was the only one without it.
 	# --------------------------------------------------------------------------
-	say "Reboot window"
+	say reboot "Reboot window"
 
 	# Initialised unconditionally: the MOTD below reads it, that block also runs
 	# under --greenboot, and `set -u` is on.
 	reboot_next=""
 	if [ "$(systemctl --user is-enabled media-stack-reboot.timer 2>/dev/null)" = enabled ]; then
-		ok "media-stack-reboot.timer enabled"
+		ok reboot.timer_enabled "media-stack-reboot.timer enabled"
 		# Computed HERE rather than in the MOTD block, because that block also
 		# runs under --greenboot - as root, at boot, where there is no
 		# XDG_RUNTIME_DIR and `systemctl --user` cannot answer at all.
 		reboot_next=$(systemctl --user list-timers media-stack-reboot.timer \
 			--no-legend --no-pager 2>/dev/null | awk 'NR==1 {print $1, $2, $3, $4}')
 	else
-		bad "media-stack-reboot.timer is not enabled - a staged deployment would never be applied"
+		bad reboot.timer_enabled "media-stack-reboot.timer is not enabled - a staged deployment would never be applied"
 	fi
 
 	# A WEEK, not a night. The unit fires five times on a Sunday morning and in
 	# the ordinary case refuses on all five, because nothing is staged; what this
 	# asserts is that the group ran at all. Possible only since check_timer_run
 	# started deriving its staleness threshold from the period it is given.
-	check_timer_run "unattended reboot window" 604800 media-stack-reboot.service --user
+	check_timer_run reboot.window_run "unattended reboot window" 604800 media-stack-reboot.service --user
 
 	# THE MARKER FINALLY EARNING ITS KEEP. bin/reboot-when-staged.sh writes this
 	# immediately before rebooting, because afterwards there is no process left
@@ -498,52 +613,52 @@ if [ -z "$GREENBOOT" ]; then
 	# distinguishes an unattended reboot from a power cut.
 	unatt=$(sed -n 's/^unattended_reboot_at=//p' "$boot_state" 2>/dev/null | tail -1)
 	if [ -z "$unatt" ]; then
-		ok "the reboot window has not applied a deployment yet"
+		ok reboot.last_applied "the reboot window has not applied a deployment yet"
 	else
 		unatt_epoch=$(date -d "$unatt" +%s 2>/dev/null || echo 0)
 		boot_epoch=$(( $(date +%s) - uptime_s ))
 		# A window rather than an equality: the mark is written seconds before
 		# `systemctl reboot` and the boot that follows takes as long as it takes.
 		if [ "$unatt_epoch" -le "$boot_epoch" ] && [ "$unatt_epoch" -gt "$(( boot_epoch - 600 ))" ]; then
-			ok "this boot was applied by the unattended window at $unatt"
+			ok reboot.last_applied "this boot was applied by the unattended window at $unatt"
 		else
-			ok "the reboot window last applied a deployment at $unatt"
+			ok reboot.last_applied "the reboot window last applied a deployment at $unatt"
 		fi
 	fi
 
-	say "Container updates"
+	say update "Container updates"
 
 	# The same argument as rpm-ostreed-automatic above: a timer that has stopped
 	# firing, or a run that failed, looks exactly like a week with no upstream
 	# releases. There is no alerting here yet, so the MOTD is the channel - which
 	# means the check has to exist rather than the failure being assumed visible.
 	if [ "$(systemctl --user is-enabled podman-auto-update.timer 2>/dev/null)" = enabled ]; then
-		ok "podman-auto-update.timer enabled"
+		ok update.podman_timer "podman-auto-update.timer enabled"
 	else
-		bad "podman-auto-update.timer is not enabled - no container ever updates"
+		bad update.podman_timer "podman-auto-update.timer is not enabled - no container ever updates"
 	fi
-	check_timer_run "container update" 86400 podman-auto-update.service --user
+	check_timer_run update.podman_run "container update" 86400 podman-auto-update.service --user
 
 	# Caddy is built here, and `local` policy notices a new image without ever
 	# producing one - so if this timer stops, Caddy silently stops updating while
 	# every other service carries on.
 	if [ "$(systemctl --user is-enabled media-stack-caddy-build.timer 2>/dev/null)" = enabled ]; then
-		ok "media-stack-caddy-build.timer enabled"
+		ok update.caddy_build_timer "media-stack-caddy-build.timer enabled"
 	else
-		bad "media-stack-caddy-build.timer is off - Caddy will never be rebuilt"
+		bad update.caddy_build_timer "media-stack-caddy-build.timer is off - Caddy will never be rebuilt"
 	fi
 
 	# Every container that can be auto-updated should be. A unit that lost its
 	# policy would simply never appear here again, silently.
 	au_count=$(podman auto-update --dry-run 2>/dev/null | grep -cE 'registry|local' || true)
 	if [ "${au_count:-0}" -ge 17 ]; then
-		ok "$au_count containers carry an auto-update policy"
+		ok update.policy_count "$au_count containers carry an auto-update policy"
 	else
-		bad "only ${au_count:-0} containers carry an auto-update policy, expected 17"
+		bad update.policy_count "only ${au_count:-0} containers carry an auto-update policy, expected 17"
 	fi
 
 	# ------------------------------------------------------------------------------
-	say "Backups"
+	say backup "Backups"
 	# ------------------------------------------------------------------------------
 	# config/ is the only thing here that cannot be rebuilt from git, and until
 	# 2026-08-14 the backup ran on the workstation by hand - so a fortnight away
@@ -556,47 +671,48 @@ if [ -z "$GREENBOOT" ]; then
 	# repositories directly would be better, except the off-site one is a network
 	# call with credentials, and this runs every hour.
 	if [ "$(systemctl --user is-enabled media-stack-backup.timer 2>/dev/null)" = enabled ]; then
-		ok "media-stack-backup.timer enabled"
+		ok backup.timer_enabled "media-stack-backup.timer enabled"
 	else
-		bad "media-stack-backup.timer is not enabled - config/ is not being backed up"
+		bad backup.timer_enabled "media-stack-backup.timer is not enabled - config/ is not being backed up"
 	fi
-	check_timer_run "backup" 86400 media-stack-backup.service --user
+	check_timer_run backup.run "backup" 86400 media-stack-backup.service --user
 
 	# Same ${HOME:-} guard as line 42. This branch only runs as `core`, where
 	# HOME is always set, but an unbound expansion aborts the whole script
 	# under `set -u` and that is too sharp an edge to leave lying around.
 	backup_state="${HOME:-/root}/.cache/media-stack/backup-state"
-	# <label> <key> <max-hours> <severity>
+	# <id> <label> <key> <max-hours> <severity>
 	check_backup_age() {
-		local label="$1" key="$2" max="$3" sev="$4" at age
+		local id="$1" label="$2" key="$3" max="$4" sev="$5" at age
 		at=$(sed -n "s/^${key}=//p" "$backup_state" 2>/dev/null | tail -1)
+		fact "backup_$key" "${at:-}"
 		if [ -z "$at" ]; then
 			# Same argument as check_timer_run: on a host that has just been
 			# rebuilt this is true and uninteresting, and a finding nobody can
 			# act on is how someone learns to ignore this whole block.
 			if [ "$uptime_s" -lt 86400 ]; then
-				ok "no $label recorded yet (up $((uptime_s / 60))m) - not yet due"
+				ok "$id" "no $label recorded yet (up $((uptime_s / 60))m) - not yet due"
 			else
-				bad "no $label has EVER been recorded"
+				bad "$id" "no $label has EVER been recorded"
 			fi
 			return
 		fi
 		age=$(( ( $(date +%s) - $(date -d "$at" +%s) ) / 3600 ))
 		if [ "$age" -le "$max" ]; then
-			ok "$label ${age}h ago"
+			ok "$id" "$label ${age}h ago"
 		else
-			"$sev" "the $label is ${age}h old (limit ${max}h)"
+			"$sev" "$id" "the $label is ${age}h old (limit ${max}h)"
 		fi
 	}
 	# The local copy is on the same disk as config/, so it is the weaker of the
 	# two: it covers a bad change, not a dead disk. The off-site one is the copy
 	# that survives nvme0n1, which is why its ceiling is tight as well.
-	check_backup_age "local backup"    local_at   48 bad
-	check_backup_age "off-site backup" offsite_at 72 bad
+	check_backup_age backup.local_age           "local backup"    local_at   48 bad
+	check_backup_age backup.offsite_age         "off-site backup" offsite_at 72 bad
 	# The server's key cannot delete, deliberately - so nothing here prunes the
 	# off-site repository and it grows until the workstation runs
 	# bin/backup-offsite.sh. Slow, but unbounded if nobody ever does.
-	check_backup_age "off-site prune" offsite_pruned_at 720 warn
+	check_backup_age backup.offsite_prune_age   "off-site prune" offsite_pruned_at 720 warn
 	# "Cannot delete" is the whole reason the server is allowed to hold a backup
 	# credential at all, and it is enforced by an ABSENCE - nothing grants delete
 	# outside locks/, so there is no Deny statement to eyeball and a policy that
@@ -606,10 +722,10 @@ if [ -z "$GREENBOOT" ]; then
 	# backup-server.sh therefore re-proves it nightly and writes this marker only
 	# on a confirmed refusal; 48h matches the local ceiling, so one unreachable
 	# night is tolerated and a real drift surfaces on the second.
-	check_backup_age "off-site delete denial" offsite_policy_ok_at 48 bad
+	check_backup_age backup.offsite_delete_denial "off-site delete denial" offsite_policy_ok_at 48 bad
 
 	# ------------------------------------------------------------------------------
-	say "Checkout"
+	say checkout "Checkout"
 	# ------------------------------------------------------------------------------
 	# Containers update themselves nightly and the OS stages itself nightly, but
 	# the unit definitions only move when a human types `git pull` - so this is
@@ -618,10 +734,11 @@ if [ -z "$GREENBOOT" ]; then
 	# the next pull refuses with "local changes would be overwritten".
 	repo=/var/media-stack
 	dirty=$(git -C "$repo" status --porcelain 2>/dev/null)
+	fact checkout_clean "$([ -z "$dirty" ] && echo true || echo false)" bool
 	if [ -z "$dirty" ]; then
-		ok "checkout is clean"
+		ok checkout.clean "checkout is clean"
 	else
-		bad "LOCAL CHANGES on the server: $(echo "$dirty" | awk '{print $2}' | tr '\n' ' ')"
+		bad checkout.clean "LOCAL CHANGES on the server: $(echo "$dirty" | awk '{print $2}' | tr '\n' ' ')"
 	fi
 
 	# ls-remote rather than fetch: it writes nothing into .git, so this script
@@ -630,44 +747,46 @@ if [ -z "$GREENBOOT" ]; then
 	local_head=$(git -C "$repo" rev-parse HEAD 2>/dev/null)
 	remote_head=$(git -C "$repo" ls-remote origin HEAD 2>/dev/null | awk '{print $1}')
 	if [ -z "$remote_head" ]; then
-		note "could not reach origin - not a health problem"
+		note checkout.matches_origin "could not reach origin - not a health problem"
 	elif [ "$local_head" = "$remote_head" ]; then
-		ok "checkout matches origin"
+		ok checkout.matches_origin "checkout matches origin"
 	else
-		warn "checkout is not at origin (local ${local_head:0:7}, origin ${remote_head:0:7})"
+		warn checkout.matches_origin "checkout is not at origin (local ${local_head:0:7}, origin ${remote_head:0:7})"
 	fi
 
-	say "Containers"
+	say containers "Containers"
 
 	userfailed=$(systemctl --user list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ' -)
-	if [ -z "$userfailed" ]; then ok "no failed user units"; else bad "failed user units: $userfailed"; fi
+	if [ -z "$userfailed" ]; then ok containers.failed_units "no failed user units"
+	else bad containers.failed_units "failed user units: $userfailed"; fi
 
 	running=$(podman ps --format '{{.Names}}' 2>/dev/null | wc -l)
+	fact containers_running "${running:-}" num
 	unhealthy=$(podman ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | paste -sd' ' -)
-	if [ -z "$unhealthy" ]; then ok "$running containers up, none unhealthy"
-	else bad "unhealthy: $unhealthy"; fi
+	if [ -z "$unhealthy" ]; then ok containers.healthy "$running containers up, none unhealthy"
+	else bad containers.healthy "unhealthy: $unhealthy"; fi
 
 	# duckdns, unpackerr and the pod's infra container define no healthcheck.
 	# A check that assumes all of them do reports those three broken for ever.
 	for c in jellyfin tdarr-node-01; do
 		if podman ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c"; then
 			if podman exec "$c" nvidia-smi -L 2>/dev/null | grep -q '^GPU '; then
-				ok "$c can see its GPU"
+				ok "containers.gpu_${c//-/_}" "$c can see its GPU"
 			else
-				bad "$c cannot see a GPU - check the CDI spec"
+				bad "containers.gpu_${c//-/_}" "$c cannot see a GPU - check the CDI spec"
 			fi
 		else
-			note "$c is not running, GPU not checked"
+			note "containers.gpu_${c//-/_}" "$c is not running, GPU not checked"
 		fi
 	done
 
 	if [ -n "$ROUTES" ]; then
-		say "Public routes"
+		say routes "Public routes"
 		for h in watch request id auth sonarr radarr prowlarr tdarr torrent; do
 			code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h.avanserv.com/" 2>/dev/null)
 			case "$code" in
-				200|302|307) ok "$h -> $code" ;;
-				*) bad "$h -> ${code:-no answer}" ;;
+				200|302|307) ok "routes.$h" "$h -> $code" ;;
+				*) bad "routes.$h" "$h -> ${code:-no answer}" ;;
 			esac
 		done
 	fi
@@ -716,6 +835,125 @@ motd=/run/motd.d/40-media-stack.motd
 	fi
 	printf '  \033[2mlast checked %s\033[0m\n\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
 } | priv tee "$motd" >/dev/null 2>&1 || true
+
+# ------------------------------------------------------------------------------
+# The machine-readable half
+# ------------------------------------------------------------------------------
+# AFTER THE MOTD, BEFORE THE EXIT, and both halves of that matter. After,
+# because the MOTD is the human channel and must be written even if jq is
+# missing. Before, because a FAILING host is the one case a dashboard exists
+# for - emitting after `exit 1` would produce a document for healthy hosts only.
+#
+# NOT UNDER --greenboot. That mode runs as root before the user session exists
+# and its exit code decides whether the OS rolls back, so it gets no new failure
+# modes: no jq, no sudo mkdir, no writes. Its verdict already has a durable home
+# in boot-state, written by the greenboot wrapper. It still records ids into the
+# arrays above - keeping one code path is safer than branching it - and simply
+# never encodes them.
+if [ -z "$GREENBOOT" ]; then
+	status_file="${MEDIA_STACK_STATUS_FILE:-/var/lib/media-stack/status.json}"
+	now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+	# THE DURABLE RECORD THIS SCRIPT HAS NEVER HAD. Every other automated job
+	# here writes a marker that this battery then ages; this one wrote only a
+	# MOTD, on tmpfs, which a reboot wipes. status.json lives in /var/lib and
+	# carries generated_at, so it IS the marker - no second file needed.
+	#
+	# Read the previous success BEFORE overwriting it, so a run that FAILs
+	# carries the old timestamp forward. Same argument as backup-server.sh:
+	# "failing since Tuesday" and "has never once passed" must not look alike.
+	verify_ok=$(sed -n 's/.*"verify_last_ok_at": *"\([^"]*\)".*/\1/p' "$status_file" 2>/dev/null | tail -1)
+	[ ${#fails[@]} -gt 0 ] || verify_ok="$now"
+
+	fact verify_last_run_at "$now"
+	fact verify_last_ok_at  "${verify_ok:-}"
+	fact verify_fail_count  "${#fails[@]}" num
+	fact verify_warn_count  "${#warns[@]}" num
+	fact uptime_s           "${uptime_s:-}" num
+
+	# NUL-DELIMITED, and that is the whole safety argument: a bash string is
+	# NUL-terminated, so it is the one byte a message provably cannot contain.
+	# Quotes, backslashes, pipes and embedded newlines all survive and jq
+	# escapes them on the way out.
+	#
+	# Index loops rather than `for x in "${arr[@]}"`: ${#arr[@]} is well-defined
+	# on an empty array under `set -u`, so these need no ${arr+...} guard and the
+	# body simply never runs.
+	_stream_sections() { local i; for ((i = 0; i < ${#sect_id[@]}; i++)); do
+		printf '%s\0%s\0' "${sect_id[i]}" "${sect_title[i]}"; done; }
+	_stream_checks() { local i; for ((i = 0; i < ${#chk_id[@]}; i++)); do
+		printf '%s\0%s\0%s\0%s\0' \
+			"${chk_sect[i]}" "${chk_id[i]}" "${chk_status[i]}" "${chk_msg[i]}"; done; }
+	_stream_facts() { local i; for ((i = 0; i < ${#fact_k[@]}; i++)); do
+		printf '%s\0%s\0%s\0' "${fact_k[i]}" "${fact_t[i]}" "${fact_v[i]}"; done; }
+
+	# .[:-1] drops the empty element split leaves after the final NUL. On an
+	# empty stream split gives [""], so .[:-1] gives [] and the zero case needs
+	# no special branch.
+	j_sections=$(_stream_sections | jq -Rs 'split("\u0000") | .[:-1]
+		| [ range(0; length; 2) as $i | { id: .[$i], title: .[$i+1] } ]' 2>/dev/null)
+	j_checks=$(_stream_checks | jq -Rs 'split("\u0000") | .[:-1]
+		| [ range(0; length; 4) as $i
+		    | { section: .[$i], id: .[$i+1], status: .[$i+2], message: .[$i+3] } ]' 2>/dev/null)
+	j_facts=$(_stream_facts | jq -Rs 'split("\u0000") | .[:-1]
+		| [ range(0; length; 3) as $i
+		    | { key: .[$i],
+		        value: ( .[$i+2] as $v
+		                 | if   $v == ""          then null
+		                   elif .[$i+1] == "num"  then ($v | tonumber? // null)
+		                   elif .[$i+1] == "bool" then ($v == "true")
+		                   else $v end ) } ]
+		| from_entries' 2>/dev/null)
+
+	doc=""
+	if [ -n "$j_sections" ] && [ -n "$j_checks" ] && [ -n "$j_facts" ]; then
+		doc=$(jq -n \
+			--arg     generated_at "$now" \
+			--arg     host         "$(uname -n 2>/dev/null)" \
+			--arg     routes       "${ROUTES:-}" \
+			--argjson sections     "$j_sections" \
+			--argjson checks       "$j_checks" \
+			--argjson facts        "$j_facts" \
+			'($checks | map(.status)) as $st
+			 | { schema: 1,
+			     generated_at: $generated_at,
+			     host: $host,
+			     mode: { routes: ($routes != "") },
+			     summary: {
+			       status: (if   ($st | any(. == "fail")) then "fail"
+			                elif ($st | any(. == "warn")) then "warn"
+			                else "pass" end),
+			       pass:  ($st | map(select(. == "pass")) | length),
+			       fail:  ($st | map(select(. == "fail")) | length),
+			       warn:  ($st | map(select(. == "warn")) | length),
+			       note:  ($st | map(select(. == "note")) | length),
+			       total: ($st | length) },
+			     sections: [ $sections[] as $s
+			                 | ($checks | map(select(.section == $s.id))) as $c
+			                 | $s + { pass: ($c | map(select(.status == "pass")) | length),
+			                          fail: ($c | map(select(.status == "fail")) | length),
+			                          warn: ($c | map(select(.status == "warn")) | length),
+			                          note: ($c | map(select(.status == "note")) | length) } ],
+			     checks: $checks,
+			     facts: $facts }' 2>/dev/null)
+	fi
+
+	[ -z "$JSON" ] || printf '%s\n' "$doc"
+
+	# A STALE status.json IS HONEST; A TRUNCATED ONE IS NOT. generated_at tells a
+	# reader how old the document is, so declining to write anything when jq
+	# failed costs nothing - whereas an empty {} would show a healthy host as
+	# unknown, or a failing one as fine.
+	if [ -n "$doc" ]; then
+		priv mkdir -p "$(dirname "$status_file")" >/dev/null 2>&1
+		if ! { printf '%s\n' "$doc" | priv tee "$status_file.tmp" >/dev/null 2>&1 \
+			&& priv mv "$status_file.tmp" "$status_file" >/dev/null 2>&1; }; then
+			# Deliberately louder than the MOTD's `|| true` above. A silently
+			# stale status file is exactly what a dashboard misreads as current.
+			warn logs.status_write "could not write $status_file - any dashboard reading it is seeing stale data"
+		fi
+	fi
+fi
 
 if [ ${#fails[@]} -gt 0 ]; then
 	# UNDER --greenboot, SAY WHY ON STDERR. greenboot captures the check's
