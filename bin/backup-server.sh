@@ -85,6 +85,29 @@ command -v restic >/dev/null || die "restic is not on PATH - see host/RUNBOOK.md
 # Excludes are only for things that regenerate on their own. Anything merely
 # LARGE is kept: Tdarr's DB2 is 3.8 GB, but "regenerable" there means rescanning
 # a 7.3 TB library, and restic deduplicates it across snapshots.
+#
+# /prometheus/ IS EXCLUDED HERE AND RE-ADDED IN STEP 3b, and the reason is not
+# that a live TSDB copies badly - it is that copying it at all breaks this whole
+# script. Prometheus deletes WAL segments at every checkpoint and deletes source
+# blocks after every compaction; rsync exits 24 when a file it has already
+# enumerated vanishes, and the line below ends in `|| die`. So one routine
+# compaction inside the backup window would abort the run BEFORE the Caddy
+# assertion, the database snapshots, both restic legs and the marker write - and
+# the symptom would be backup.local_age going stale, three scripts away from the
+# cause.
+#
+# NOTE WHY NONE OF THE PATTERNS ABOVE ALREADY COVERED IT, because it is the same
+# shape as the shellcheck leg that silently never ran: Prometheus names its lock
+# file `lock`, which `lockfile` does not match and `*.lock` does not match
+# either, and its write-ahead log is a DIRECTORY called `wal/`, which `*-wal`
+# does not match. A pattern list that quietly matches nothing looks exactly like
+# one that works.
+#
+# The `protect` filter is what stops --delete-excluded removing last night's
+# staged copy, which would otherwise force a full re-copy of a growing TSDB
+# every night onto the disk this job deliberately throttles itself against.
+# Verified rather than assumed: with --exclude alone the staged directory is
+# deleted, and with the filter it survives.
 say "staging $CONFIG"
 mkdir -p "$STAGING/config" || die "cannot create $STAGING"
 rsync -a --delete --delete-excluded --info=stats1 \
@@ -94,6 +117,7 @@ rsync -a --delete --delete-excluded --info=stats1 \
 	--exclude='tdarr/logs/' --exclude='tdarr/server/Tdarr/Backups/' \
 	--exclude='*/logs/' \
 	--exclude='lockfile' --exclude='*.lock' --exclude='*.pid' \
+	--filter='protect /prometheus/' --exclude='/prometheus/' \
 	"$CONFIG/" "$STAGING/config/" || die "rsync failed"
 
 # ------------------------------------------------------------------------------
@@ -117,6 +141,56 @@ fi
 say "snapshotting live databases"
 "$ROOT/bin/snapshot-databases.sh" "$CONFIG" || die "database snapshot failed"
 rsync -a "$HOME/.cache/home-server/db-snapshot/" "$STAGING/config/" || die "overlay failed"
+
+# ------------------------------------------------------------------------------
+# 3b. A consistent copy of the metrics store
+# ------------------------------------------------------------------------------
+# Same argument as the databases above, different mechanism: a live TSDB has an
+# in-memory head block and an open WAL, so a file copy is torn by construction.
+# Prometheus's admin API makes a snapshot out of HARDLINKS, so it is instant,
+# costs no disk, and is consistent at the instant it is taken.
+#
+# podman exec is the only route to it. There is no published port and
+# net-metrics carries isolate=true, so the host cannot reach the container any
+# other way - the same escape hatch verify-host.sh's promq uses, and the reason
+# the Caddyfile can close /api/v1/admin/* to the outside without closing this.
+#
+# FAILURE HERE IS RECORDED, NOT FATAL. Losing metrics history is not losing
+# config/, so this must never abort the run that carries the *arr databases and
+# Caddy's private keys. But it is ASSERTED rather than assumed, for the reason
+# the certificate count above exists: a silently skipped step leaves a backup
+# that looks complete and contains no metrics at all.
+say "snapshotting the metrics store"
+tsdb_ok=""
+tsdb_dir="$CONFIG/prometheus"
+if [ ! -d "$tsdb_dir" ]; then
+	echo "    no metrics store at $tsdb_dir - nothing to snapshot"
+else
+	# PROMETHEUS NEVER REAPS snapshots/. --storage.tsdb.retention.size manages
+	# blocks and knows nothing about these, so one left behind by an interrupted
+	# run keeps its hardlinked blocks alive after compaction would have freed
+	# them - real, growing disk inside the directory metrics.tsdb_size measures,
+	# reported as "retention is not being enforced". Clear stale ones first, so
+	# a killed run repairs itself on the next pass rather than accumulating.
+	find "$tsdb_dir/snapshots" -mindepth 1 -maxdepth 1 -type d -mmin +180 \
+		-exec rm -rf {} + 2>/dev/null
+
+	tsdb_name=$(podman exec prometheus wget -q -O - --post-data='' \
+		http://127.0.0.1:9090/api/v1/admin/tsdb/snapshot 2>/dev/null \
+		| jq -r '.data.name // empty' 2>/dev/null)
+	if [ -z "$tsdb_name" ]; then
+		echo "    could not snapshot - the metrics store is absent from this backup"
+	elif ! rsync -a --delete "$tsdb_dir/snapshots/$tsdb_name/" \
+		"$STAGING/config/prometheus/"; then
+		echo "    could not stage the snapshot"
+		rm -rf "${tsdb_dir:?}/snapshots/${tsdb_name:?}"
+	else
+		blocks=$(find "$STAGING/config/prometheus" -name meta.json 2>/dev/null | wc -l)
+		echo "    $blocks blocks staged"
+		rm -rf "${tsdb_dir:?}/snapshots/${tsdb_name:?}"
+		[ "$blocks" -gt 0 ] && tsdb_ok=1
+	fi
+fi
 
 # ------------------------------------------------------------------------------
 # 4. Local repository
@@ -327,6 +401,14 @@ if [ -z "$DRY" ]; then
 	{
 		echo "local_snapshot=$local_id"
 		echo "local_at=$now"
+		# Write fresh on success, carry the old line forward otherwise - the
+		# same idiom as the off-site keys below, so a night the metrics store
+		# could not be snapshotted reads as STALE rather than as never.
+		if [ -n "$tsdb_ok" ]; then
+			echo "tsdb_snapshot_at=$now"
+		else
+			grep -E '^tsdb_snapshot_at=' "$STATE" 2>/dev/null
+		fi
 		if [ -n "$offsite_id" ]; then
 			echo "offsite_snapshot=$offsite_id"
 			echo "offsite_at=$now"

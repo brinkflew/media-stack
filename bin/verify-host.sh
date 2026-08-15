@@ -723,6 +723,13 @@ if [ -z "$GREENBOOT" ]; then
 	# on a confirmed refusal; 48h matches the local ceiling, so one unreachable
 	# night is tolerated and a real drift surfaces on the second.
 	check_backup_age backup.offsite_delete_denial "off-site delete denial" offsite_policy_ok_at 48 bad
+	# The metrics store is captured by its own admin API rather than by the file
+	# copy, and that step is deliberately non-fatal - losing metrics history must
+	# never abort the run carrying the *arr databases and Caddy's private keys.
+	# WARN rather than FAIL for the same reason: a stopped Prometheus would
+	# otherwise block the unattended reboot window, and a reboot does not fix it.
+	# Without this the step could stop working and nothing would ever say so.
+	check_backup_age backup.tsdb_snapshot_age   "metrics snapshot" tsdb_snapshot_at 48 warn
 
 	# ------------------------------------------------------------------------------
 	say checkout "Checkout"

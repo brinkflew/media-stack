@@ -75,6 +75,12 @@ export RESTIC_REPOSITORY="$REPO" RESTIC_PASSWORD_FILE="$PWFILE"
 # Excludes are only for things that are regenerated on their own. Anything
 # merely LARGE is kept: Tdarr's DB2 is 3.8GB, but "regenerable" there means
 # rescanning a 7.3TB library, and restic deduplicates it across snapshots.
+#
+# /prometheus/ is excluded and re-added in step 3b - see the long note in
+# bin/backup-server.sh. It matters more here: this script runs under `set -e`
+# with no handler on the rsync at all, so rsync's exit 24 when Prometheus
+# deletes a WAL segment mid-transfer would kill the run outright. The `protect`
+# filter stops --delete-excluded removing last night's staged copy.
 mkdir -p "$STAGING/config"
 echo "==> mirroring $REMOTE:$REMOTE_CONFIG"
 rsync -a --delete --delete-excluded --info=stats1 \
@@ -84,6 +90,7 @@ rsync -a --delete --delete-excluded --info=stats1 \
   --exclude='tdarr/logs/' --exclude='tdarr/server/Tdarr/Backups/' \
   --exclude='*/logs/' \
   --exclude='lockfile' --exclude='*.lock' --exclude='*.pid' \
+  --filter='protect /prometheus/' --exclude='/prometheus/' \
   "$REMOTE:$REMOTE_CONFIG/" "$STAGING/config/"
 # caddy/ used to be excluded here and re-extracted with `docker exec caddy tar`,
 # because under Docker its subdirectories were root-owned and unreadable to this
@@ -113,6 +120,34 @@ fi
 echo "==> snapshotting live databases"
 ssh "$REMOTE" 'bash -s' < "$(dirname "${BASH_SOURCE[0]}")/snapshot-databases.sh"
 rsync -a "$REMOTE:.cache/home-server/db-snapshot/" "$STAGING/config/"
+
+# ------------------------------------------------------------------------------
+# 3b. A consistent copy of the metrics store
+# ------------------------------------------------------------------------------
+# The same hardlink snapshot bin/backup-server.sh takes, driven over ssh. Both
+# repositories have to agree about what a good snapshot contains, because
+# bin/verify-restore.sh asserts against both - so this is not optional polish.
+#
+# Non-fatal despite `set -e` on this script: losing metrics history is not
+# losing config/, and this copy is the one taken when someone is home rather
+# than the one that runs every night.
+echo "==> snapshotting the metrics store"
+tsdb_name=$(ssh "$REMOTE" 'podman exec prometheus wget -q -O - --post-data="" \
+	http://127.0.0.1:9090/api/v1/admin/tsdb/snapshot 2>/dev/null \
+	| jq -r ".data.name // empty" 2>/dev/null' || true)
+if [ -z "$tsdb_name" ]; then
+	echo "    could not snapshot - the metrics store is absent from this backup"
+else
+	rsync -a --delete \
+		"$REMOTE:$REMOTE_CONFIG/prometheus/snapshots/$tsdb_name/" \
+		"$STAGING/config/prometheus/" || true
+	# shellcheck disable=SC2029  # expanding locally is the point: the snapshot
+	# name came back from the API call above and the remote must be told which
+	# one to remove. Single-quoted on the remote side so a name with a space
+	# cannot split into two arguments.
+	ssh "$REMOTE" "rm -rf '$REMOTE_CONFIG/prometheus/snapshots/$tsdb_name'" || true
+	echo "    $(find "$STAGING/config/prometheus" -name meta.json 2>/dev/null | wc -l) blocks staged"
+fi
 
 # ------------------------------------------------------------------------------
 # 4. Into restic

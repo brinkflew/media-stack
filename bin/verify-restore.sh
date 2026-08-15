@@ -97,9 +97,13 @@ mkdir -p "$SCRATCH" 2>/dev/null
 # to leave room for the restore's own bookkeeping.
 # Snapshots written by older restic have no summary, so fall back to a figure
 # comfortably above what config/ has ever been rather than skipping the check.
+# That fallback went 9000 -> 20000 when the metrics store joined the backup: it
+# is a headroom figure, and one that no longer clears the tree it is protecting
+# would let the restore run out of disk partway through, after downloading
+# several gigabytes.
 need_mb=$(restic snapshots --latest 1 --json 2>/dev/null \
 	| jq -r '[.[].summary.total_bytes_processed // 0] | max // 0' \
-	| awk '{n = ($1 / 1048576) * 1.5; printf "%d", (n < 1 ? 9000 : n)}')
+	| awk '{n = ($1 / 1048576) * 1.5; printf "%d", (n < 1 ? 20000 : n)}')
 have_mb=$(df -Pm "$SCRATCH" | awk 'NR==2 {print $4}')
 fstype=$(findmnt -no FSTYPE --target "$SCRATCH" 2>/dev/null)
 if [ "${need_mb:-0}" -gt 0 ] && [ "${have_mb:-0}" -lt "${need_mb}" ]; then
@@ -168,6 +172,37 @@ if find "$CONFIG/caddy" -type d -name acme 2>/dev/null | grep -q .; then
 	ok "ACME account directory present"
 else
 	bad "no ACME account directory"
+fi
+
+# ------------------------------------------------------------------------------
+say "Metrics store"
+# ------------------------------------------------------------------------------
+# Asserted for the same reason as the certificate count above: the step that
+# captures it is deliberately non-fatal, so a backup missing it looks completely
+# normal from the outside. A block is a directory carrying a meta.json.
+#
+# It must also carry NO wal/, no lock and no queries.active. Their presence
+# would mean the live directory was copied rather than a snapshot of it - which
+# is the state this whole arrangement exists to avoid, and which the exclusion
+# check below cannot catch, because Prometheus names its lock file `lock` and
+# neither `lockfile` nor `*.lock` matches that.
+if [ ! -d "$CONFIG/prometheus" ]; then
+	bad "no metrics store in the snapshot - the TSDB step did not run"
+else
+	blocks=$(find "$CONFIG/prometheus" -name meta.json 2>/dev/null | wc -l)
+	if [ "$blocks" -gt 0 ]; then
+		ok "$blocks metrics blocks"
+	else
+		bad "the metrics store has no blocks - nothing would restore"
+	fi
+	live=$(find "$CONFIG/prometheus" \( -name lock -o -name 'queries.active' \
+		-o -name wal -o -name chunks_head \) 2>/dev/null)
+	if [ -z "$live" ]; then
+		ok "no live-TSDB artefacts - this is a snapshot, not a file copy"
+	else
+		bad "live TSDB files in the snapshot, so the copy is torn:"
+		echo "$live" | sed "s|$CONFIG|  config|" | head -5
+	fi
 fi
 
 # ------------------------------------------------------------------------------

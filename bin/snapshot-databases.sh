@@ -44,10 +44,21 @@ MAGIC = b"SQLite format 3\x00"
 ok = failed = skipped = 0
 total = 0
 
+# Directories with nothing SQLite in them that are expensive or misleading to
+# walk. prometheus/ is a time-series store: thousands of chunk files, none of
+# which can pass the magic-byte test, so opening every one to read 16 bytes is
+# pure cost inside a job deliberately throttled to IOWeight=20. Worse, its files
+# vanish under compaction between listdir and open, and each one raises OSError
+# and increments "unreadable" - a count that would then fluctuate nightly and
+# mean nothing. It is snapshotted properly by its own admin API instead.
+SKIP_DIRS = {"prometheus"}
+
 for root, dirs, files in os.walk(config):
     # Caddy's directories are root-owned and unreadable to this user; the
     # backup script pulls them out of the container instead.
-    dirs[:] = [d for d in dirs if os.access(os.path.join(root, d), os.R_OK | os.X_OK)]
+    dirs[:] = [d for d in dirs
+               if d not in SKIP_DIRS
+               and os.access(os.path.join(root, d), os.R_OK | os.X_OK)]
     for name in files:
         src = os.path.join(root, name)
         if name.endswith(("-wal", "-shm", "-journal")):
