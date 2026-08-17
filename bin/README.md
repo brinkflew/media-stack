@@ -11,7 +11,7 @@ workstation, and anything that has to outlive the machine it is talking about ca
 | `backup-server.sh` | **server** | Backs up `config/` to `/var/backups/home-server`, then `restic copy` off-site with the append-only key. Nightly, from `home-server-backup.timer`. This is the backup that actually happens. |
 | `snapshot-databases.sh` | **server** | Consistent SQLite snapshots through the backup API, found by magic bytes rather than extension. Called by the two backup scripts; little reason to run by hand. |
 | `verify-host.sh` | **server** | The health battery, the MOTD, and `/var/lib/home-server/status.json`. Hourly, from `home-server-verify.timer`. `--json` prints the findings machine-readably; `--greenboot` drops every container check and emits no JSON. |
-| `collect-metrics.py` | **server** | Every 30 seconds, the numbers no container can honestly measure here: host filesystems and network, the cgroup detail that separates a container holding cold page cache from a starved one, GPU encoder utilisation, sensors, SMART, `status.json` as series, and what the applications think is happening. Writes Prometheus exposition format into node-exporter's textfile directory rather than pushing, because Prometheus pulls. `--print` shows what it produces without writing; `--slow` forces the 5-minute tier; `--source <name>` runs one. |
+| `collect-metrics.py` | **server** | Every 30 seconds, the numbers no container can honestly measure here: host filesystems and network, the cgroup detail that separates a container holding cold page cache from a starved one, GPU encoder utilisation, sensors, SMART, `status.json` as series, and what the applications think is happening. Writes Prometheus exposition format into node-exporter's textfile directory rather than pushing, because Prometheus pulls. `--print` shows what it produces without writing; `--slow` forces the 5-minute tier; `--source <name>` runs one. Also writes the dashboard's two JSON documents - `activity.json` every 30s and `library.json` every 5 minutes - into `${DOCKER_VOLUME_CACHE}/dashboard/`, because titles cannot be Prometheus labels. |
 | `promote-transcoded.py` | **server** | Tells Radarr and Sonarr where Tdarr already moved a file. Every 10 minutes. Never moves media itself. |
 | `reboot-when-staged.sh` | **server** | The UNattended reboot, hourly 05:00-09:00 on Sundays from `home-server-reboot.timer`. Every check in it is a refusal - it applies a staged deployment only when greenboot is armed to undo it, nothing has been rejected and left unexplained, no backup is running, the host is healthy now and no transcode is running. The one exception is that transcode, which stops being a veto past 14 days staged or 30 days of uptime. `--dry-run` says what it would do; `HOME_SERVER_STATUS_JSON`, `HOME_SERVER_STAGED_AGE_DAYS` and `HOME_SERVER_ENCODER_PCT` make the otherwise-unreachable gates testable. |
 | `render-env.sh` | **server** | Renders `.env` from `secrets/env.sops.env`. Also runnable on the workstation. |
@@ -46,3 +46,19 @@ curl -sfL https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shell
   key is append-only.
 - The server's own age private key decrypts `secrets/`, so it holds the **append-only** key and the
   repository passwords - enough to write a backup and read one, never enough to destroy history.
+
+## Deploying the metrics change of 2026-08-17 needs one manual run
+
+`home_server_jellyfin_sessions` moved from the 5-minute tier to the 30-second one, so it moved from
+`home-server-slow.prom` to `home-server.prom`. node-exporter concatenates every `*.prom`, and the
+slow file is deliberately left alone on a fast-only tick - so on the first run after a `git pull`
+the new fast file and the *previous* slow file both carry that metric with the same labels, which is
+a genuine duplicate and fails the whole textfile scrape until the slow tier next runs.
+
+It heals itself within five minutes. To skip the gap entirely, force one full run after pulling:
+
+```bash
+./bin/collect-metrics.py --slow          # rewrites BOTH files with the new layout
+podman exec prometheus wget -q -O - \
+  'http://127.0.0.1:9090/api/v1/query?query=node_textfile_scrape_error'   # expect 0
+```

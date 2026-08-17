@@ -74,6 +74,46 @@ TEXTFILE = os.path.join(CACHE, "textfile", "home-server.prom")
 TEXTFILE_SLOW = os.path.join(CACHE, "textfile", "home-server-slow.prom")
 MARKER = os.path.expanduser("~/.cache/home-server/metrics-state")
 
+# THE TWO DOCUMENTS, AND WHY THEY ARE NOT SERIES.
+#
+# The dashboard's Home and Library pages need titles: what is playing, who
+# asked for what, which file is stuck. None of that can be a Prometheus label.
+# Cardinality is the obvious reason and it is the lesser one - the real one is
+# that source_playback below deliberately refuses to label a session with the
+# user, the device or the item, because a 400-day series of who watched what is
+# surveillance of the household rather than monitoring of a machine.
+#
+# A document is a different object from a series and that difference is the
+# whole argument: it is rewritten whole on every run, nothing accumulates, and
+# there is no history to mine. It answers "what is happening" and cannot answer
+# "what happened in March". Keep it that way - the moment any of this grows a
+# retention window, the refusal above has been reversed by accident.
+#
+# Split by CADENCE, not by page, for the reason TEXTFILE_SLOW already records: a
+# five-minute slice living in a thirty-second file would blink out nine ticks in
+# ten. So the split follows rate of change - a progress bar goes in the fast
+# one, a request queue in the slow one - and each carries its own generated_at
+# so the two go stale independently and the UI can say which one did.
+DOC_DIR = os.path.join(CACHE, "dashboard")
+DOC_ACTIVITY = os.path.join(DOC_DIR, "activity.json")
+DOC_LIBRARY = os.path.join(DOC_DIR, "library.json")
+DOC_SCHEMA = 1
+
+# How many not-yet-available requests get a title resolved per slow run. Each
+# one costs a separate call to jellyseerr's TMDB proxy, and the Requests panel
+# shows a handful - so the cap is the panel's depth plus headroom, NOT the 104
+# requests this host has. Named and logged rather than silent, because a cap
+# nobody can see reads as "that is all there is".
+REQUEST_TITLE_BUDGET = 12
+
+# The library tree, at the three prefixes three different processes see it
+# under. bin/promote-transcoded.py documents this at length; the collector needs
+# the same mapping to join a Tdarr row to an *arr record to a path on disk.
+MEDIA_HOST = "/mnt/media/library"
+MEDIA_ARR = "/data/library"
+MEDIA_TDARR = "/media/library"
+MEDIA_TYPES = ("movies", "documentaries", "series", "anime")
+
 # The cgroup root the user manager delegates. `io` is NOT delegated by default -
 # `cpu memory pids` are - and an undelegated controller is accepted silently and
 # does nothing, which is why host/butane/ucore.bu ships the drop-in. If this path
@@ -205,6 +245,54 @@ class Metrics:
 
     def render(self):
         return "\n".join(self.lines) + "\n"
+
+
+class Document:
+    """A JSON document accumulator, with a per-upstream answered/did-not record.
+
+    `sources` IS NOT OPTIONAL and it is the only reason this class exists rather
+    than a plain dict. Without it, "jellyseerr timed out" and "there are no
+    pending requests" are the same bytes - an empty list either way - and a page
+    rendering that as "nothing to approve" is the exact failure this repository
+    is written around. It is `mode.routes: false` applied to applications:
+    absent must never read as zero.
+
+    Nullable values are written as null and never omitted, so a key cannot
+    appear and disappear between runs and force a reader to guess which case it
+    is in. Same contract as verify-host.sh's `facts`.
+    """
+
+    def __init__(self):
+        self.body = {}
+        self.sources = {}
+
+    def note(self, name, ok, error=None):
+        """Record that an upstream did or did not answer this run."""
+        self.sources[name] = {
+            "ok": bool(ok),
+            "at": iso(now()) if ok else None,
+            "error": None if ok else (error or "did not answer"),
+        }
+
+    def set(self, key, value):
+        self.body[key] = value
+
+    def append(self, key, value):
+        self.body.setdefault(key, []).append(value)
+
+    def render(self, started):
+        doc = {"schema": DOC_SCHEMA, "generated_at": iso(started)}
+        doc.update(self.body)
+        doc["sources"] = self.sources
+        # sort_keys for a stable diff; ensure_ascii because a title can hold
+        # anything and this repository is ASCII end to end - a \uXXXX escape is
+        # still ASCII on the wire and decodes correctly in the browser.
+        return json.dumps(doc, sort_keys=True, ensure_ascii=True,
+                          separators=(",", ":")) + "\n"
+
+
+def iso(when):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
 
 
 # ------------------------------------------------------------------------------
@@ -1131,31 +1219,16 @@ def _arr_health(m, service, health):
 
 
 def source_jellyfin(m):
+    """Jellyfin's CONFIGURATION, which changes rarely and belongs in the slow
+    tier. The sessions moved to source_playback: a progress bar needs thirty
+    seconds, not five minutes, and a metric name may appear in only one of the
+    two .prom files - node-exporter concatenates them and a duplicate sample
+    fails the whole scrape.
+    """
     env = load_env()
     key = env.get("JELLYFIN_API_KEY", "")
     if not key:
         raise RuntimeError("JELLYFIN_API_KEY is not set")
-    sessions = api_get("jellyfin", "http://localhost:8096/Sessions",
-                       ["X-Emby-Token: " + key])
-    if not isinstance(sessions, list):
-        raise RuntimeError("unexpected /Sessions response")
-
-    # NO user, device or item label. They are unbounded in principle, and they
-    # are surveillance of the household - what is wanted is how hard the box is
-    # working, which the playback method answers on its own.
-    methods = {"directplay": 0, "directstream": 0, "transcode": 0}
-    for session in sessions:
-        if not session.get("NowPlayingItem"):
-            continue
-        method = str((session.get("PlayState") or {}).get("PlayMethod") or "")
-        methods[method.lower()] = methods.get(method.lower(), 0) + 1
-    for method, count in sorted(methods.items()):
-        m.add("home_server_jellyfin_sessions", count,
-              {"playback_method": method},
-              "Sessions actively playing something. A transcode is the "
-              "expensive case and the one worth watching.")
-    m.add("home_server_jellyfin_sessions_total", len(sessions), None,
-          "Connected sessions, playing or not.")
 
     # THE FOUR SWITCHES THAT COST 87 HOURS OF CPU DECODE. Trickplay has its OWN
     # hardware-acceleration settings, independent of playback's, and all three
@@ -1312,6 +1385,779 @@ def source_tdarr(m):
 
 
 # ------------------------------------------------------------------------------
+# The documents: what is playing, what is in flight, what the library holds
+# ------------------------------------------------------------------------------
+# Everything below writes a JSON document as well as, or instead of, series.
+# Read the DOC_* comment at the top of this file before adding to any of them -
+# particularly the part about why a session is not labelled.
+
+TICKS_PER_SECOND = 10_000_000
+
+
+def _seconds(ticks):
+    """Jellyfin counts in 100ns units. The division belongs here, not in the
+    browser: a client holding someone else's unit is how a number ends up out by
+    a factor of ten million with nothing to catch it."""
+    if not isinstance(ticks, (int, float)):
+        return None
+    return round(ticks / TICKS_PER_SECOND, 3)
+
+
+def _poster(item):
+    """(path, tag) for the dashboard's image proxy, or (None, None).
+
+    The path is bare and the tag is separate so the client can append its own
+    maxHeight without having to know whether a `?` is already there. An episode
+    borrows its series' poster, because a per-episode image is usually a
+    screenshot and reads as noise at 22x32.
+    """
+    if not isinstance(item, dict):
+        return None, None
+    tags = item.get("ImageTags") or {}
+    if tags.get("Primary") and item.get("Id"):
+        return "Items/%s/Images/Primary" % item["Id"], str(tags["Primary"])
+    if item.get("SeriesPrimaryImageTag") and item.get("SeriesId"):
+        return ("Items/%s/Images/Primary" % item["SeriesId"],
+                str(item["SeriesPrimaryImageTag"]))
+    return None, None
+
+
+def _episode_label(item):
+    """"S02E05", or the year for a film, or None."""
+    if not isinstance(item, dict):
+        return None
+    if item.get("Type") == "Episode":
+        season, number = item.get("ParentIndexNumber"), item.get("IndexNumber")
+        if isinstance(season, int) and isinstance(number, int):
+            return "S%02dE%02d" % (season, number)
+        return str(item.get("SeasonName") or "") or None
+    year = item.get("ProductionYear")
+    return str(year) if year else None
+
+
+def source_playback(m, doc):
+    """Who is watching what, at thirty-second resolution.
+
+    THE COUNTS CARRY NO IDENTITY AND THE DOCUMENT DOES. That is the whole
+    distinction this file is built on: home_server_jellyfin_sessions is a
+    400-day series and is therefore labelled by playback method only, because a
+    retained record of who watched what is surveillance of the household. The
+    document below names titles and devices and is overwritten every thirty
+    seconds with no history anywhere. Do not move a field from one to the other
+    without re-reading that sentence.
+    """
+    env = load_env()
+    key = env.get("JELLYFIN_API_KEY", "")
+    if not key:
+        # Note BEFORE raising. `sources` is the contract that keeps "did not
+        # answer" distinguishable from "nothing to report", and a source that
+        # raises its way out without recording anything breaks exactly that -
+        # the key would be absent, which is the one thing the document promises
+        # never happens.
+        doc.note("jellyfin", False, "JELLYFIN_API_KEY is not set")
+        doc.set("sessions", [])
+        raise RuntimeError("JELLYFIN_API_KEY is not set")
+    sessions = api_get("jellyfin", "http://localhost:8096/Sessions",
+                       ["X-Emby-Token: " + key])
+    if not isinstance(sessions, list):
+        doc.note("jellyfin", False, "sessions did not answer")
+        doc.set("sessions", [])
+        raise RuntimeError("unexpected /Sessions response")
+
+    methods = {"directplay": 0, "directstream": 0, "transcode": 0}
+    playing = []
+    for session in sessions:
+        item = session.get("NowPlayingItem")
+        state = session.get("PlayState") or {}
+        if not item:
+            continue
+        method = str(state.get("PlayMethod") or "").lower()
+        methods[method] = methods.get(method, 0) + 1
+
+        # TranscodingInfo is ABSENT ENTIRELY on a direct play, not an empty
+        # object - so its presence is the signal and `.get` on a None would
+        # raise. UNVERIFIED BRANCH: nothing was transcoding when this was
+        # written, so the hardware field below is read defensively and reports
+        # null rather than false when it cannot tell. null renders as a plain
+        # TRANSCODE badge; false renders as SW TRANSCODE, which is a much
+        # stronger claim and must not be made by accident.
+        transcoding = session.get("TranscodingInfo")
+        hardware = None
+        if isinstance(transcoding, dict):
+            accel = transcoding.get("HardwareAccelerationType")
+            if accel not in (None, ""):
+                hardware = str(accel).lower() not in ("none",)
+        poster, tag = _poster(item)
+        playing.append({
+            "id": str(session.get("Id") or item.get("Id") or ""),
+            "item_id": str(item.get("Id") or "") or None,
+            "title": str(item.get("Name") or "?"),
+            "series": str(item.get("SeriesName") or "") or None,
+            "sub": _episode_label(item),
+            "kind": "series" if item.get("Type") == "Episode" else "movie",
+            "user": str(session.get("UserName") or "") or None,
+            "client": str(session.get("Client") or "") or None,
+            "device": str(session.get("DeviceName") or "") or None,
+            # RemoteEndPoint is DELIBERATELY NOT CARRIED. Every session reports
+            # Caddy's own net-media address, because everything reaches Jellyfin
+            # through the proxy - so a local/remote badge built on it would be
+            # confidently wrong for every row, which cannot be spotted from a
+            # dashboard. DeviceName and Client are what actually distinguish.
+            "method": method or None,
+            "hardware": hardware,
+            "paused": bool(state.get("IsPaused")),
+            "position_s": _seconds(state.get("PositionTicks")),
+            "runtime_s": _seconds(item.get("RunTimeTicks")),
+            "width": item.get("Width"),
+            "height": item.get("Height"),
+            "poster": poster,
+            "poster_tag": tag,
+        })
+
+    for method, count in sorted(methods.items()):
+        m.add("home_server_jellyfin_sessions", count,
+              {"playback_method": method},
+              "Sessions actively playing something. A transcode is the "
+              "expensive case and the one worth watching.")
+    m.add("home_server_jellyfin_sessions_total", len(sessions), None,
+          "Connected sessions, playing or not.")
+    doc.set("sessions", playing)
+    doc.note("jellyfin", True)
+
+
+# How an *arr tracked-download state and a qBittorrent state become the one
+# vocabulary the dashboard renders. Both maps are exhaustive on purpose: an
+# unrecognised value falls through to a named state rather than to nothing, so a
+# new upstream string shows up as a row somebody can see instead of a row that
+# silently disappears.
+ARR_STATES = {
+    "downloading": "downloading",
+    "importpending": "importing",
+    "importing": "importing",
+    "importblocked": "error",
+    "failedpending": "error",
+    "failed": "error",
+    "ignored": "queued",
+}
+QBT_STATES = {
+    "downloading": "downloading", "metadl": "downloading",
+    "forceddl": "downloading", "alloc": "downloading",
+    "stalleddl": "stalled",
+    "uploading": "seeding", "forcedup": "seeding",
+    "stalledup": "seeding", "queuedup": "seeding",
+    "checkingdl": "importing", "checkingup": "importing",
+    "checkingresumedata": "importing", "moving": "importing",
+    "pauseddl": "queued", "queueddl": "queued", "stoppeddl": "queued",
+    "pausedup": "seeding", "stoppedup": "seeding",
+    "error": "error", "missingfiles": "error",
+}
+
+
+def source_transfers(m, doc):
+    """What is in flight, with a progress bar attached.
+
+    Everything here changes by the second, which is why it is in the fast tier
+    while the *arr counts and the Tdarr verdicts stay in the slow one.
+
+    THE *arr QUEUE OWNS AN IN-FLIGHT ITEM AND qBITTORRENT OWNS A SEEDING ONE,
+    joined on downloadId, which IS the torrent hash. Without that join the same
+    film is two rows - one from each side - for the whole of its download, and
+    the design's table is one row per file. The *arr side wins while it is
+    tracking, because it is the side that knows the title and why an import
+    failed; qBittorrent's row appears once the queue has let go of it.
+    """
+    env = load_env()
+    rows = []
+    tracked = set()
+
+    for name, port in (("sonarr", 8989), ("radarr", 7878)):
+        key = env.get("%s_API_KEY" % name.upper(), "")
+        if not key:
+            doc.note(name, False, "no API key")
+            continue
+        queue = api_get(name, "http://localhost:%d/api/v3/queue"
+                        "?pageSize=100&includeMovie=true&includeEpisode=true"
+                        % port, ["X-Api-Key: " + key])
+        records = queue.get("records") if isinstance(queue, dict) else None
+        if not isinstance(records, list):
+            doc.note(name, False, "queue did not answer")
+            continue
+        doc.note(name, True)
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("downloadId"):
+                tracked.add(str(rec["downloadId"]).lower())
+            rows.append(_arr_row(name, rec))
+
+    # Tdarr's WORKERS, not its file table: the table says what a file's verdict
+    # was, and only a live worker knows a transcode is running and how far in.
+    nodes = api_get("tdarr-server", "http://localhost:8266/api/v2/get-nodes")
+    if isinstance(nodes, dict):
+        doc.note("tdarr", True)
+        for node in nodes.values():
+            if not isinstance(node, dict):
+                continue
+            for worker in (node.get("workers") or {}).values():
+                if isinstance(worker, dict):
+                    rows.append(_tdarr_row(node, worker))
+    else:
+        doc.note("tdarr", False, "get-nodes did not answer")
+
+    port = env.get("PORT_QBITTORRENT_WEB", "8200")
+    torrents = api_get("qbittorrent",
+                       "http://localhost:%s/api/v2/torrents/info" % port)
+    if isinstance(torrents, list):
+        doc.note("qbittorrent", True)
+        states = {}
+        for tor in torrents:
+            if not isinstance(tor, dict):
+                continue
+            state = QBT_STATES.get(str(tor.get("state") or "").lower(), "queued")
+            states[state] = states.get(state, 0) + 1
+            if str(tor.get("hash") or "").lower() in tracked:
+                continue
+            rows.append(_qbt_row(tor, state))
+        for state, count in sorted(states.items()):
+            m.add("home_server_torrent_count", count, {"state": state},
+                  "Torrents by the state the dashboard groups them under. A "
+                  "COUNT, so it is safe to retain - the names are in the "
+                  "document, which is not.")
+    else:
+        doc.note("qbittorrent", False, "torrents did not answer")
+
+    doc.set("transfers", rows)
+    counts = {}
+    for row in rows:
+        counts[row["state"]] = counts.get(row["state"], 0) + 1
+    for state, count in sorted(counts.items()):
+        m.add("home_server_pipeline_items", count, {"state": state},
+              "Items in flight, by pipeline state. The titles are in "
+              "activity.json; only the counts are retained.")
+
+
+def _arr_row(service, rec):
+    movie = rec.get("movie") if isinstance(rec.get("movie"), dict) else None
+    episode = rec.get("episode") if isinstance(rec.get("episode"), dict) else None
+    size = rec.get("size")
+    left = rec.get("sizeleft")
+    progress = None
+    if isinstance(size, (int, float)) and size > 0 and isinstance(left, (int, float)):
+        progress = round(max(0.0, min(1.0, 1.0 - left / size)), 4)
+
+    state = ARR_STATES.get(str(rec.get("trackedDownloadState") or "").lower(),
+                           "downloading")
+    # A warning or error on the tracked status outranks the state: "downloading"
+    # with a statusMessage is what a stalled or unimportable item looks like,
+    # and reporting it as an ordinary download is how it stays invisible.
+    status = str(rec.get("trackedDownloadStatus") or "").lower()
+    messages = []
+    for entry in (rec.get("statusMessages") or []):
+        if isinstance(entry, dict):
+            messages.extend(str(x) for x in (entry.get("messages") or []))
+    if status == "error":
+        state = "error"
+    elif status == "warning" and state == "downloading":
+        state = "stalled"
+
+    title = None
+    if movie:
+        title = movie.get("title")
+    elif episode:
+        title = rec.get("title")
+    quality = ((rec.get("quality") or {}).get("quality") or {}).get("name")
+    return {
+        "id": "%s:queue:%s" % (service, rec.get("id")),
+        "title": str(title or rec.get("title") or "?"),
+        "sub": (str(movie.get("year")) if movie and movie.get("year")
+                else _arr_episode_label(episode)),
+        "kind": "movie" if service == "radarr" else "series",
+        "state": state,
+        "progress": progress,
+        "size": size if isinstance(size, (int, float)) else None,
+        "rate_bps": None,
+        "rate_note": str(rec.get("timeleft") or "") or None,
+        "note": (messages[0] if messages else None),
+        "source": service,
+        "quality": str(quality) if quality else None,
+        "poster": None,
+        "poster_tag": None,
+        "app": service,
+        "app_slug": _arr_slug(movie, rec),
+        "path": None,
+    }
+
+
+def _arr_episode_label(episode):
+    if not isinstance(episode, dict):
+        return None
+    season, number = episode.get("seasonNumber"), episode.get("episodeNumber")
+    if isinstance(season, int) and isinstance(number, int):
+        return "S%02dE%02d" % (season, number)
+    return None
+
+
+def _arr_slug(movie, rec):
+    """Radarr's titleSlug is the tmdbId as a string; Sonarr's is a real slug.
+    Either way it is what the application's own URL takes, so it travels rather
+    than being reconstructed in the browser from a guess."""
+    if isinstance(movie, dict) and movie.get("titleSlug"):
+        return str(movie["titleSlug"])
+    series = rec.get("series")
+    if isinstance(series, dict) and series.get("titleSlug"):
+        return str(series["titleSlug"])
+    return None
+
+
+def _tdarr_row(node, worker):
+    path = str(worker.get("file") or "")
+    pct = worker.get("percentage")
+    fps = worker.get("fps")
+    return {
+        "id": "tdarr:%s" % (path or worker.get("_id") or "?"),
+        "title": os.path.splitext(os.path.basename(path))[0] or "?",
+        "sub": None,
+        "kind": None,
+        "state": "transcoding",
+        "progress": (round(max(0.0, min(1.0, float(pct) / 100.0)), 4)
+                     if isinstance(pct, (int, float)) else None),
+        "size": None,
+        "rate_bps": None,
+        "rate_note": ("%.0f fps" % fps if isinstance(fps, (int, float)) and fps
+                      else str(worker.get("ETA") or "") or None),
+        "note": str(node.get("nodeName") or "") or None,
+        "source": "tdarr",
+        "quality": str(worker.get("outputFileSizeInGbytes") or "") or None,
+        "poster": None,
+        "poster_tag": None,
+        "app": "tdarr",
+        "app_slug": None,
+        "path": path or None,
+    }
+
+
+def _qbt_row(tor, state):
+    progress = tor.get("progress")
+    ratio = tor.get("ratio")
+    up = tor.get("upspeed")
+    down = tor.get("dlspeed")
+    rate = down if state in ("downloading", "stalled") else up
+    return {
+        "id": "qbt:%s" % str(tor.get("hash") or "?"),
+        "title": str(tor.get("name") or "?"),
+        "sub": None,
+        "kind": {"radarr": "movie", "sonarr": "series"}.get(
+            str(tor.get("category") or "")),
+        "state": state,
+        "progress": (round(max(0.0, min(1.0, float(progress))), 4)
+                     if isinstance(progress, (int, float)) else None),
+        "size": tor.get("size") if isinstance(tor.get("size"), int) else None,
+        # ZERO IS A FACT HERE, NOT A MISSING VALUE. A seeding torrent with no
+        # peers really is transferring 0 B/s, and collapsing that to null would
+        # make it indistinguishable from a rate nobody measured - which is the
+        # same distinction format.ts draws by returning "-" for NaN and never
+        # for 0. The UI decides whether to show the rate or the ratio; the
+        # document just says what is true.
+        "rate_bps": rate if isinstance(rate, (int, float)) else None,
+        "rate_note": ("ratio %.2f" % ratio
+                      if isinstance(ratio, (int, float)) else None),
+        "note": str(tor.get("category") or "") or None,
+        "source": "qbittorrent",
+        "quality": None,
+        "poster": None,
+        "poster_tag": None,
+        "app": "qbittorrent",
+        "app_slug": None,
+        "path": str(tor.get("content_path") or "") or None,
+    }
+
+
+def source_requests(m, doc):
+    """Jellyseerr: the one thing here somebody else is waiting on.
+
+    THE KEY IS READ FROM JELLYSEERR'S OWN CONFIG rather than copied into sops.
+    Prowlarr's and Bazarr's keys were read out of their config files once and
+    then stored, which is fine for a value nothing regenerates - but Jellyseerr
+    writes this one itself, so a stored copy is a second truth that goes stale
+    silently the first time it is rotated. config/ is backed up, so nothing is
+    lost by reading it where it lives.
+
+    A REQUEST CARRIES NO TITLE, which is the awkward part of this API: only a
+    tmdbId. An available request can borrow Jellyfin's copy through
+    jellyfinMediaId, but a pending one - exactly the case this panel exists for
+    - has no Jellyfin item at all, so its title costs one call to Jellyseerr's
+    own TMDB proxy. That is why REQUEST_TITLE_BUDGET exists and why it is
+    logged: the panel shows a handful, not all 104.
+    """
+    settings = os.path.join(REPO, "config", "jellyseerr", "settings.json")
+    try:
+        key = (json.loads(read_text(settings)).get("main") or {}).get("apiKey")
+    except (OSError, ValueError, AttributeError):
+        key = None
+    if not key:
+        doc.note("jellyseerr", False, "no API key in settings.json")
+        doc.set("requests", [])
+        raise RuntimeError("jellyseerr apiKey unreadable")
+
+    hdr = ["X-Api-Key: " + str(key)]
+    base = "http://127.0.0.1:5055/api/v1"
+    counts = api_get("jellyseerr", base + "/request/count", hdr)
+    if not isinstance(counts, dict):
+        doc.note("jellyseerr", False, "request/count did not answer")
+        doc.set("requests", [])
+        raise RuntimeError("jellyseerr did not answer")
+
+    for field in ("total", "pending", "approved", "processing", "available",
+                  "declined"):
+        m.add("home_server_requests", counts.get(field), {"status": field},
+              "Jellyseerr requests by status. Counts only - the titles live in "
+              "library.json, which is not retained.")
+
+    listing = api_get("jellyseerr", base + "/request?take=%d&sort=added"
+                      % REQUEST_TITLE_BUDGET, hdr)
+    results = listing.get("results") if isinstance(listing, dict) else None
+    rows = []
+    resolved = 0
+    if isinstance(results, list):
+        for req in results:
+            if not isinstance(req, dict):
+                continue
+            media = req.get("media") or {}
+            kind = "series" if str(req.get("type")) == "tv" else "movie"
+            title, year, poster, tag = None, None, None, None
+
+            # An available request has a Jellyfin item, so its poster comes from
+            # the same image proxy as everything else. A pending one does not,
+            # and Jellyseerr's own /imageproxy answers 400 for every path tried
+            # - through its public route too - so there is no second proxy to
+            # build. poster stays null and the UI owns the placeholder.
+            if media.get("jellyfinMediaId"):
+                # No tag, because getting one costs a Jellyfin call per request
+                # for three mini-posters. The URL still resolves; it just does
+                # not get the long immutable cache a tagged one does, which is
+                # the documented behaviour of the proxy rather than a hole in it.
+                poster = "Items/%s/Images/Primary" % media["jellyfinMediaId"]
+
+            tmdb = media.get("tmdbId")
+            if tmdb and resolved < REQUEST_TITLE_BUDGET:
+                path = "/movie/%s" % tmdb if kind == "movie" else "/tv/%s" % tmdb
+                detail = api_get("jellyseerr", base + path, hdr)
+                resolved += 1
+                if isinstance(detail, dict):
+                    title = detail.get("title") or detail.get("name")
+                    date = str(detail.get("releaseDate")
+                               or detail.get("firstAirDate") or "")
+                    year = date[:4] or None
+            rows.append({
+                "id": "jellyseerr:%s" % req.get("id"),
+                "title": str(title or "request %s" % req.get("id")),
+                "year": year,
+                "kind": kind,
+                "status": _request_status(req, media),
+                "status_code": req.get("status"),
+                "media_status_code": media.get("status"),
+                "requested_by": str((req.get("requestedBy") or {})
+                                    .get("displayName") or "") or None,
+                "requested_at": str(req.get("createdAt") or "") or None,
+                "poster": poster,
+                "poster_tag": tag,
+                "jellyfin_id": str(media.get("jellyfinMediaId") or "") or None,
+            })
+    if isinstance(results, list) and len(results) >= REQUEST_TITLE_BUDGET:
+        print("collect-metrics: request list capped at %d of %s"
+              % (REQUEST_TITLE_BUDGET, counts.get("total")), file=sys.stderr)
+
+    doc.set("requests", rows)
+    doc.set("request_counts", {k: counts.get(k) for k in
+                               ("total", "pending", "approved", "processing",
+                                "available", "declined")})
+    doc.note("jellyseerr", True)
+
+
+# Jellyseerr's MediaStatus, from its own server/constants/media.ts. Carried as
+# BOTH the integer and a derived string: the integer because it is the wire
+# value and this mapping is somebody else's to change, the string because a
+# dashboard must not hard-code a foreign enum. If they ever disagree, the
+# integer is authoritative and this table is the bug.
+MEDIA_STATUS = {1: "unknown", 2: "pending", 3: "processing",
+                4: "partial", 5: "available"}
+
+
+def _request_status(req, media):
+    if req.get("status") == 1:
+        return "pending"
+    if req.get("status") == 3:
+        return "declined"
+    return MEDIA_STATUS.get(media.get("status"), "unknown")
+
+
+# The two rules below are DUPLICATED FROM bin/promote-transcoded.py, which is
+# authoritative and carries the reasoning at length. They are copied rather than
+# imported because that script's filename is not importable and its load_env
+# deliberately DIES where this one degrades - "a reconciler that stops is safe,
+# a monitor that stops is blind" - so a shared module would have to flatten the
+# one difference that matters. CHANGE THEM TOGETHER: if the reconciler and the
+# dashboard disagree about which files are stuck, the dashboard is wrong.
+VIDEO_EXTENSIONS = (".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts",
+                    ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".vob", ".evo")
+TDARR_DONE_VERDICTS = ("Not required", "Transcode success")
+
+
+def _has_video(directory):
+    """True if the directory holds a video file, at any depth.
+
+    IT MUST NOT TEST FOR THE DIRECTORY. Tdarr deletes the video with
+    deleteParentFolderIfEmpty, but Radarr and Sonarr leave fanart.jpg,
+    poster.jpg and a .nfo behind - so the folder is never empty, never removed,
+    and a directory test reports every promoted film as still queued. That
+    mistake silently disabled promote-transcoded.py for nine months.
+    """
+    try:
+        for _root, _dirs, files in os.walk(directory):
+            for name in files:
+                if name.lower().endswith(VIDEO_EXTENSIONS):
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def source_catalogue(m, doc):
+    """What the library holds, what landed recently, and what is stuck.
+
+    The walk over queued/ is metadata only - 70 directories and no file reads -
+    which matters because CLAUDE.md measures this spindle losing 45% of its
+    throughput to a second concurrent reader. Measured at 0.001 s.
+    """
+    env = load_env()
+    key = env.get("JELLYFIN_API_KEY", "")
+    if key:
+        hdr = ["X-Emby-Token: " + key]
+        counts = api_get("jellyfin", "http://localhost:8096/Items/Counts", hdr)
+        if isinstance(counts, dict):
+            for field, kind in (("MovieCount", "movies"),
+                                ("SeriesCount", "series"),
+                                ("EpisodeCount", "episodes")):
+                m.add("home_server_library_items", counts.get(field),
+                      {"kind": kind}, "Items Jellyfin can see, by kind.")
+        latest = api_get("jellyfin",
+                         "http://localhost:8096/Items?SortBy=DateCreated"
+                         "&SortOrder=Descending&Recursive=true"
+                         "&IncludeItemTypes=Movie,Episode&Limit=200"
+                         "&Fields=DateCreated,SeriesName,ProductionYear", hdr)
+        items = latest.get("Items") if isinstance(latest, dict) else None
+        if isinstance(items, list):
+            doc.note("jellyfin", True)
+            week = now() - 7 * 86400
+            recent, done = [], []
+            for item in items:
+                row = _library_row(item)
+                if len(recent) < 12:
+                    recent.append(row)
+                added = _epoch(str(item.get("DateCreated") or "")[:19] + "Z")
+                if added and added >= week:
+                    done.append(row)
+            doc.set("recently_added", recent)
+            doc.set("recently_added_total", len(done))
+            doc.set("done", done[:120])
+            m.add("home_server_library_added_7d", len(done), None,
+                  "Items Jellyfin first saw in the last seven days.")
+        else:
+            doc.note("jellyfin", False, "item list did not answer")
+    else:
+        doc.note("jellyfin", False, "JELLYFIN_API_KEY is not set")
+
+    _library_sizes(m, env, doc)
+    doc.set("attention", _attention_rows(m, doc))
+    doc.set("totals", _subtitle_totals(m, env, doc))
+
+
+def _subtitle_totals(m, env, doc):
+    """The subtitle backlog, per ITEM - which is not the number already on the
+    dashboard, and the difference is not a bug in either.
+
+    home_server_subtitles_missing comes from Bazarr's badges and counts missing
+    subtitle FILES: 1,038. This counts EPISODES with at least one missing
+    subtitle: 543. Most episodes here want both English and French, so
+    543 x ~2 ~= 1,038. Two different questions, so two different names - a
+    second series called subtitles_missing_something would be indistinguishable
+    from the first on a dashboard, which is the mistake
+    home_server_container_memory_high_bytes exists to avoid.
+    """
+    totals = {"no_subtitle_episodes": None, "no_subtitle_movies": None}
+    key = env.get("BAZARR_API_KEY", "")
+    if not key:
+        doc.note("bazarr", False, "no API key")
+        return totals
+    hdr = ["X-API-KEY: " + key]
+    answered = False
+    for path, field, kind in (("episodes", "no_subtitle_episodes", "episodes"),
+                              ("movies", "no_subtitle_movies", "movies")):
+        wanted = api_get("bazarr",
+                         "http://localhost:6767/api/%s/wanted?length=1" % path,
+                         hdr)
+        if isinstance(wanted, dict) and isinstance(wanted.get("total"), int):
+            answered = True
+            totals[field] = wanted["total"]
+            m.add("home_server_subtitles_wanted_items", wanted["total"],
+                  {"kind": kind},
+                  "Items with at least one missing subtitle. NOT the same as "
+                  "home_server_subtitles_missing, which counts missing subtitle "
+                  "FILES - most episodes here want two languages, so that "
+                  "number is roughly twice this one.")
+    doc.note("bazarr", answered, None if answered else "wanted did not answer")
+    return totals
+
+
+def _library_row(item):
+    poster, tag = _poster(item)
+    return {
+        "id": "jf:%s" % item.get("Id"),
+        "item_id": str(item.get("Id") or "") or None,
+        "title": str(item.get("SeriesName") or item.get("Name") or "?"),
+        "sub": _episode_label(item),
+        "kind": "series" if item.get("Type") == "Episode" else "movie",
+        "state": "done",
+        "progress": 1.0,
+        "size": None,
+        "rate_bps": None,
+        "rate_note": None,
+        "note": None,
+        "source": "jellyfin",
+        "quality": None,
+        "poster": poster,
+        "poster_tag": tag,
+        "app": "jellyfin",
+        "app_slug": None,
+        "added_at": str(item.get("DateCreated") or "") or None,
+        "path": None,
+    }
+
+
+def _library_sizes(m, env, doc):
+    """Bytes and items per library, from the *arr records rather than from du.
+
+    A `du` over 7.3 TB on a 7200rpm spindle is minutes of head travel for a
+    number both applications already hold exactly. The root folder is what
+    distinguishes the four libraries, and queued/ against transcoded/ is what
+    distinguishes "waiting" from "served".
+    """
+    for name, port, path in (("radarr", 7878, "/api/v3/movie"),
+                             ("sonarr", 8989, "/api/v3/series")):
+        key = env.get("%s_API_KEY" % name.upper(), "")
+        if not key:
+            doc.note(name, False, "no API key")
+            continue
+        records = api_get(name, "http://localhost:%d%s" % (port, path),
+                          ["X-Api-Key: " + key])
+        if not isinstance(records, list):
+            doc.note(name, False, "library list did not answer")
+            continue
+        doc.note(name, True)
+        items, sizes, files = {}, {}, {}
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            root = str(rec.get("rootFolderPath") or "").rstrip("/")
+            label = root.rsplit("/", 1)[-1] or "?"
+            stage = "transcoded" if "/transcoded/" in root + "/" else "queued"
+            bucket = (label, stage)
+            items[bucket] = items.get(bucket, 0) + 1
+            stats = rec.get("statistics") or {}
+            sizes[bucket] = sizes.get(bucket, 0) + (
+                stats.get("sizeOnDisk") or rec.get("sizeOnDisk") or 0)
+            files[bucket] = files.get(bucket, 0) + (
+                stats.get("episodeFileCount")
+                or (1 if rec.get("hasFile") else 0))
+        for (label, stage), count in sorted(items.items()):
+            labels = {"library": label, "stage": stage}
+            m.add("home_server_library_records", count, labels,
+                  "Records the *arr application holds for this library and "
+                  "stage. A record with no file is a wanted item, not a file.")
+            m.add("home_server_library_files", files.get((label, stage), 0),
+                  labels, "Media files present for this library and stage.")
+            m.add("home_server_library_bytes", sizes.get((label, stage), 0),
+                  labels, "Bytes on disk, as the *arr application accounts for "
+                  "them. Not a du - see _library_sizes.")
+
+
+def _attention_rows(m, doc):
+    """Files that are stuck, and the difference between stuck and patient.
+
+    `gone=False, arrived=False` is what a live transcode looks like AND what an
+    abandoned one looks like, which is why promote-transcoded.py used to report
+    an abandoned file as "waiting on Tdarr" for ever. A file still sitting in
+    queued/ with its video intact, against which Tdarr has already recorded a
+    finished verdict, is one the flow gave up on - and that is the one finding
+    on this page that nothing else in the stack surfaces.
+    """
+    finished = set()
+    body = json.dumps({"data": {"collection": "FileJSONDB", "mode": "getAll"}})
+    try:
+        res = subprocess.run(
+            ["podman", "exec", "-i", "tdarr-server", "curl", "-s",
+             "--max-time", "10", "-X", "POST",
+             "-H", "Content-Type: application/json", "--data-binary", "@-",
+             "http://localhost:8266/api/v2/cruddb"],
+            input=body, capture_output=True, text=True, timeout=20, check=False)
+        rows = json.loads(res.stdout) if res.returncode == 0 else None
+        if isinstance(rows, list):
+            for row in rows:
+                if (isinstance(row, dict)
+                        and str(row.get("TranscodeDecisionMaker") or "")
+                        in TDARR_DONE_VERDICTS):
+                    finished.add(str(row.get("file") or ""))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+
+    out = []
+    stalled = queued = 0
+    for kind in MEDIA_TYPES:
+        root = os.path.join(MEDIA_HOST, "queued", kind)
+        try:
+            entries = sorted(os.scandir(root), key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir() or not _has_video(entry.path):
+                continue
+            tdarr_path = entry.path.replace(MEDIA_HOST, MEDIA_TDARR, 1)
+            abandoned = any(p.startswith(tdarr_path) for p in finished)
+            stalled += 1 if abandoned else 0
+            queued += 0 if abandoned else 1
+            out.append({
+                "id": "queued:%s" % entry.path,
+                "title": entry.name,
+                "sub": None,
+                "kind": "movie" if kind in ("movies", "documentaries") else "series",
+                "state": "stalled" if abandoned else "queued",
+                "progress": None,
+                "size": None,
+                "rate_bps": None,
+                "rate_note": None,
+                "note": ("Tdarr recorded a finished verdict and the file is "
+                         "still here" if abandoned else None),
+                "source": "tdarr" if abandoned else "filesystem",
+                "quality": None,
+                "poster": None,
+                "poster_tag": None,
+                "app": "tdarr" if abandoned else None,
+                "app_slug": None,
+                "path": entry.path,
+            })
+    m.add("home_server_pipeline_stalled", stalled, None,
+          "Files in queued/ against which Tdarr has recorded a finished "
+          "verdict - i.e. the flow abandoned them. Derived the same way "
+          "bin/promote-transcoded.py derives STUCK; if the two disagree, this "
+          "one is wrong.")
+    m.add("home_server_pipeline_queued", queued, None,
+          "Files in queued/ still waiting for Tdarr. Zero is the healthy "
+          "steady state, not a fault.")
+    doc.note("filesystem", True)
+    return out
+
+
+# ------------------------------------------------------------------------------
 # The collector's own record
 # ------------------------------------------------------------------------------
 # There is deliberately no home_server_collector_up 1. A sample asserting
@@ -1334,18 +2180,35 @@ def source_tdarr(m):
 # vanish for nine ticks out of ten and reappear on the tenth - a sawtooth of
 # gaps that looks exactly like a flapping disk. node-exporter globs *.prom, so a
 # second file is simply served unchanged in between.
+# (name, function, slow, document). The fourth field is which document the
+# source writes into, and a source that writes one is called with (m, doc)
+# instead of (m) - the two call shapes are worth the little ugliness in main()
+# because the alternative is threading an unused argument through the seven
+# sources that produce no document at all.
+#
+# THE FAST TIER GAINED TWO APPLICATION SOURCES, WHICH BREAKS THE OLD RULE THAT
+# APPLICATION POLLS ARE SLOW, and the reason is worth stating: the slow tier is
+# five minutes, and a progress bar five minutes out of date is not stale, it is
+# wrong. Both new sources are progress - a playback position and a download
+# percentage - so they go where the resolution is. Measured cost: one
+# `podman exec ... curl` is about 0.12 s, these add five, and the whole fast
+# tier was 0.114 s against a 30 s budget.
 SOURCES = (
-    ("filesystems", source_filesystems, False),
-    ("network", source_network, False),
-    ("containers", source_containers, False),
-    ("gpu", source_gpu, False),
-    ("sensors", source_sensors, False),
-    ("status", source_status, False),
-    ("smart", source_smart, True),
-    ("arr", source_arr, True),
-    ("jellyfin", source_jellyfin, True),
-    ("torrent", source_torrent, True),
-    ("tdarr", source_tdarr, True),
+    ("filesystems", source_filesystems, False, None),
+    ("network", source_network, False, None),
+    ("containers", source_containers, False, None),
+    ("gpu", source_gpu, False, None),
+    ("sensors", source_sensors, False, None),
+    ("status", source_status, False, None),
+    ("playback", source_playback, False, "activity"),
+    ("transfers", source_transfers, False, "activity"),
+    ("smart", source_smart, True, None),
+    ("arr", source_arr, True, None),
+    ("jellyfin", source_jellyfin, True, None),
+    ("torrent", source_torrent, True, None),
+    ("tdarr", source_tdarr, True, None),
+    ("requests", source_requests, True, "library"),
+    ("catalogue", source_catalogue, True, "library"),
 )
 
 
@@ -1353,6 +2216,29 @@ def write_textfile(path, body):
     """Atomic replace. os.replace cannot be interrupted halfway within one
     filesystem, and node-exporter globs *.prom - so the .tmp is never read and a
     reader never sees a partial file."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="ascii") as fh:
+            fh.write(body)
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        print("collect-metrics: cannot write %s: %s" % (path, exc),
+              file=sys.stderr)
+        return False
+
+
+def write_document(path, body):
+    """Atomic replace, with the .tmp INSIDE the served directory.
+
+    THAT IS NOT A DETAIL. The dashboard container reads this over a rootless
+    bind mount, so the file has to be container_file_t - which it gets by being
+    CREATED in a directory that already is. A file written to /tmp and renamed
+    in keeps tmp_t, and the container gets permission denied on something that
+    looks perfectly ordinary from the host. Same trap status.json's second copy
+    documents, from the other direction.
+    """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -1400,6 +2286,10 @@ def write_marker(ok, started, duration, failed, series):
               file=sys.stderr)
 
 
+def _doc_path(key):
+    return DOC_ACTIVITY if key == "activity" else DOC_LIBRARY
+
+
 def main():
     only = None
     to_stdout = "--print" in sys.argv
@@ -1416,8 +2306,10 @@ def main():
 
     m = Metrics()
     slow = Metrics()
+    docs = {"activity": Document(), "library": Document()}
+    wrote_doc = set()
     failed = []
-    for name, fn, is_slow in SOURCES:
+    for name, fn, is_slow, doc_key in SOURCES:
         if only and name != only:
             continue
         if is_slow and not slow_due:
@@ -1425,13 +2317,25 @@ def main():
         target = slow if is_slow else m
         t0 = now()
         try:
-            fn(target)
+            if doc_key:
+                fn(target, docs[doc_key])
+                wrote_doc.add(doc_key)
+            else:
+                fn(target)
             up = 1
         except Exception as exc:  # noqa: BLE001 - one source must not stop the rest
             up = 0
             failed.append(name)
             print("collect-metrics: source %s failed: %s" % (name, exc),
                   file=sys.stderr)
+            # A DOCUMENT SOURCE THAT RAISED STILL COUNTS AS HAVING WRITTEN.
+            # It has already called doc.note(..., False) on its way down, so the
+            # document goes out saying which upstream did not answer - which is
+            # the entire reason `sources` exists. Skipping the write here would
+            # leave the previous file in place and the page would render a dead
+            # application as fresh data.
+            if doc_key:
+                wrote_doc.add(doc_key)
         target.add("home_server_collector_source_up", up, {"source": name},
                    "1 when this source produced its series on the last run.")
         target.add("home_server_collector_source_duration_seconds",
@@ -1463,6 +2367,9 @@ def main():
         sys.stdout.write(m.render())
         if slow.count:
             sys.stdout.write(slow.render())
+        for key in sorted(wrote_doc):
+            sys.stdout.write("# %s\n%s" % (os.path.basename(_doc_path(key)),
+                                           docs[key].render(started)))
     else:
         if not write_textfile(TEXTFILE, m.render()):
             failed.append("write")
@@ -1472,6 +2379,13 @@ def main():
         if slow.count and not write_textfile(TEXTFILE_SLOW, slow.render()):
             failed.append("write_slow")
             failed.append("write")
+        # Same rule for the documents, and for the same reason: the slow one is
+        # left alone on a fast-only tick rather than rewritten empty. Its own
+        # generated_at is what tells the page how old it is, so a carried-forward
+        # file cannot read as current.
+        for key in sorted(wrote_doc):
+            if not write_document(_doc_path(key), docs[key].render(started)):
+                failed.append("write_%s" % key)
 
     write_marker(not failed, started, duration, failed, m.count)
     return 1 if failed else 0
