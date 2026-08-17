@@ -249,15 +249,81 @@ else
 	bad deploy.update_policy "automatic update policy is '${policy:-none}', expected 'stage'"
 fi
 
-# THE CHECK THAT CATCHES A SILENTLY-STOPPED UPDATER. If ublue ever rotates its
-# signing key, or /boot fills, nothing stages - and that is indistinguishable
-# from a stream with no new releases unless the run's exit status is asserted.
+# THE CHECKS THAT CATCH A STOPPED UPDATER. If ublue ever rotates its signing
+# key, or /boot fills, nothing stages - and that is indistinguishable from a
+# stream with no new releases unless the run's exit status is asserted.
 if [ "$(systemctl is-enabled rpm-ostreed-automatic.timer 2>/dev/null)" = enabled ]; then
 	ok deploy.update_timer "rpm-ostreed-automatic.timer enabled"
 else
 	bad deploy.update_timer "rpm-ostreed-automatic.timer is not enabled - nothing checks for updates"
 fi
 check_timer_run deploy.update_run "OS update check" 86400 rpm-ostreed-automatic.service
+
+# AND THE ONE THAT CATCHES A STALLED UPDATER, WHICH IS A DIFFERENT FAULT. The
+# two above prove the timer is armed and that it ran to completion. Neither can
+# tell "you are up to date" from "this updater has stopped seeing updates", and
+# on 2026-08-17 those were the same sentence: rpm-ostree reported "No updates
+# available" while ghcr.io held a newer amd64 manifest, and had done since a
+# `rpm-ostree cleanup -r` removed a staged deployment without clearing whatever
+# the upgrade path compares against. Every other signal here read green.
+#
+# NOT UNDER --greenboot. This is the only check that talks to the internet, and a
+# registry round trip must never take part in deciding whether the OS rolls
+# itself back. It is also the only one that would make a rollback depend on DNS.
+#
+# WARN, NEVER FAIL, for the reason the Logs and Metrics sections give: a reboot
+# does not fix a stalled updater, and a FAIL here would block bin/reboot-host.sh
+# and bin/reboot-when-staged.sh - the trap this battery has now hit three times.
+# It does mean the generic CheckFailing alert rule (== 3) cannot see it, so
+# apps/prometheus/rules/ carries an OsImageStale rule aimed at this id.
+#
+# COMPARING LIKE WITH LIKE IS THE WHOLE DIFFICULTY, and the obvious version is
+# wrong every single time. rpm-ostree records the PLATFORM MANIFEST digest in
+# container-image-reference-digest; `skopeo inspect` reports the INDEX digest.
+# Both are sha256, both look like the answer, and comparing them yields a check
+# that fires for ever on a perfectly current host. The ref is a two-entry OCI
+# index, so the remote side must be resolved to THIS host's architecture first.
+image_digest_local="" image_digest_remote="" image_arch=""
+if [ -z "$GREENBOOT" ] && [ -n "${booted_ref:-}" ] && [ "${booted_ref:-}" != "-" ]; then
+	image_ref=${booted_ref#*:}; image_ref=${image_ref#docker://}
+	# podman's arch, not uname's: OCI says amd64 where uname says x86_64.
+	image_arch=$(podman info --format '{{.Host.Arch}}' 2>/dev/null)
+	image_raw=$(timeout 20 skopeo inspect --raw "docker://$image_ref" 2>/dev/null)
+	# An index resolves per architecture; a single-arch ref carries no
+	# .manifests at all, and there its own digest is the answer.
+	image_digest_remote=$(jq -r --arg a "${image_arch:-amd64}" \
+		'if .manifests then (.manifests[] | select(.platform.architecture == $a
+		 and .platform.os == "linux") | .digest) else "" end' \
+		<<<"$image_raw" 2>/dev/null | head -1)
+	[ -n "$image_digest_remote" ] || image_digest_remote=$(timeout 20 \
+		skopeo inspect --no-tags "docker://$image_ref" 2>/dev/null \
+		| jq -r '.Digest // ""' 2>/dev/null)
+
+	# Against what WOULD run, not what is running. A staged deployment matching
+	# the remote is up to date and pending, which is the ordinary state between
+	# the nightly stage and the Sunday window - not a finding.
+	image_digest_local=$(jq -r '(.deployments[] | select(.staged)
+		| ."container-image-reference-digest") // empty' <<<"$status_json" 2>/dev/null)
+	[ -n "$image_digest_local" ] || image_digest_local=$(jq -r '(.deployments[]
+		| select(.booted) | ."container-image-reference-digest") // empty' \
+		<<<"$status_json" 2>/dev/null)
+fi
+
+if [ -n "$GREENBOOT" ]; then
+	: # deliberately not measured on the rollback path - see above
+elif [ -z "$image_digest_remote" ] || [ -z "$image_digest_local" ]; then
+	# ONLY AN EXPLICIT ANSWER COUNTS, the same rule as the nightly off-site
+	# delete probe. No network, no skopeo, an index carrying no entry for this
+	# architecture - all inconclusive, and a DNS blip must never be able to read
+	# as a stalled updater.
+	note deploy.image_digest "could not resolve the published image digest - not measured"
+elif [ "$image_digest_local" = "$image_digest_remote" ]; then
+	ok deploy.image_digest "running the published ${image_arch:-} image (${image_digest_local:7:12})"
+else
+	warn deploy.image_digest "a NEWER image is published and nothing has staged it - booted ${image_digest_local:7:12}, published ${image_digest_remote:7:12}; 'sudo rpm-ostree upgrade' is the first thing to try"
+fi
+fact image_digest_local  "$image_digest_local"
+fact image_digest_remote "$image_digest_remote"
 
 # Only ONE updater may be armed. Two would both write deployments into a /boot
 # that holds two kernels, and the loser fails overnight with nobody watching.
@@ -750,6 +816,22 @@ if [ -z "$GREENBOOT" ]; then
 			# act on is how someone learns to ignore this whole block.
 			if [ "$uptime_s" -lt 86400 ]; then
 				ok "$id" "no $label recorded yet (up $((uptime_s / 60))m) - not yet due"
+			elif [ "$sev" = warn ]; then
+				# HONOUR THE DECLARED SEVERITY HERE TOO. This used to be an
+				# unconditional `bad`, which overrode a caller that had
+				# explicitly chosen WARN - on the one path with the LEAST
+				# information, where all that is known is that a marker is
+				# absent. That is how a workstation-side retention job came to
+				# block an OS reboot: backup.offsite_prune_age is declared
+				# warn, reported fail, and bin/reboot-host.sh gated the whole
+				# battery.
+				#
+				# BRANCHED RATHER THAN `"$sev" "$id"`, which is the tidier
+				# spelling and would be wrong: bin/lint-repo.sh counts ids
+				# preceded by a LITERAL ok|bad|warn|note, so the variable form
+				# silently drops both callers from lint's coverage. Same lesson
+				# as the boot_free branches above.
+				warn "$id" "no $label has EVER been recorded"
 			else
 				bad "$id" "no $label has EVER been recorded"
 			fi

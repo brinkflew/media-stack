@@ -46,6 +46,7 @@ DRY=""
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
+warn() { printf '  \033[33mWARN\033[0m  %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; }
 die()  { printf '\n\033[31mreboot-host: %s\033[0m\n' "$*" >&2; exit 1; }
 # -n matters: without it ssh reads and forwards stdin, so every pre-flight call
@@ -59,13 +60,38 @@ say "Pre-flight on $HOST"
 # ------------------------------------------------------------------------------
 sshq true 2>/dev/null || die "cannot reach $HOST"
 
-# The whole battery, not a subset. If the host is unhealthy NOW, a reboot turns
-# one problem into two and you will not know which caused which.
-if sshq '/var/home-server/bin/verify-host.sh --quiet'; then
-	ok "verify-host passes"
+# GATE ON --greenboot, REPORT THE WHOLE BATTERY. This used to `die` on the full
+# battery, on the reasoning that a reboot turns one problem into two - which is
+# right about the problems a reboot can turn into two, and wrong about the rest.
+# The full battery also covers containers, the backup and the checkout, none of
+# which a reboot affects either way, and it covers findings that ONLY a reboot
+# can clear. On 2026-08-17 both kinds were present at once: greenboot.verdict was
+# red from a rejected boot, clearable only by booting again, and
+# backup.offsite_prune_age was a workstation job that had never run. Between them
+# they made this script refuse to start - so the remedy for the first finding was
+# blocked by the first finding. Same shape as the two traps verify-host.sh
+# documents, one layer up, and the argument at the post-reboot gate below had
+# already been made and simply never applied here.
+#
+# So --greenboot is the refusal, exactly as at line 203 and in
+# bin/reboot-when-staged.sh, and the full battery is printed for the operator to
+# weigh at the typed confirmation. The gates that follow - /boot, the encoder,
+# the backup state - are unchanged and still refuse on their own.
+if sshq '/var/home-server/bin/verify-host.sh --greenboot' >/dev/null 2>&1; then
+	ok "verify-host --greenboot passes"
 else
-	sshq '/var/home-server/bin/verify-host.sh' 2>&1 | sed 's/^/  /'
-	die "the host is not healthy - fix that before rebooting into a new deployment"
+	sshq '/var/home-server/bin/verify-host.sh --greenboot' 2>&1 | sed 's/^/  /' || true
+	die "the host fails its own boot health check - a new deployment would be judged against this"
+fi
+
+# Run it rather than reading status.json, which the hourly timer leaves up to an
+# hour stale - and this is the one moment where a stale answer is worst.
+if sshq '/var/home-server/bin/verify-host.sh --quiet' >/dev/null 2>&1; then
+	ok "the full battery is clean too"
+else
+	warn "the full battery reports findings this reboot does NOT gate on -"
+	warn "read them before confirming; a reboot clears some and none of the rest:"
+	sshq '/var/home-server/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
 fi
 
 boot_free=$(sshq "df -Pm /boot | awk 'NR==2 {print \$4}'")
@@ -124,6 +150,9 @@ cat <<EOF
 
   This reboots $HOST. It has no console and no BMC, so if it does not come
   back you are driving to it. $rollback_note
+
+  The pre-flight above hard-refused only on the boot-relevant checks. Anything
+  it printed as WARN is yours to weigh here - this is where you accept it.
 
   Do this on a day you could physically reach the machine.
 

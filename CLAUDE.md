@@ -600,6 +600,14 @@ seconds; and **resolution**, so you are told when it stops. The first two are wh
 channel is still being read in six months - the same argument this file already makes about
 `journalctl -p err`. `repeat_interval` is **12h for warnings, 4h for critical**.
 
+**`CheckFailing` covers all 159 check ids and every future one - but only at FAIL.** Its expression
+is `home_server_check_status == 3`, so **a check that is deliberately WARN never notifies**, and
+several here are WARN precisely because they must not block a reboot. Usually that is right: a WARN
+belongs in the MOTD and the dashboard, not on a phone. Where it is not - `deploy.image_digest`,
+which is WARN so that a stalled updater cannot block the OS updates it is complaining about not
+getting - **the check needs a targeted rule of its own** (`OsImageStale`, `== 2`, `for: 6h`).
+Adding a WARN check and expecting the generic rule to carry it is the silent half of this.
+
 **The bridge is the only image here with no rolling major tag**, which is the objection that ruled
 out VictoriaMetrics for the store. It is accepted on a distinction that holds: VictoriaMetrics would
 have held every byte of history, and `ntfy-alertmanager` holds **nothing** - it is stateless glue
@@ -1575,9 +1583,20 @@ Conclusions from auditing the running host. Do not rediscover these:
     gates its pre-flight on the FULL battery and re-checks `/boot` itself, and
     `bin/reboot-when-staged.sh` does the same, each against its own `BOOT_MIN_MB=160`.
   - **`rpm-ostree cleanup -r` removes TWO deployments, not one**, when something is staged: it takes
-    the pending update along with the rollback (`deployment count change: -2`). Nothing is lost -
-    `rpm-ostreed-automatic.timer` re-stages nightly - but `greenboot.armed` warns "only 1 deployment,
-    nothing to roll back to" until it does, which reads like a fault and is not.
+    the pending update along with the rollback (`deployment count change: -2`), and `greenboot.armed`
+    then warns "only 1 deployment, nothing to roll back to" until another stages.
+  - **AND THE UPDATE IT TOOK MAY NOT COME BACK.** This entry used to say "nothing is lost -
+    `rpm-ostreed-automatic.timer` re-stages nightly", which was assumed rather than measured, and
+    is false. After the 2026-08-16 `cleanup -r`, the next two automatic runs staged **nothing**, the
+    later one exiting in 9 seconds, while `rpm-ostree upgrade --check` reported *"No updates
+    available"* - with a newer amd64 manifest sitting on ghcr.io the whole time. The apparent
+    mechanism is that `cleanup -r` removes the *deployment* and leaves the pulled image in ostree's
+    container store, so the upgrade path compares the remote against what it already holds rather
+    than against what is booted. **A stalled updater and a fully current host produce the identical
+    sentence**, which is why this went unnoticed for a day and would have gone unnoticed for ever:
+    `deploy.update_timer` and `deploy.update_run` prove the timer is armed and ran, and both were
+    green throughout. `deploy.image_digest` is the check that closes it - see below for the trap in
+    writing it.
 - **A CHECK THAT COUNTS THE UNIT EXECUTING IT WILL BLOCK THE REMEDY FOR ITS OWN CONDITION**, and
   `host.failed_units` did exactly that. `greenboot-healthcheck.service` is what execs
   `verify-host.sh --greenboot`, and a failed unit stays failed for the rest of the boot - so one red
@@ -1591,6 +1610,19 @@ Conclusions from auditing the running host. Do not rediscover these:
   boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
   the later gated runs, which is where it bit. Same shape as the phantom units the rename left
   behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
+- **TWO SHA256 DIGESTS NAME THE SAME IMAGE, AND COMPARING THE WRONG PAIR IS WRONG FOR EVER.** The
+  obvious way to ask "is the booted OS image current" is to compare `rpm-ostree status --json`'s
+  `container-image-reference-digest` against `skopeo inspect`'s `.Digest`. **Those are different
+  kinds of digest**, so that check fires on every host, on every run, on a perfectly current
+  machine - and it looks completely reasonable while doing it. Verified by fetching each back:
+  rpm-ostree records the **platform manifest** (`application/vnd.oci.image.manifest.v1+json`), while
+  `skopeo inspect` reports the **image index** (proved by `skopeo inspect --raw | sha256sum`, which
+  equals it). `ucore:stable-nvidia-lts` is a two-entry index, `arm64/linux` and `amd64/linux`, so
+  the remote side must be resolved through `skopeo inspect --raw` to **this host's architecture**
+  before it means anything - and the architecture must come from `podman info` (`amd64`), not
+  `uname` (`x86_64`). This is the same class as the `home_server_container_memory_high_bytes` naming
+  decision: **a wrong number under a right name is undetectable from a dashboard.** Assert the two
+  sides are comparable before believing a digest check.
 - **`ExecMainExitTimestamp` is runtime state and a reboot wipes it**, so "this nightly job has never
   run" and "it has not run in the twenty minutes since boot" look identical. `bin/verify-host.sh`
   therefore only treats a missing run as a finding once uptime exceeds the timer's period -

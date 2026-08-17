@@ -128,6 +128,31 @@ groups:
             not here: `jq -r '.checks[]|select(.id=="{{ $labels.id }}")'
             /var/lib/home-server/status.json`.
 
+      - alert: OsImageStale
+        # THE ONE WARN THAT HAS TO NOTIFY, which is why it needs a rule of its
+        # own: CheckFailing is `== 3` and this check is deliberately a WARN. It
+        # cannot be a FAIL, because bin/reboot-host.sh and
+        # bin/reboot-when-staged.sh both refuse on an unhealthy battery and a
+        # stalled updater is not something a reboot fixes - so a FAIL here would
+        # block the OS security updates it is complaining about not getting.
+        #
+        # 6h rather than 30m because staged-but-not-applied is the normal state
+        # between the nightly stage and the Sunday reboot window, and this check
+        # compares against the STAGED digest when one exists. Firing sooner
+        # would alert on the system working as designed.
+        expr: home_server_check_status{id="deploy.image_digest"} == 2
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "A newer OS image is published and nothing has staged it"
+          description: >-
+            rpm-ostree can report "No updates available" with an update waiting -
+            observed 2026-08-17, after a `cleanup -r` removed a staged
+            deployment. `sudo rpm-ostree upgrade` is the first thing to try;
+            failing that, re-resolve the ref with `rpm-ostree rebase` to the
+            same image. The digests are in status.json under facts.
+
   # ===========================================================================
   # Units and containers
   # ===========================================================================
