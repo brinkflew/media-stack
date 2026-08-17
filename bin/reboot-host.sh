@@ -86,12 +86,18 @@ fi
 
 # Run it rather than reading status.json, which the hourly timer leaves up to an
 # hour stale - and this is the one moment where a stale answer is worst.
-if sshq '/var/home-server/bin/verify-host.sh --quiet' >/dev/null 2>&1; then
+#
+# CAPTURED ONCE, not run twice. The obvious spelling asks --quiet for the status
+# and then re-runs for the output, which is two full batteries - and since
+# deploy.image_digest each one now makes a registry call, so the pre-flight a
+# human is waiting on got measurably slower. Take the status and the text from
+# the same run.
+if battery=$(sshq '/var/home-server/bin/verify-host.sh' 2>&1); then
 	ok "the full battery is clean too"
 else
 	warn "the full battery reports findings this reboot does NOT gate on -"
 	warn "read them before confirming; a reboot clears some and none of the rest:"
-	sshq '/var/home-server/bin/verify-host.sh' 2>&1 | sed 's/^/  /' || true
+	printf '%s\n' "$battery" | sed 's/^/  /'
 fi
 
 boot_free=$(sshq "df -Pm /boot | awk 'NR==2 {print \$4}'")
