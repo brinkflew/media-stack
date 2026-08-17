@@ -660,7 +660,9 @@ worked.
 rules running - safe, but not what you asked for:
 
 ```bash
-podman exec prometheus promtool check rules /etc/prometheus/rules/*.yml
+# NOTE the `sh -c`: podman exec runs no shell, and promtool does not glob itself,
+# so the bare form fails with "path does not exist" and reads like a missing mount.
+podman exec prometheus sh -c 'promtool check rules /etc/prometheus/rules/*.yml'
 podman run --rm -v "$PWD/apps/alertmanager/alertmanager.yml:/c.yml:z" \
   --entrypoint amtool quay.io/prometheus/alertmanager:v0 check-config /c.yml
 ```
@@ -1552,7 +1554,7 @@ Conclusions from auditing the running host. Do not rediscover these:
 - **`/boot` costs one slot per distinct KERNEL+INITRAMFS, not per deployment**, holds exactly two
   (2 x 146 MB + 11 MB GRUB = 303 MB of 350 MB), and **cannot be grown** - `nvme0n1p4` is XFS, which
   cannot be shrunk by any tool, so enlarging it means repartitioning the disk that carries `config/`.
-  Four corrections learned by doing it wrong, on 2026-08-14 and again on 2026-08-16:
+  Five corrections learned by doing it wrong, on 2026-08-14 and again on 2026-08-16:
   - **`ostree admin pin 0` is wrong whenever something is staged.** Index 0 is then the *staged*
     deployment and the command fails with `Cannot pin staged deployment`. Derive the booted index:
     `rpm-ostree status --json | jq '[.deployments[]] | map(.booted) | index(true)'`.
@@ -1579,24 +1581,30 @@ Conclusions from auditing the running host. Do not rediscover these:
     could not act on its verdict: *"Boot counter exhausted but no rollback trigger set - manual
     intervention required"*. `rpm-ostree cleanup -r` reclaimed it to 171 MB, the same figure as
     2026-08-14. Nothing is lost by softening it there: the full battery still FAILs hourly into the
-    MOTD and `status.json`, and **both reboot paths refuse on their own `df`** - `bin/reboot-host.sh`
-    gates its pre-flight on the FULL battery and re-checks `/boot` itself, and
-    `bin/reboot-when-staged.sh` does the same, each against its own `BOOT_MIN_MB=160`.
+    MOTD and `status.json`, and **both reboot paths refuse on their own `df`** - each re-checks
+    `/boot` itself against its own `BOOT_MIN_MB=160`, independently of the battery. (Since
+    2026-08-17 `bin/reboot-host.sh` hard-gates its pre-flight on `--greenboot` rather than the full
+    battery, and prints the rest; that `df` is what still covers `/boot` there.)
   - **`rpm-ostree cleanup -r` removes TWO deployments, not one**, when something is staged: it takes
     the pending update along with the rollback (`deployment count change: -2`), and `greenboot.armed`
     then warns "only 1 deployment, nothing to roll back to" until another stages.
-  - **AND THE UPDATE IT TOOK MAY NOT COME BACK.** This entry used to say "nothing is lost -
-    `rpm-ostreed-automatic.timer` re-stages nightly", which was assumed rather than measured, and
-    is false. After the 2026-08-16 `cleanup -r`, the next two automatic runs staged **nothing**, the
-    later one exiting in 9 seconds, while `rpm-ostree upgrade --check` reported *"No updates
-    available"* - with a newer amd64 manifest sitting on ghcr.io the whole time. The apparent
-    mechanism is that `cleanup -r` removes the *deployment* and leaves the pulled image in ostree's
-    container store, so the upgrade path compares the remote against what it already holds rather
-    than against what is booted. **A stalled updater and a fully current host produce the identical
-    sentence**, which is why this went unnoticed for a day and would have gone unnoticed for ever:
-    `deploy.update_timer` and `deploy.update_run` prove the timer is armed and ran, and both were
-    green throughout. `deploy.image_digest` is the check that closes it - see below for the trap in
-    writing it.
+  - **AND THE UPDATE IT TOOK DOES NOT COME BACK ON ITS OWN.** This entry used to say "nothing is
+    lost - `rpm-ostreed-automatic.timer` re-stages nightly", which was assumed rather than measured,
+    and is false. After the 2026-08-16 `cleanup -r`, the next two automatic runs staged **nothing**,
+    the later one exiting in 9 seconds, while a newer amd64 manifest sat on ghcr.io throughout.
+- **`rpm-ostree upgrade --check` CAN BE WRONG, AND THE NIGHTLY UPDATER BELIEVES IT.** This is the
+  mechanism behind the entry above, and it was measured rather than reasoned about: on 2026-08-17,
+  within the same minute, `rpm-ostree upgrade --check` reported *"No updates available"* (exit 77)
+  and `sudo rpm-ostree upgrade` **staged an update immediately**. The tool warns about this itself -
+  *"Note: --check and --preview may be unreliable"*, rpm-ostree issue 1579 - and the consequence is
+  not cosmetic, because `rpm-ostreed-automatic.service` is driven by the same check and had
+  therefore been skipping a real update every night, in 9 seconds, exiting 0. **So the host can stop
+  taking OS security updates indefinitely while every signal reads green.**
+  `deploy.update_timer` and `deploy.update_run` prove the timer is armed and that it ran; neither
+  can see this, and both were green throughout. `deploy.image_digest` is the check that closes it -
+  see the digest trap below, which is the part that is easy to get wrong. **The remedy is
+  `sudo rpm-ostree upgrade` by hand**; it worked first try here, and neither `cleanup -m` nor a
+  re-`rebase` was needed.
 - **A CHECK THAT COUNTS THE UNIT EXECUTING IT WILL BLOCK THE REMEDY FOR ITS OWN CONDITION**, and
   `host.failed_units` did exactly that. `greenboot-healthcheck.service` is what execs
   `verify-host.sh --greenboot`, and a failed unit stays failed for the rest of the boot - so one red
