@@ -105,6 +105,34 @@ groups:
             ntfy-alertmanager, then ntfy - in that order, it is the direction
             the alert travels.
 
+      - alert: CollectorClientUnavailable
+        # AN APPLICATION THE COLLECTOR CANNOT POLL AT ALL, which is a different
+        # thing from one that answered with nothing - and the reason this rule
+        # exists is that the difference was invisible for months.
+        #
+        # api_get shelled `curl` inside the target container, and gluetun and
+        # jellyseerr ship only wget. Every call against them returned None, each
+        # caller guards with `if isinstance(x, dict)`, and so
+        # home_server_vpn_info was NEVER ONCE EMITTED while the source kept
+        # completing and kept writing source_up 1. Same shape as the shellcheck
+        # leg that reported "all checks passed" over 2,224 lines it never read.
+        #
+        # It belongs in THIS group rather than under degradation because it is a
+        # failure of the measuring apparatus, not of the thing measured: every
+        # series that endpoint would have produced is silently absent, and an
+        # absent series makes every other rule about it unfireable.
+        expr: home_server_collector_client_unavailable > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} container(s) have no HTTP client the collector can use"
+          description: >-
+            An application endpoint cannot be polled at all, so its series are
+            absent rather than zero - and nothing else here can alert on a series
+            that does not exist. The container name is on stderr:
+            `journalctl --user -u home-server-metrics -n 50`.
+
   # ===========================================================================
   # The battery
   # ===========================================================================
