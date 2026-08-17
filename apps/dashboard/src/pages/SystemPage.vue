@@ -15,8 +15,10 @@ import PanelBox from "@/components/PanelBox.vue";
 import MetricChart from "@/components/MetricChart.vue";
 import StatusDot from "@/components/StatusDot.vue";
 import UptimeBars from "@/components/UptimeBars.vue";
+import WindowPicker from "@/components/WindowPicker.vue";
 
 import { usePoll } from "@/composables/usePoll";
+import { useBatteryStale, useMetricsStale } from "@/composables/useStaleness";
 import { useHostStore } from "@/stores/host";
 import { instant, instantBy, labelsBy, range, value } from "@/api/prometheus";
 import { bySeverityThenTime, fetchAlerts } from "@/api/alerts";
@@ -28,7 +30,7 @@ import { useTimeWindow } from "@/composables/useTimeWindow";
 import { useCrosshair } from "@/composables/useCrosshair";
 
 const host = useHostStore();
-const { window: win, windows, setWindow, active } = useTimeWindow();
+const { window: win } = useTimeWindow();
 const cross = useCrosshair();
 
 // ---------------------------------------------------------------------------
@@ -340,21 +342,10 @@ function backupTone(key: string, limit: number): "ok" | "warn" | "fail" | "off" 
 // ---------------------------------------------------------------------------
 // Staleness, passed down to every panel rather than decided inside them
 // ---------------------------------------------------------------------------
-const metricsStale = computed(() => {
-  if (host.prometheusDown) return "prometheus is unreachable; this is the last answer it gave";
-  const f = host.collectorFreshness;
-  if (f.missing) return "the collector has never reported";
-  if (f.stale) return `the collector last ran ${fmt.duration(f.age)} ago; these numbers are frozen`;
-  return null;
-});
-
-const batteryStale = computed(() => {
-  if (host.statusNeverRun) return "the check battery has never run on this host";
-  const f = host.statusFreshness;
-  if (f.missing) return "status.json could not be read";
-  if (f.stale) return `the battery last ran ${fmt.duration(f.age)} ago`;
-  return null;
-});
+// Both live in @/composables/useStaleness now: four pages need the same two
+// sentences, and four copies is how they start disagreeing.
+const metricsStale = useMetricsStale();
+const batteryStale = useBatteryStale();
 
 const osLine = computed(() => {
   const booted = host.fact("booted_version");
@@ -431,17 +422,7 @@ const jellyfinSessions = usePoll(
       <span class="mono os">{{ osLine }}</span>
       <span v-if="staged" class="staged mono">{{ staged }} staged</span>
 
-      <div class="picker">
-        <button
-          v-for="w in windows"
-          :key="w.id"
-          class="pick mono"
-          :class="{ on: active === w.id }"
-          @click="setWindow(w.id)"
-        >
-          {{ w.label }}
-        </button>
-      </div>
+      <WindowPicker />
     </Teleport>
 
     <!-- The actionable strip. Only non-passing findings, worst first, capped
@@ -706,30 +687,6 @@ const jellyfinSessions = usePoll(
   border: 1px solid var(--warn-edge);
 }
 
-.picker {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--r-sm);
-  background: var(--field);
-  border: 1px solid var(--line);
-}
-
-.pick {
-  padding: 5px 11px;
-  border-radius: var(--r-xs);
-  font: var(--t-mono-md);
-  color: var(--fg-5);
-}
-
-.pick:hover {
-  color: var(--fg);
-}
-
-.pick.on {
-  background: oklch(1 0 0 / 0.09);
-  color: var(--fg);
-}
 
 /* --- actionable strip --- */
 .strip {

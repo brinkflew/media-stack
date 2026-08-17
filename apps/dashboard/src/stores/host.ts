@@ -34,7 +34,12 @@ import { instant, value } from "@/api/prometheus";
 import { usePoll } from "@/composables/usePoll";
 import { SignedOutError } from "@/api/http";
 import { isoToUnix } from "@/format";
+import { freshness, type Freshness } from "@/freshness";
 import type { Check, CheckStatus, StatusDocument } from "@/types";
+
+// Re-exported so existing importers of `Freshness` from this store keep working;
+// @/freshness is where it is defined.
+export type { Freshness };
 
 /** The battery runs hourly; the alert rule calls it stale at two hours. Same
  *  number here, so the dashboard and the phone never disagree. */
@@ -44,25 +49,6 @@ const COLLECTOR_STALE_S = 600;
 
 const STATUS_POLL_MS = 60_000;
 const PULSE_POLL_MS = 30_000;
-
-export interface Freshness {
-  label: string;
-  /** Seconds since the thing last succeeded. NaN when never, or unknown. */
-  age: number;
-  threshold: number;
-  stale: boolean;
-  /** True when the source has never reported at all, which is not the same
-   *  as being old - a fresh host and a broken one must not look alike. */
-  missing: boolean;
-}
-
-function freshness(label: string, at: number, now: number, threshold: number): Freshness {
-  if (!Number.isFinite(at) || at <= 0) {
-    return { label, age: Number.NaN, threshold, stale: true, missing: true };
-  }
-  const age = now - at;
-  return { label, age, threshold, stale: age > threshold, missing: false };
-}
 
 export const useHostStore = defineStore("host", () => {
   // --- status.json ---------------------------------------------------------

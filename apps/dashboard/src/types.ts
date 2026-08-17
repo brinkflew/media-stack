@@ -10,6 +10,18 @@
 // turns out to be wrong, and that must cost nothing.
 // =============================================================================
 
+/**
+ * The only four colours anything here may be, from the design brief: "Status has
+ * three colors only: teal healthy, amber degraded, red failing. Everything else
+ * is grey." `off` IS that grey and it is not a fourth status - it means nobody
+ * measured, which must never be rendered as healthy.
+ *
+ * Declared here rather than per-page because five modules now need it.
+ * StatusDot and MetricChart keep their own inline prop unions: those are
+ * component contracts, and churning them buys nothing.
+ */
+export type Tone = "ok" | "warn" | "fail" | "off";
+
 /** Ordered worst-last, so `Math.max` over the numeric rank is the verdict. */
 export type CheckStatus = "pass" | "note" | "warn" | "fail";
 

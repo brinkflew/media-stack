@@ -17,20 +17,21 @@ import PanelBox from "@/components/PanelBox.vue";
 import StatusDot from "@/components/StatusDot.vue";
 import ActivityBars from "@/components/ActivityBars.vue";
 import NetworkGraph from "@/components/NetworkGraph.vue";
+import StaleNote from "@/components/StaleNote.vue";
+import WindowPicker from "@/components/WindowPicker.vue";
 
 import { usePoll } from "@/composables/usePoll";
+import { useMetricsStale } from "@/composables/useStaleness";
 import { useTimeWindow } from "@/composables/useTimeWindow";
-import { useHostStore } from "@/stores/host";
+import { containerTone } from "@/health";
+import type { Tone } from "@/types";
 import { instant, instantBy, labelsBy, range, value } from "@/api/prometheus";
 import { SERVICES } from "@/queries";
 import { toPoints } from "@/charts";
 import { NETWORKS, PUBLISHED, nodeByName } from "@/topology";
 import * as fmt from "@/format";
 
-const host = useHostStore();
-const { window: win, windows, active, setWindow } = useTimeWindow();
-
-type Tone = "ok" | "warn" | "fail" | "off";
+const { window: win } = useTimeWindow();
 
 interface Row {
   name: string;
@@ -87,27 +88,9 @@ const rack = usePoll(async (signal) => {
     const h = health.get(name);
     const declared = nodeByName(name);
 
-    let tone: Tone = "off";
-    let state = "no health check";
-    if (!isRunning) {
-      tone = "fail";
-      state = "stopped";
-    } else if (h === undefined) {
-      // duckdns and unpackerr serve no HTTP and define no health check. Their
-      // series is ABSENT rather than zero, which is what lets one alert rule
-      // cover every container without naming any. Grey, never green.
-      tone = "off";
-      state = "running, unchecked";
-    } else if (h === 0) {
-      tone = "ok";
-      state = "healthy";
-    } else if (h === 1) {
-      tone = "warn";
-      state = "starting";
-    } else {
-      tone = "fail";
-      state = "unhealthy";
-    }
+    // @/health owns this mapping now: the Home page's service strip needs the
+    // identical rule, and "absent is not zero" is too subtle to have two copies.
+    const { tone, state } = containerTone(isRunning, h);
 
     return {
       name,
@@ -222,30 +205,16 @@ const apps = usePoll(async (signal) => {
 
 const TORRENT_STATE = ["connected", "firewalled", "disconnected"];
 
-const metricsStale = computed(() => {
-  if (host.prometheusDown) return "prometheus is unreachable; this is the last answer it gave";
-  const f = host.collectorFreshness;
-  if (f.missing) return "the collector has never reported";
-  if (f.stale) return `the collector last ran ${fmt.duration(f.age)} ago; these numbers are frozen`;
-  return null;
-});
+// @/composables/useStaleness owns this now - it was byte-identical to
+// SystemPage's copy, and Home and Library would have made four.
+const metricsStale = useMetricsStale();
 </script>
 
 <template>
   <div class="page">
     <Teleport defer to="#toolbar">
       <span class="mono note">read only</span>
-      <div class="picker">
-        <button
-          v-for="w in windows"
-          :key="w.id"
-          class="pick mono"
-          :class="{ on: active === w.id }"
-          @click="setWindow(w.id)"
-        >
-          {{ w.label }}
-        </button>
-      </div>
+      <WindowPicker />
     </Teleport>
 
     <!-- The rack -->
@@ -257,7 +226,7 @@ const metricsStale = computed(() => {
       </span>
     </section>
 
-    <p v-if="metricsStale" class="rack-stale mono">{{ metricsStale }}</p>
+    <StaleNote :reason="metricsStale" />
 
     <div class="rack" :class="{ dim: !!metricsStale }">
       <div class="row head mono">
@@ -417,30 +386,6 @@ const metricsStale = computed(() => {
   color: var(--fg-dim);
 }
 
-.picker {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--r-sm);
-  background: var(--field);
-  border: 1px solid var(--line);
-}
-
-.pick {
-  padding: 5px 11px;
-  border-radius: var(--r-xs);
-  font: var(--t-mono-md);
-  color: var(--fg-5);
-}
-
-.pick:hover {
-  color: var(--fg);
-}
-
-.pick.on {
-  background: oklch(1 0 0 / 0.09);
-  color: var(--fg);
-}
 
 .rack-head {
   display: flex;
@@ -454,10 +399,6 @@ const metricsStale = computed(() => {
   color: var(--fg-5);
 }
 
-.rack-stale {
-  font: var(--t-mono-sm);
-  color: var(--warn);
-}
 
 .rack {
   display: flex;
