@@ -2,10 +2,9 @@
 /**
  * The shell header: wordmark, the four pages, and a per-page toolbar.
  *
- * All four routes exist even though two are stubs, because the shell is what
- * this first cut is meant to prove. A stub says what it will read and that it
- * is not built; it does not render an empty panel that looks like a working
- * page with no data.
+ * All four pages are built. The wordmark points at Home rather than System:
+ * it is the go-home affordance, and pointing it somewhere `/` does not go would
+ * be a contradiction the moment anyone noticed.
  */
 import { computed } from "vue";
 import { useHostStore } from "@/stores/host";
@@ -53,7 +52,7 @@ const age = computed(() => {
 <template>
   <header class="bar">
     <div class="left">
-      <RouterLink to="/system" class="mark" aria-label="home server">
+      <RouterLink to="/home" class="mark" aria-label="home server">
         <span class="glyph" />
         <span class="word mono">HOMESERVER</span>
       </RouterLink>

@@ -129,6 +129,13 @@ function patch(name: string, changes: Partial<FixtureContainer>): void {
 }
 
 patch("bazarr", { health: 2, restarts: 4, startedAgo: 96, memory: 508 * 1024 ** 2 });
+// A REAL, BENIGN AMBER. Jellyseerr genuinely takes about forty seconds to pass
+// its health check after a restart, so `health: 1` here is a state the host
+// actually reaches rather than an invented one - and nothing else in this fixture
+// exercises the "starting" branch that ServicesPage and the Home strip both have.
+// With bazarr already unhealthy and unpackerr defining no check at all, the strip
+// then renders all four tones at once, which is the point of a fixture.
+patch("jellyseerr", { health: 1, startedAgo: 40, memory: 180 * 1024 ** 2 });
 patch("jellyfin", { cpu: 3.9, memory: 2.99 * 1024 ** 3, startedAgo: 15 * 3600 + 38 * 60 });
 patch("tdarr-node-01", { cpu: 1.6, memory: 1.4 * 1024 ** 3 });
 patch("prowlarr", { cpu: 0.06, memory: 220 * 1024 ** 2 });
@@ -180,7 +187,15 @@ const CHECKS: Check[] = [
   { section: "checkout", id: "checkout.clean", status: "pass", message: "working tree clean" },
   { section: "checkout", id: "checkout.matches_origin", status: "pass", message: "at origin/main" },
   { section: "containers", id: "containers.failed_units", status: "fail", message: "bazarr.service failed: oom-kill, 4 restarts in the last hour" },
-  { section: "containers", id: "containers.healthy", status: "fail", message: "bazarr unhealthy; 22 of 23 healthy" },
+  {
+    section: "containers",
+    id: "containers.healthy",
+    status: "fail",
+    // Kept consistent with the CONTAINERS patches above: bazarr unhealthy and
+    // jellyseerr still starting. Three sources disagreeing about the same host is
+    // exactly the confusion a fixture is supposed to avoid.
+    message: "bazarr unhealthy, jellyseerr starting; 21 of 23 healthy",
+  },
   { section: "containers", id: "containers.gpu_jellyfin", status: "pass", message: "nvidia device present" },
   { section: "containers", id: "containers.gpu_tdarr_node_01", status: "pass", message: "nvidia device present" },
   { section: "logs", id: "logs.persistent", status: "pass", message: "Storage=persistent" },

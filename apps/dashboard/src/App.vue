@@ -2,10 +2,17 @@
 import NavBar from "@/components/NavBar.vue";
 import StalenessBanner from "@/components/StalenessBanner.vue";
 import { useHostStore } from "@/stores/host";
+import { useMediaStore } from "@/stores/media";
 
 // Instantiated here rather than per page, so the polls are shared and a route
 // change does not restart them.
 useHostStore();
+
+// Same reason, and for the media documents it is load-bearing rather than
+// merely tidy: usePoll resets lastOk on unmount, so per-page polling would clear
+// the very clock the staleness of these two documents is measured against every
+// time somebody moved between Home and Library.
+useMediaStore();
 </script>
 
 <template>

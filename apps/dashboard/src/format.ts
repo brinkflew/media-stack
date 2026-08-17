@@ -130,6 +130,22 @@ export function isoToUnix(iso: string | null | undefined): number {
 
 /** Wall-clock "14:03", for an axis or an event row. Local time, because the
  *  host runs Europe/Brussels and so does whoever is reading this. */
+/**
+ * "00:24:11" - a playback position, not a duration.
+ *
+ * Distinct from `duration()` on purpose: that one drops to "2h 05m" once it
+ * passes an hour, which is right for an uptime and wrong for a seek position
+ * against a runtime. A media clock keeps every field, always, so the digits do
+ * not reflow as a film crosses an hour.
+ */
+export function elapsed(seconds: number): string {
+  if (!Number.isFinite(seconds)) return NO_DATA;
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
 export function clock(unixSeconds: number): string {
   if (!Number.isFinite(unixSeconds)) return NO_DATA;
   const d = new Date(unixSeconds * 1000);

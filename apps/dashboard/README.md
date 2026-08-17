@@ -4,8 +4,9 @@ A Vue 3 application, served as static files, at `https://home.avanserv.com` behi
 sign-on as everything else. It is the last item on CLAUDE.md's roadmap: *"status.json for what is
 true now, keyed by stable ids, and Prometheus for when it stopped being true."*
 
-This is the **first cut**: the shell, **System** and **Services**. Home and Library are routed
-stubs that name what they will read and what has to exist first.
+All four pages are built. **System** and **Services** landed first; **Home** and **Library** are
+the second cut, and they needed a data layer before they needed a design - Prometheus holds counts,
+and a now-playing card with a number and no title is not the design.
 
 ```bash
 npm ci && npm run dev            # fixtures back every endpoint; no server needed
@@ -19,6 +20,13 @@ have them.** `container_t -> unconfined_t : unix_stream_socket connectto` is DEN
 for uid 1000 runs as `unconfined_t`, and that is not fixable by relabelling. Actions would need a
 privileged host-side surface reachable from a browser, which is a decision to take on its own
 merits rather than a checkbox to add behind a dashboard.
+
+**So every one of those chips is a link instead**, opening the owning application in a new tab -
+`src/links.ts` is the only place that mapping exists, and `ChipLink.vue` is the only place the
+decision shows up in the UI. The design's layout slots and column widths are unchanged; its own
+fallback chip already said "Open". One label changed rather than lying: the design's `Terminate`
+became `open`, because the reachable Jellyfin target is the item page and cannot terminate anything,
+and a chip that lands somewhere it cannot act is worse than one that says less.
 
 **The container reaches nothing.** It joins `net-dashboard`, whose only other member is Caddy, and
 it holds no credential of any kind. Every byte it displays arrives at the *browser*, same-origin,
@@ -36,9 +44,39 @@ browser ---> caddy (home.avanserv.com, import protected)
 
 | Source | Carries | Why not one of the others |
 |---|---|---|
-| **Prometheus** | every number and every history: container identity, health, restarts, cpu, memory, filesystems, network, GPU, disks and SMART, backup ages, `home_server_check_status` | the only thing with a time axis, and `home_server_container_info{container,unit,image,pod}` is podman's own identity join - no lookup table anywhere |
-| **`status.json`** | the **prose** of the 64 findings, plus `summary`, `facts`, `generated_at`, `mode` | `message` is deliberately absent from the metric. The id is stable and alertable; the prose is readable and disposable. That split is the intended join |
+| **Prometheus** | every number and every history: container identity, health, restarts, cpu, memory, filesystems, network, GPU, disks and SMART, backup ages, `home_server_check_status`, and the media **counts** | the only thing with a time axis, and `home_server_container_info{container,unit,image,pod}` is podman's own identity join - no lookup table anywhere |
+| **`status.json`** | the **prose** of the findings, plus `summary`, `facts`, `generated_at`, `mode` | `message` is deliberately absent from the metric. The id is stable and alertable; the prose is readable and disposable. That split is the intended join |
+| **`activity.json`** (30s) | what is playing and what is in flight, **with titles**: sessions, downloads, transcodes, torrents | a title cannot be a Prometheus label. Cardinality is the obvious reason and the lesser one - see below |
+| **`library.json`** (5min) | requests, recently added, recent completions, the stalled and queued files, the subtitle backlog | same, on the cadence its contents actually change at |
 | **`src/topology.ts`** | the network graph and the published-port table | the topology *is* static - it is defined in `stacks/`, in git. Only the node colouring is live |
+
+### The two documents are not series, and must never become them
+
+`bin/collect-metrics.py` refuses to label a Jellyfin session with the user, the device or the item.
+The comment says why: a 400-day series of who watched what is *surveillance of the household* rather
+than monitoring of a machine. Home needs exactly that data to draw a now-playing card, so it travels
+as a document instead - **rewritten whole every run, with no history anywhere**. That difference is
+the entire justification. The moment any of it grows a retention window, the refusal has been
+reversed by accident.
+
+They are split by **cadence, not by page** - both pages read both - for the reason the collector's
+own `home-server-slow.prom` already records: a five-minute slice living in a thirty-second file
+blinks out nine ticks in ten and renders as a sawtooth that looks exactly like a fault.
+
+**`sources` is not optional.** Each document carries one `{ok, at, error}` per upstream it consulted,
+because without it "jellyseerr timed out" and "there are no pending requests" are the same empty
+list. It is `mode.routes: false` applied to applications.
+
+### Posters come same-origin, and carry no credential
+
+Jellyfin's `/Items/*/Images/*` answers **200 unauthenticated** while every other path on it answers
+401 - measured from inside the Caddy container. So `home.{$DOMAIN}` proxies just that, GET and HEAD
+only, path-guarded, and a mis-scoped matcher fails closed into Jellyfin's own 401 rather than opening
+its API. Not `watch.{$DOMAIN}`: that is cross-origin, pays the measured 5x NAT-loopback penalty on
+30-60 images a load, and hangs the poster grid off a route deliberately outside sign-on.
+
+Only a **tagged** request gets a long cache. The tag is a content hash, so changed artwork changes
+the URL; an untagged request is whatever the current image happens to be.
 
 **There is no log stream, and the design's slot for one now holds Alertmanager.** CLAUDE.md is
 explicit: Jellyfin alone emits 2,644 priority-3 lines a day of ffmpeg decoder chatter with no lever
@@ -109,6 +147,36 @@ actually had.
 `fixtures/prometheus.ts` answers by **exact query string** against `src/queries.ts`, and warns at
 startup about any catalogued query it does not cover. A fixture that has quietly stopped covering
 the real queries is the same shape of problem as a lint that matches nothing.
+
+`fixtures/media.ts` is typed against `src/types.ts`, which `tsconfig.node.json` includes - so a
+fixture that drifts from the contract `bin/collect-metrics.py` writes is a **compile error**, not a
+panel that quietly renders nothing. Same idea as `uncovered()`, through the type system.
+
+**Four environment switches, because these states cannot share a screen.** Editing a constant to see
+one means a diff to remember to revert:
+
+```bash
+HS_FIX_PLAYBACK_AGE=40  npm run dev   # the frozen card: extrapolation stops, the bar greys
+HS_FIX_PLAYBACK_AGE=500 npm run dev   # every stale path at once
+HS_FIX_EMPTY=1          npm run dev   # nothing playing, nothing in flight - the COMMON state
+HS_FIX_BROKEN=jellyseerr npm run dev  # "absent, not zero" for one upstream
+```
+
+**`HS_FIX_EMPTY=1` is the one to look at first.** An almost-empty Library table is the normal,
+healthy rendering on the real host - `queued/` holds no video files because the reconciler works, and
+Tdarr's table drains to zero by design. So that state has to look finished rather than broken, and it
+must not read as healthy when it is merely *unmeasured*: stale-and-empty says "no rows as of 8m ago",
+never "nothing in flight".
+
+Two harnesses, neither of them a test suite:
+
+```bash
+node fixtures/smoke.mjs               # drives the row model, sort, links and posters in node
+node fixtures/shoot.mjs /tmp          # screenshots all four pages, reports console errors
+```
+
+`smoke.mjs` needs nothing but vite. `shoot.mjs` needs playwright, which is **deliberately not a
+dependency** - it says so and exits 2 rather than being quietly unrunnable.
 
 Against the real Prometheus instead - it publishes no host port, so tunnel to its bridge address:
 

@@ -557,6 +557,24 @@ the first run: 7 of 17 indexers disabled by repeated failures, including all thr
 entries and both 1337x ones. That is the shape of the ISP-resolver problem already in Known state -
 every container healthy, nothing found, and no other signal anywhere.
 
+**TWO NUMBERS COUNT THE SUBTITLE BACKLOG AND NEITHER IS WRONG.**
+`home_server_subtitles_missing{kind="episodes"}` comes from Bazarr's badges and counts missing
+subtitle *files*: 1,038. `home_server_subtitles_wanted_items{kind="episodes"}` counts *episodes* with
+at least one missing subtitle: 543. Most episodes here want both English and French, so the first is
+roughly twice the second. They have different names precisely because a second series called
+`subtitles_missing_something` would be indistinguishable from the first on a dashboard - the same
+argument `home_server_container_memory_high_bytes` exists for.
+
+**`api_get` TRIES curl AND FALLS BACK TO wget, because two images ship only the latter.** gluetun and
+jellyseerr have no `curl`, so every poll against them returned `None` - and since each caller guards
+with `if isinstance(x, dict)`, that read as "the endpoint had nothing to say". `home_server_vpn_info`
+was therefore **never once emitted** from the day it was written until 2026-08-17: absent from the
+TSDB, absent from the dashboard's VPN row, and reported by nothing, because the source still completed
+and still wrote `source_up 1`. The fallback keeps the credential off argv by having a shell inside the
+container read it from stdin, and `home_server_collector_client_unavailable` now makes the next
+instance visible - written as an explicit 0, because a series that only appears when something is
+wrong cannot be alerted on with `== 0`.
+
 **The Tdarr file table is a GAUGE and the job table is a COUNTER**, and the type carries the
 distinction rather than a comment. `filejsondb` drains to zero by design, so a short table means the
 queue is empty; `jobsjsondb` is the durable history and is deliberately **not** pulled, because
@@ -685,21 +703,57 @@ systemctl --user start home-server-dashboard-build.service   # the deploy; see b
 cd apps/dashboard && npm run dev                             # fixtures, no server needed
 ```
 
-**The first cut is the shell, System and Services.** Home and Library are routed stubs that name
-what they will read; everything they need is an application API that nothing currently collects.
+**All four pages are built.** System and Services were the first cut, on 2026-08-15; **Home and
+Library landed 2026-08-17** and needed a data layer before they needed a design.
 
-**It is READ-ONLY, and that is structural rather than a v1 shortcut.** The design has restart, pull
-and approve buttons, and no container here can have them: `container_t -> unconfined_t :
+**It is READ-ONLY, and that is structural rather than a v1 shortcut.** The design has restart, pull,
+approve and terminate buttons, and no container here can have them: `container_t -> unconfined_t :
 unix_stream_socket connectto` is DENY and is not fixable by relabelling. Actions need a privileged
-host-side surface reachable from a browser, which is a decision to take on its own merits.
+host-side surface reachable from a browser, which is a decision to take on its own merits. **Every
+one of those chips is a deep link into the owning application instead**, which keeps the design's
+layout slot and is what its own fallback chip already did - `src/links.ts` holds the mapping, derived
+from `window.location.hostname` so no build-time variable is involved.
 
-**Three sources, and the split is the point:**
+**Five sources, and the split is the point:**
 
 | Source | Carries |
 |---|---|
 | **Prometheus**, proxied same-origin at `/api/prom` | every number and every history, including `home_server_container_info{container,unit,image,pod}` - podman's own identity join, so the pod rack needs no lookup table |
 | **`status.json`**, served as a file at `/data/status.json` | the **prose** of the findings. The metric carries the verdict and deliberately not the message; the id is the join |
+| **`activity.json`**, every 30s | what is playing and what is in flight, **with titles** - sessions, downloads, transcodes, torrents |
+| **`library.json`**, every 5 minutes | requests, recently added, recent completions, stalled and queued files, the subtitle backlog |
 | **`apps/dashboard/src/topology.ts`**, compiled in | the network graph and the published-port table. The topology *is* static - it is `stacks/`, in git - and only the node colouring is live |
+
+**THE TWO DOCUMENTS EXIST BECAUSE A TITLE CANNOT BE A PROMETHEUS LABEL, AND THE SECOND REASON IS THE
+ONE THAT MATTERS.** Cardinality is the obvious one. The real one is that `source_playback` refuses to
+label a session with the user, the device or the item, because a 400-day series of who watched what
+is surveillance of the household rather than monitoring of a machine. Home needs exactly that to draw
+a now-playing card, so it travels as a document: **rewritten whole every run, with no history
+anywhere.** That difference is the whole justification, and the moment any of it grows a retention
+window the refusal has been reversed by accident.
+
+Split by **cadence, not by page** - both pages read both - for the reason `home-server-slow.prom`
+already records: a five-minute slice in a thirty-second file blinks out nine ticks in ten and renders
+as a sawtooth that looks exactly like a fault. **`sources` is not optional** in either: one
+`{ok, at, error}` per upstream consulted, because otherwise "jellyseerr timed out" and "there are no
+pending requests" are the same empty list. It is `mode.routes: false` applied to applications.
+
+**POSTERS COME SAME-ORIGIN AND CARRY NO CREDENTIAL, which is measured rather than assumed.** Jellyfin's
+`/Items/*/Images/*` answers 200 unauthenticated while every other path on it answers 401 - checked
+from inside the Caddy container - so `home.{$DOMAIN}` proxies exactly that, GET and HEAD only,
+path-guarded to a 32-hex item id, and a mis-scoped matcher fails closed into Jellyfin's own 401 rather
+than opening its API. Not `watch.{$DOMAIN}`: cross-origin, 30-60 images a load through NAT loopback at
+the measured 5x, and a poster grid hanging off a route deliberately outside sign-on. Only a **tagged**
+request gets a long cache, because the tag is a content hash and an untagged URL is whatever the image
+happens to be now. **Test those guards with `curl`, not `caddy validate`** - see the warning that
+block already carries.
+
+**An almost-empty Library table is the NORMAL, HEALTHY rendering**, and the page is built for that
+rather than for the mock's 47 rows. `queued/` holds no video files because `promote-transcoded.py`
+works, and Tdarr's file table drains to zero by design. So there are three empty states saying three
+different things, and the important one is that **stale-and-empty reads "no rows as of 8m ago", never
+"nothing in flight"** - at eight minutes old that is an assertion nobody is entitled to make. Same
+distinction as rendering `mode.routes: false` as "not measured".
 
 **`status.json` is COPIED into a served directory, not mount-mapped, and `:z` cannot fix the
 alternative.** The canonical file is written through `sudo`, so it is root-owned inside a `var_lib_t`
@@ -1919,11 +1973,12 @@ Remaining, in order:
    `home.avanserv.com`, in `apps/dashboard/`, built on the server from the checkout. It is what
    every keyed id and every series was for. See "The dashboard".
 
-   **The first cut is the shell, System and Services; Home and Library are stubs**, because they
-   need Jellyfin sessions, Jellyseerr requests, poster images and the \*arr queues, none of which is
-   collected today. **It is read-only, structurally**: no container can reach the podman socket, so
-   restart and pull would need a privileged host-side surface reachable from a browser - the next
-   deliberate decision here, not an oversight in this one.
+   **All four pages are built as of 2026-08-17.** Home and Library needed Jellyfin sessions,
+   Jellyseerr requests, poster images and the \*arr queues, none of which was collected - so they
+   are a collector change first and two pages second. **It is read-only, structurally**: no container
+   can reach the podman socket, so restart and pull would need a privileged host-side surface
+   reachable from a browser - the next deliberate decision here, not an oversight in this one. Every
+   action chip is a deep link into the owning application instead.
 
    **Do NOT build either on `journalctl -p err`.** Jellyfin alone emits 2,644 priority-3 lines a day
    of ffmpeg chatter and there is no lever to stop it - see Known state. Unit state and container

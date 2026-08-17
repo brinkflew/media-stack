@@ -1,8 +1,8 @@
 // =============================================================================
 // The dev-only fixture server
 // -----------------------------------------------------------------------------
-// A Vite plugin that answers exactly the three things Caddy answers in
-// production - /data/status.json, /api/prom/*, /api/alerts/* - so the
+// A Vite plugin that answers exactly what Caddy answers in production -
+// /data/*.json, /api/prom/*, /api/alerts/* and /api/images/* - so the
 // application code has no idea it is not talking to the real thing and there
 // is no `if (dev)` anywhere in src/.
 //
@@ -12,6 +12,8 @@
 
 import type { Plugin } from "vite";
 import { alerts, statusDocument } from "./model";
+import { activityDocument, libraryDocument } from "./media";
+import { MISSING_POSTERS, posterSvg } from "./images";
 import { instant, range, uncovered } from "./prometheus";
 
 function send(res: { setHeader: (k: string, v: string) => void; end: (b: string) => void }, body: unknown): void {
@@ -41,6 +43,33 @@ export function fixtureServer(): Plugin {
 
         if (path === "/data/status.json") {
           send(res, statusDocument());
+          return;
+        }
+
+        if (path === "/data/activity.json") {
+          send(res, activityDocument());
+          return;
+        }
+
+        if (path === "/data/library.json") {
+          send(res, libraryDocument());
+          return;
+        }
+
+        // The poster proxy. Answering 404 for everything would hide the poster
+        // layout entirely, so these are drawn - except for the handful in
+        // MISSING_POSTERS, which exist to put the fallback tile on screen beside
+        // real ones. That fallback is the NORMAL state for a pending request.
+        if (path.startsWith("/api/images/")) {
+          const inner = path.slice("/api/images/".length);
+          if (MISSING_POSTERS.includes(inner)) {
+            res.statusCode = 404;
+            res.end("no such image");
+            return;
+          }
+          res.setHeader("Content-Type", "image/svg+xml");
+          res.setHeader("Cache-Control", "no-store");
+          res.end(posterSvg(inner, Number(url.searchParams.get("maxHeight")) || 0));
           return;
         }
 
