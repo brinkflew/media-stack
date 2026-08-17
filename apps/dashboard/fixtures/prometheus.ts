@@ -53,12 +53,34 @@ function bySeries(): Record<string, SeriesSpec[]> {
   table[SYSTEM.memoryTotal] = [{ metric: { __name__: "node_memory_MemTotal_bytes" }, at: constant(MEM_TOTAL) }];
   table[SYSTEM.load1] = [{ metric: { __name__: "node_load1" }, at: swing("load", 2.4, 1.6) }];
 
-  const gpu = { gpu: "0", uuid: "GPU-9f1c0b2e" };
-  table[SYSTEM.gpuEncoder] = [{ metric: { ...gpu, engine: "encoder" }, at: swing("enc", 0.86, 0.14) }];
-  table[SYSTEM.gpuSm] = [{ metric: { ...gpu, engine: "sm" }, at: swing("sm", 0.12, 0.08) }];
-  table[SYSTEM.gpuTemp] = [{ metric: { __name__: "home_server_gpu_temperature_celsius", ...gpu }, at: swing("gputemp", 62, 6) }];
-  table[SYSTEM.gpuPower] = [{ metric: { __name__: "home_server_gpu_power_watts", ...gpu }, at: swing("gpupwr", 112, 28) }];
-  table[SYSTEM.gpuSessions] = [{ metric: { __name__: "home_server_gpu_encoder_sessions", ...gpu }, at: constant(2) }];
+  // TWO CARDS, because the host has two and they are not interchangeable. GPU 0's
+  // video engines are dead hardware - every NVENC session on it fails - so both
+  // consumers are pinned to gpu=1 and card 0 encodes nothing, for ever. A
+  // single-card fixture is what let the page ship reading `[0]` off each of these
+  // and reporting the idle card's permanent 0% as the encoder utilisation.
+  const gpu0 = { gpu: "0", uuid: "GPU-9f1c0b2e" };
+  const gpu1 = { gpu: "1", uuid: "GPU-4b7d15a3" };
+
+  table[SYSTEM.gpuEncoder] = [
+    { metric: { ...gpu0, engine: "encoder" }, at: constant(0) },
+    { metric: { ...gpu1, engine: "encoder" }, at: swing("enc", 0.86, 0.14) },
+  ];
+  table[SYSTEM.gpuSm] = [
+    { metric: { ...gpu0, engine: "sm" }, at: constant(0) },
+    { metric: { ...gpu1, engine: "sm" }, at: swing("sm", 0.12, 0.08) },
+  ];
+  table[SYSTEM.gpuTemp] = [
+    { metric: { __name__: "home_server_gpu_temperature_celsius", ...gpu0 }, at: swing("gputemp0", 34, 3) },
+    { metric: { __name__: "home_server_gpu_temperature_celsius", ...gpu1 }, at: swing("gputemp", 62, 6) },
+  ];
+  table[SYSTEM.gpuPower] = [
+    { metric: { __name__: "home_server_gpu_power_watts", ...gpu0 }, at: swing("gpupwr0", 22, 4) },
+    { metric: { __name__: "home_server_gpu_power_watts", ...gpu1 }, at: swing("gpupwr", 112, 28) },
+  ];
+  table[SYSTEM.gpuSessions] = [
+    { metric: { __name__: "home_server_gpu_encoder_sessions", ...gpu0 }, at: constant(0) },
+    { metric: { __name__: "home_server_gpu_encoder_sessions", ...gpu1 }, at: constant(2) },
+  ];
 
   table[SYSTEM.netRx] = [{ metric: {}, at: swing("rx", 6.2e6, 5.5e6) }];
   table[SYSTEM.netTx] = [{ metric: {}, at: swing("tx", 2.1e6, 1.9e6) }];
@@ -169,7 +191,7 @@ function bySeries(): Record<string, SeriesSpec[]> {
   // bazarr has had a bad fortnight; everything else is flat. The oldest six
   // days are absent entirely, so the strip shows grey rather than inventing
   // history the store does not have.
-  table[AVAILABILITY.containerDaily] = CONTAINERS.map((c) => ({
+  table[AVAILABILITY.containerHourly] = CONTAINERS.map((c) => ({
     metric: { container: c.name },
     at: (t) => {
       const daysAgo = Math.round((now - t) / 86400);

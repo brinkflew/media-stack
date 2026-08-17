@@ -44,7 +44,7 @@ export function extent(points: Point[], options: { floorAtZero?: boolean; pad?: 
   return { min, max };
 }
 
-interface Frame {
+export interface Frame {
   width: number;
   height: number;
   extent: Extent;
@@ -53,18 +53,36 @@ interface Frame {
   to?: number;
 }
 
-function project(points: Point[], frame: Frame): (readonly [number, number, boolean])[] {
+/**
+ * One line on a chart. A chart drawing more than one of these is drawing things
+ * that must share a y-scale to be comparable - the two GPUs being the case that
+ * called for it - so the extent is always computed across all of them.
+ */
+export interface ChartSeries {
+  points: Point[];
+  /** Names the series in a readout. The GPU lanes use the card index. */
+  label?: string;
+  tone?: "ok" | "warn" | "fail";
+}
+
+/** Where a time falls horizontally. The only thing a crosshair needs. */
+export function projectX(t: number, frame: Frame, points: Point[] = []): number {
   const from = frame.from ?? points[0]?.[0] ?? 0;
   const to = frame.to ?? points[points.length - 1]?.[0] ?? from + 1;
-  const span = to - from || 1;
-  const range = frame.extent.max - frame.extent.min || 1;
+  return ((t - from) / (to - from || 1)) * frame.width;
+}
 
-  return points.map(([t, v]) => {
-    const x = ((t - from) / span) * frame.width;
-    const finite = Number.isFinite(v);
-    const clamped = finite ? Math.min(frame.extent.max, Math.max(frame.extent.min, v)) : 0;
-    const y = frame.height - ((clamped - frame.extent.min) / range) * frame.height;
-    return [x, y, finite] as const;
+/** Where a value falls vertically, clamped into the frame. */
+export function projectY(v: number, frame: Frame): number {
+  const range = frame.extent.max - frame.extent.min || 1;
+  const clamped = Number.isFinite(v) ? Math.min(frame.extent.max, Math.max(frame.extent.min, v)) : frame.extent.min;
+  return frame.height - ((clamped - frame.extent.min) / range) * frame.height;
+}
+
+function project(points: Point[], frame: Frame): (readonly [number, number, boolean])[] {
+  return points.map((p) => {
+    const [, v] = p;
+    return [projectX(p[0], frame, points), projectY(v, frame), Number.isFinite(v)] as const;
   });
 }
 
@@ -136,6 +154,25 @@ export function median(points: Point[]): number {
   return values.length % 2
     ? values[(values.length - 1) / 2]
     : (values[values.length / 2 - 1] + values[values.length / 2]) / 2;
+}
+
+/**
+ * The sample nearest `t`. A hole is returned as the NaN it is rather than
+ * skipped to the nearest real value: the cursor sitting in a gap must read as
+ * "no data here", not as the last number before it.
+ */
+export function sampleAt(points: Point[], t: number): Point | null {
+  let best: Point | null = null;
+  let bestGap = Infinity;
+
+  for (const p of points) {
+    const gap = Math.abs(p[0] - t);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = p;
+    }
+  }
+  return best;
 }
 
 export function peak(points: Point[]): number {

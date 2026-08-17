@@ -8,6 +8,8 @@
  * mistake as an unrun check reading as a passing one.
  */
 import { computed } from "vue";
+import { dayStarts } from "@/uptime";
+import { dayMonth, percent } from "@/format";
 
 const props = defineProps<{
   /** One entry per day, oldest first. NaN where there is no data. */
@@ -18,21 +20,35 @@ const props = defineProps<{
 
 const good = computed(() => props.good ?? 0.999);
 
-const bars = computed(() =>
-  props.days.map((ratio) => {
-    if (!Number.isFinite(ratio)) return "off";
-    if (ratio >= good.value) return "ok";
-    if (ratio >= good.value / 2) return "warn";
-    return "fail";
-  }),
-);
+/** Thirty identical rectangles say nothing about which day they are. The title
+ *  is the only affordance that names one, and it costs no layout. */
+const bars = computed(() => {
+  const starts = dayStarts(props.days.length);
 
+  return props.days.map((ratio, i) => {
+    const tone = !Number.isFinite(ratio)
+      ? "off"
+      : ratio >= good.value
+        ? "ok"
+        : ratio >= good.value / 2
+          ? "warn"
+          : "fail";
+    const reading = Number.isFinite(ratio) ? percent(ratio, 2) : "no data";
+    return { tone, title: `${dayMonth(starts[i])} - ${reading}` };
+  });
+});
 </script>
 
 <template>
   <div class="row">
     <div class="bars">
-      <span v-for="(tone, i) in bars" :key="i" class="bar" :style="{ background: `var(--${tone})` }" />
+      <span
+        v-for="(b, i) in bars"
+        :key="i"
+        class="bar"
+        :title="b.title"
+        :style="{ background: `var(--${b.tone})` }"
+      />
     </div>
   </div>
 </template>

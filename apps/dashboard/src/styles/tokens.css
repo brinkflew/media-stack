@@ -106,6 +106,10 @@
   --gap-lg: 16px;
 
   --shadow-node: 0 2px 10px oklch(0 0 0 / 0.35);
+
+  /* Width of the travelling band in @keyframes sweep. Read by both the
+     animation and the background-size that paints it. */
+  --sweep-band: 60px;
 }
 
 /* --------------------------------------------------------------------------
@@ -128,12 +132,20 @@
   }
 }
 
+/* A PERCENTAGE HERE IS THE ELEMENT'S OWN WIDTH, NOT ITS CONTAINER'S, which is
+   how this animation came to travel 252px down a 1200px lane and stop: a 60px
+   element going -100% -> 320% moves -60px -> +192px.
+   The sweeping element is now full-width and carries the band as a background,
+   so translateX(100%) is one whole lane. It starts one band-width off the left
+   edge and ends one lane past it, i.e. it is crossing for the entire cycle
+   rather than waiting off-screen for half of it. --sweep-band is shared with
+   the background-size so the two cannot drift. */
 @keyframes sweep {
   0% {
-    transform: translateX(-100%);
+    transform: translateX(calc(-1 * var(--sweep-band)));
   }
   100% {
-    transform: translateX(320%);
+    transform: translateX(100%);
   }
 }
 
@@ -155,5 +167,13 @@
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+  }
+
+  /* The rule above has no fill-mode, so a cancelled animation snaps back to the
+     element's static state - which for a sweep is a gradient smudge parked at
+     one end of the lane. It carries no information without the motion, so it
+     goes rather than lingering as decoration. */
+  .sweep {
+    display: none !important;
   }
 }

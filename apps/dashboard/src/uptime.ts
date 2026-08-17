@@ -28,13 +28,33 @@ export function dailyRatios(points: Point[], days: number, now = Date.now() / 10
 
   for (const [t, v] of points) {
     if (!Number.isFinite(v)) continue;
-    const index = days - 1 - Math.floor((todayStart - t) / DAY_S + 1e-9);
+
+    // CLAMPED AT ZERO, AND THAT IS THE WHOLE BUG THIS ONCE HAD. Samples taken
+    // since local midnight are "today", but they are AFTER todayStart, so the
+    // raw offset is -1 and the index lands one past the last bar - silently
+    // discarding every one of them. Anything genuinely older still fails the
+    // guard below.
+    const offset = Math.max(0, Math.floor((todayStart - t) / DAY_S + 1e-9));
+    const index = days - 1 - offset;
     if (index < 0 || index >= days) continue;
     sums[index] += v;
     counts[index] += 1;
   }
 
   return sums.map((sum, i) => (counts[i] === 0 ? Number.NaN : sum / counts[i]));
+}
+
+/**
+ * The date each bar stands for, oldest first - the same indexing dailyRatios
+ * writes, so the two cannot drift. Local midnights, because that is what the
+ * buckets are.
+ */
+export function dayStarts(days: number, now = Date.now() / 1000): number[] {
+  const midnight = new Date(now * 1000);
+  midnight.setHours(0, 0, 0, 0);
+  const todayStart = midnight.getTime() / 1000;
+
+  return Array.from({ length: days }, (_, i) => todayStart - (days - 1 - i) * DAY_S);
 }
 
 /** The headline for a bar row: mean of the days that have data, and how many

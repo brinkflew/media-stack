@@ -121,10 +121,18 @@ export const SERVICES = {
 } as const;
 
 export const AVAILABILITY = {
-  /** One point per day, averaged server-side. Thirty days of raw 30s samples
-   *  for twenty containers would be about 1.7 million points for a strip of
-   *  thirty bars. */
-  containerDaily: "avg_over_time(home_server_container_running[1d])",
+  /**
+   * HOURLY, NOT DAILY, AND THE STEP IS WHY. Averaging server-side is still the
+   * point - thirty days of raw 30s samples for twenty containers would be about
+   * 1.7 million points for a strip of thirty bars - but a 1d average fetched at
+   * a 1d step lands its buckets on UTC midnight, which is not where the bars
+   * are: src/uptime.ts buckets into LOCAL days, on purpose. Asking for one point
+   * per day therefore handed it exactly one sample per bar, aligned to the wrong
+   * midnight. An hourly average at a 1h step is 721 points per series - well
+   * inside Prometheus' 11,000-point cap, where a 30s step over 30 days is a 400
+   * - and gives every local day twenty-four samples to average.
+   */
+  containerHourly: "avg_over_time(home_server_container_running[1h])",
 } as const;
 
 /** Flattened, so the fixtures can assert they cover every one of them. */

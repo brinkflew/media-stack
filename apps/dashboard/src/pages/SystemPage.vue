@@ -21,13 +21,15 @@ import { useHostStore } from "@/stores/host";
 import { instant, instantBy, labelsBy, range, value } from "@/api/prometheus";
 import { bySeverityThenTime, fetchAlerts } from "@/api/alerts";
 import { AVAILABILITY, SERVICES, SYSTEM } from "@/queries";
-import { latest, onGrid, peak, toPoints, type Point } from "@/charts";
+import { latest, median, onGrid, peak, sampleAt, toPoints, type ChartSeries } from "@/charts";
 import { dailyRatios, ratioSummary } from "@/uptime";
 import * as fmt from "@/format";
 import { useTimeWindow } from "@/composables/useTimeWindow";
+import { useCrosshair } from "@/composables/useCrosshair";
 
 const host = useHostStore();
 const { window: win, windows, setWindow, active } = useTimeWindow();
+const cross = useCrosshair();
 
 // ---------------------------------------------------------------------------
 // The lanes. One definition drives the shared timeline AND the three headline
@@ -44,6 +46,13 @@ interface Lane {
   /** Shown as one of the three big charts at the top. */
   headline?: boolean;
   floorAtZero?: boolean;
+  /**
+   * Draw every series the query returns, one line each, keyed by this label.
+   * Set only where the multiplicity is REAL and must not be collapsed: this
+   * host has two GPUs, one of them with dead video engines, and taking whichever
+   * series sorted first is what made the encoder read 0% for ever.
+   */
+  splitBy?: string;
 }
 
 const LANES: Lane[] = [
@@ -70,12 +79,13 @@ const LANES: Lane[] = [
   {
     key: "gpu",
     label: "GPU encoder",
-    sub: "NVENC block, not the SM",
+    sub: "NVENC block, per card",
     query: SYSTEM.gpuEncoder,
     tone: "ok",
     unit: "",
     format: (v) => fmt.percent(v, 0),
     headline: true,
+    splitBy: "gpu",
   },
   {
     key: "net",
@@ -123,12 +133,31 @@ const series = usePoll(async (signal) => {
   const results = await Promise.all(
     LANES.map(async (lane) => {
       const matrix = await range(lane.query, { window: win.value.seconds, step, signal });
-      const points = matrix.length ? toPoints(matrix[0].values) : [];
-      return [lane.key, onGrid(points, start, end, step)] as const;
+      const split = lane.splitBy;
+
+      // Without splitBy the query aggregates in PromQL and returns exactly one
+      // series, so taking the first is not a choice being made. With it, every
+      // series is drawn - see the Lane comment for what collapsing them cost.
+      const lines: ChartSeries[] = split
+        ? matrix
+            .map((s) => ({
+              label: s.metric[split] ?? "?",
+              tone: lane.tone,
+              points: onGrid(toPoints(s.values), start, end, step),
+            }))
+            .sort((a, b) => a.label.localeCompare(b.label, "en", { numeric: true }))
+        : [
+            {
+              tone: lane.tone,
+              points: onGrid(matrix.length ? toPoints(matrix[0].values) : [], start, end, step),
+            },
+          ];
+
+      return [lane.key, lines] as const;
     }),
   );
 
-  return { start, end, step, byLane: new Map<string, Point[]>(results) };
+  return { start, end, step, byLane: new Map<string, ChartSeries[]>(results) };
 }, 30_000);
 
 // The window is read inside the loader, so a change to it would otherwise not
@@ -137,22 +166,56 @@ watch(win, () => {
   void series.refresh();
 });
 
-function points(key: string): Point[] {
+function lanesOf(key: string): ChartSeries[] {
   return series.data.value?.byLane.get(key) ?? [];
 }
 
 const headlines = computed(() => LANES.filter((l) => l.headline));
 
-/** Six evenly spaced wall-clock ticks across the window, plus "now". */
+/**
+ * One number per series, joined. Under the cursor while one is set, and the
+ * latest sample otherwise - so the same slot answers "what is it now" and "what
+ * was it then" without a second place to look.
+ *
+ * A hole reads as the no-data dash rather than as the last real value: the
+ * cursor sitting in a gap must not be answered with a number from elsewhere.
+ */
+function reading(lane: Lane): string {
+  const lines = lanesOf(lane.key);
+  if (!lines.length) return fmt.NO_DATA;
+
+  const t = cross.at.value;
+  return lines
+    .map((s) => lane.format(t === null ? latest(s.points) : (sampleAt(s.points, t)?.[1] ?? Number.NaN)))
+    .join(" / ");
+}
+
+function peakReading(lane: Lane): string {
+  const lines = lanesOf(lane.key);
+  if (!lines.length) return fmt.NO_DATA;
+  return lines.map((s) => lane.format(peak(s.points))).join(" / ");
+}
+
+/** Named in the foot because the dashed grey rule in every chart IS this, and
+ *  an unlabelled reference line is a question rather than a fact. Drawn only for
+ *  single-series charts, so it is reported only for those too. */
+function medianReading(lane: Lane): string | null {
+  const lines = lanesOf(lane.key);
+  if (lines.length !== 1) return null;
+  const m = median(lines[0].points);
+  return Number.isFinite(m) ? lane.format(m) : null;
+}
+
+/** Seven ticks across the window, each carrying the date only where it changes -
+ *  without which every tick on the 7d window is a bare HH:MM naming no day. */
 const axis = computed(() => {
   const s = series.data.value;
   if (!s) return [];
-  const ticks: string[] = [];
-  for (let i = 0; i < 6; i += 1) {
-    ticks.push(fmt.clock(s.start + ((s.end - s.start) * i) / 6));
-  }
-  return [...ticks, "now"];
+  return fmt.axisTicks(s.start, s.end, 7);
 });
+
+/** What the value column is currently reporting, named in its header. */
+const cursorStamp = computed(() => (cross.at.value === null ? null : fmt.stamp(cross.at.value)));
 
 // ---------------------------------------------------------------------------
 // Alerts, which is where the design's log stream was. See src/api/alerts.ts.
@@ -244,7 +307,9 @@ function fsTone(ratio: number): "ok" | "warn" | "fail" {
 const AVAILABILITY_ROWS = 5;
 
 const availability = usePoll(async (signal) => {
-  const matrix = await range(AVAILABILITY.containerDaily, { window: 30 * 86400, step: 86400, signal });
+  // An HOURLY step, deliberately: dailyRatios buckets into local days and needs
+  // samples inside them to do it. See the comment on the query itself.
+  const matrix = await range(AVAILABILITY.containerHourly, { window: 30 * 86400, step: 3600, signal });
 
   return matrix
     .map((s) => {
@@ -306,18 +371,53 @@ const staged = computed(() => {
 // The GPU is worth a line of its own: two NVENC sessions already pin the
 // encoder block at 100% while the SM sits at 10%, so "the GPU is busy" and
 // "the GPU is saturated" are different questions here.
+//
+// A COLUMN PER CARD, because this host has two and they are not interchangeable:
+// GPU 0's video engines are dead hardware, which the quadlets work around by
+// pinning both consumers to nvidia.com/gpu=1. Reading `[0]` off each of these
+// answered for the idle card - and instant-vector order is not guaranteed by the
+// API anyway, so the four rows could each have described a different one.
 const gpu = usePoll(async (signal) => {
-  const [temp, power, sessions] = await Promise.all([
-    instant(SYSTEM.gpuTemp, signal),
-    instant(SYSTEM.gpuPower, signal),
-    instant(SYSTEM.gpuSessions, signal),
+  const [encoder, sm, temp, power, sessions] = await Promise.all([
+    instantBy(SYSTEM.gpuEncoder, "gpu", signal),
+    instantBy(SYSTEM.gpuSm, "gpu", signal),
+    instantBy(SYSTEM.gpuTemp, "gpu", signal),
+    instantBy(SYSTEM.gpuPower, "gpu", signal),
+    instantBy(SYSTEM.gpuSessions, "gpu", signal),
   ]);
-  return {
-    temp: value(temp[0]?.value),
-    power: value(power[0]?.value),
-    sessions: value(sessions[0]?.value),
-  };
+
+  const cards = [...new Set([...encoder.keys(), ...temp.keys(), ...power.keys()])].sort((a, b) =>
+    a.localeCompare(b, "en", { numeric: true }),
+  );
+
+  return cards.map((id) => ({
+    id,
+    encoder: encoder.get(id) ?? Number.NaN,
+    sm: sm.get(id) ?? Number.NaN,
+    temp: temp.get(id) ?? Number.NaN,
+    power: power.get(id) ?? Number.NaN,
+    sessions: sessions.get(id) ?? Number.NaN,
+  }));
 }, 30_000);
+
+/** Rows of the GPU table, so the template does not repeat the per-card map five
+ *  times. `of 8` stays on the sessions row: that ceiling is per card. */
+const GPU_ROWS: { label: string; read: (c: GpuCard) => string }[] = [
+  { label: "encoder", read: (c) => fmt.percent(c.encoder, 0) },
+  { label: "SM", read: (c) => fmt.percent(c.sm, 0) },
+  { label: "NVENC sessions", read: (c) => `${fmt.number(c.sessions)} of 8` },
+  { label: "temperature", read: (c) => fmt.celsius(c.temp) },
+  { label: "board power", read: (c) => fmt.watts(c.power) },
+];
+
+interface GpuCard {
+  id: string;
+  encoder: number;
+  sm: number;
+  temp: number;
+  power: number;
+  sessions: number;
+}
 
 const jellyfinSessions = usePoll(
   async (signal) => value((await instant(SERVICES.jellyfinSessions, signal))[0]?.value),
@@ -361,10 +461,10 @@ const jellyfinSessions = usePoll(
     <section class="headlines">
       <PanelBox v-for="lane in headlines" :key="lane.key" :label="lane.label" :stale="metricsStale">
         <template #aside>
-          <span class="value mono">{{ lane.format(latest(points(lane.key))) }}</span>
+          <span class="value mono" :class="{ hovered: cross.active.value }">{{ reading(lane) }}</span>
         </template>
         <MetricChart
-          :points="points(lane.key)"
+          :series="lanesOf(lane.key)"
           :tone="lane.tone"
           :height="72"
           :grid="3"
@@ -374,7 +474,10 @@ const jellyfinSessions = usePoll(
         />
         <div class="foot mono">
           <span>{{ lane.sub }}</span>
-          <span>peak {{ lane.format(peak(points(lane.key))) }}</span>
+          <span>
+            <template v-if="medianReading(lane)">median {{ medianReading(lane) }} / </template
+            >peak {{ peakReading(lane) }}
+          </span>
         </div>
       </PanelBox>
     </section>
@@ -384,9 +487,17 @@ const jellyfinSessions = usePoll(
       <header class="tl-head">
         <span class="label">Timeline</span>
         <div class="tl-axis mono">
-          <span v-for="(t, i) in axis" :key="i">{{ t }}</span>
+          <!-- The day slot is always rendered, empty where the date has not
+               changed, so the times stay on one baseline across the row. -->
+          <span v-for="(t, i) in axis" :key="i" class="tick">
+            <span class="tick-day">{{ t.day ?? "" }}</span>
+            <span>{{ i === axis.length - 1 ? "now" : t.time }}</span>
+          </span>
         </div>
-        <span class="label right">Current</span>
+        <!-- The instant every value in this column is reporting. A stamp here
+             rather than "Current" is the whole signal that the numbers are a
+             reading from the cursor and not the live ones. -->
+        <span class="label right" :class="{ at: cursorStamp }">{{ cursorStamp ?? "Current" }}</span>
       </header>
 
       <!-- Dimmed on the same signal as the headline charts above, which draw
@@ -400,7 +511,7 @@ const jellyfinSessions = usePoll(
           <div class="lane-sub mono">{{ lane.sub }}</div>
         </div>
         <MetricChart
-          :points="points(lane.key)"
+          :series="lanesOf(lane.key)"
           :tone="lane.tone"
           :height="30"
           show-median
@@ -409,9 +520,9 @@ const jellyfinSessions = usePoll(
         />
         <div class="lane-value">
           <span class="mono now" :style="{ color: `var(--${lane.tone})` }">
-            {{ lane.format(latest(points(lane.key))) }}
+            {{ reading(lane) }}
           </span>
-          <div class="lane-peak mono">peak {{ lane.format(peak(points(lane.key))) }}</div>
+          <div class="lane-peak mono">peak {{ peakReading(lane) }}</div>
         </div>
       </div>
 
@@ -463,31 +574,29 @@ const jellyfinSessions = usePoll(
         </PanelBox>
 
         <PanelBox label="GPU and playback" :stale="metricsStale">
-          <div class="gpu mono">
-            <div class="gpu-row">
-              <span>encoder</span>
-              <span class="gv">{{ fmt.percent(latest(points("gpu")), 0) }}</span>
+          <div
+            v-if="gpu.data.value?.length"
+            class="gpu mono"
+            :style="{ '--cards': gpu.data.value.length }"
+          >
+            <div class="gpu-row head">
+              <span></span>
+              <span v-for="c in gpu.data.value" :key="c.id" class="gv">gpu{{ c.id }}</span>
             </div>
-            <div class="gpu-row">
-              <span>NVENC sessions</span>
-              <span class="gv">{{ fmt.number(gpu.data.value?.sessions ?? Number.NaN) }} of 8</span>
-            </div>
-            <div class="gpu-row">
-              <span>temperature</span>
-              <span class="gv">{{ fmt.celsius(gpu.data.value?.temp ?? Number.NaN) }}</span>
-            </div>
-            <div class="gpu-row">
-              <span>board power</span>
-              <span class="gv">{{ fmt.watts(gpu.data.value?.power ?? Number.NaN) }}</span>
+            <div v-for="row in GPU_ROWS" :key="row.label" class="gpu-row">
+              <span>{{ row.label }}</span>
+              <span v-for="c in gpu.data.value" :key="c.id" class="gv">{{ row.read(c) }}</span>
             </div>
             <div class="gpu-row">
               <span>Jellyfin sessions</span>
-              <span class="gv">{{ fmt.number(jellyfinSessions.data.value ?? Number.NaN) }}</span>
+              <span class="gv span-all">{{ fmt.number(jellyfinSessions.data.value ?? Number.NaN) }}</span>
             </div>
           </div>
+          <p v-else class="empty mono">no GPU reported</p>
           <p class="note mono">
             Two NVENC sessions already pin the encoder block at 100% while the SM sits near 10%, so a
-            third GPU worker cannot encode faster.
+            third GPU worker cannot encode faster. gpu0's video engines are dead hardware, so both
+            consumers are pinned to gpu1 and gpu0 encodes nothing by design.
           </p>
         </PanelBox>
       </div>
@@ -674,6 +783,12 @@ const jellyfinSessions = usePoll(
   color: var(--fg);
 }
 
+/* Says the number is a reading from the cursor rather than the live one, so a
+   frozen-looking figure is never mistaken for the current value. */
+.value.hovered {
+  color: var(--ok);
+}
+
 .foot {
   display: flex;
   justify-content: space-between;
@@ -705,6 +820,28 @@ const jellyfinSessions = usePoll(
   justify-content: space-between;
   font: var(--t-mono-xs);
   color: var(--fg-dim);
+}
+
+.tick {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.35;
+}
+
+/* Brighter than the time it sits above: the date is the rarer, more orienting
+   half. Empty on most ticks, where it only holds the baseline. */
+.tick-day {
+  color: var(--fg-4);
+  min-height: 1.35em;
+}
+
+/* A timestamp is not a heading: it keeps its own case and its own figures. */
+.at {
+  color: var(--ok);
+  text-transform: none;
+  font: var(--t-mono-xs);
+  white-space: nowrap;
 }
 
 .right {
@@ -780,13 +917,15 @@ const jellyfinSessions = usePoll(
   height: 11px;
 }
 
+/* FULL WIDTH, with the band painted inside it as a background. It used to be a
+   60px element translated by percentages of ITSELF, so it crossed 252px of a
+   1200px lane and looped there. Now translateX(100%) is one whole lane. */
 .sweep {
   position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 60px;
+  inset: 0;
   background: linear-gradient(90deg, transparent, var(--ok-tint), transparent);
+  background-size: var(--sweep-band) 100%;
+  background-repeat: no-repeat;
   animation: sweep 6s linear infinite;
   pointer-events: none;
 }
@@ -1017,16 +1156,35 @@ const jellyfinSessions = usePoll(
   gap: 7px;
 }
 
+/* A column per card, sized from --cards, so a one-GPU host renders the same
+   table rather than a special case. */
 .gpu-row {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 1fr repeat(var(--cards, 1), minmax(0, auto));
+  gap: 0 12px;
   font: var(--t-mono-sm);
   color: var(--fg-5);
+}
+
+.gpu-row.head {
+  color: var(--fg-dim);
+  font: var(--t-mono-xs);
 }
 
 .gv {
   color: var(--fg-2);
   font-weight: 500;
+  text-align: right;
+}
+
+.gpu-row.head .gv {
+  color: var(--fg-dim);
+  font-weight: 400;
+}
+
+/* Not a per-card number - it belongs to Jellyfin, not to a card. */
+.span-all {
+  grid-column: 2 / -1;
 }
 
 @media (max-width: 1280px) {

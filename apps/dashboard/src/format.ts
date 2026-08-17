@@ -136,12 +136,49 @@ export function clock(unixSeconds: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "15 Aug", with no time. The calendar half of a stamp, on its own. */
+export function dayMonth(unixSeconds: number): string {
+  if (!Number.isFinite(unixSeconds)) return NO_DATA;
+  const d = new Date(unixSeconds * 1000);
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+}
+
 /** "15 Aug 14:03" - for anything that may be older than today. */
 export function stamp(unixSeconds: number): string {
   if (!Number.isFinite(unixSeconds)) return NO_DATA;
-  const d = new Date(unixSeconds * 1000);
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  return `${d.getDate()} ${months[d.getMonth()]} ${clock(unixSeconds)}`;
+  return `${dayMonth(unixSeconds)} ${clock(unixSeconds)}`;
+}
+
+export interface AxisTick {
+  at: number;
+  time: string;
+  /** Set only where the calendar day changes, so "18:00" and "06:00" a week
+   *  apart stop being indistinguishable. Absent on every other tick, which is
+   *  what keeps a 1h axis from repeating one date seven times. */
+  day: string | null;
+}
+
+/**
+ * `count` evenly spaced ticks from `start` to `end` inclusive, each carrying
+ * the date only where it changes from the tick before it. The first tick always
+ * carries one - otherwise the axis names no date at all until it happens to
+ * cross a midnight.
+ */
+export function axisTicks(start: number, end: number, count: number): AxisTick[] {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || count < 1) return [];
+
+  const ticks: AxisTick[] = [];
+  let previous = "";
+
+  for (let i = 0; i < count; i += 1) {
+    const at = start + ((end - start) * i) / (count - 1 || 1);
+    const day = dayMonth(at);
+    ticks.push({ at, time: clock(at), day: day === previous ? null : day });
+    previous = day;
+  }
+  return ticks;
 }
 
 /**
