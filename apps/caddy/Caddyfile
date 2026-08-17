@@ -297,6 +297,47 @@ home.{$DOMAIN} {
 		reverse_proxy alertmanager:9093
 	}
 
+	# POSTERS, AND THE ONLY UPSTREAM HERE THAT NEEDS NO CREDENTIAL.
+	#
+	# Jellyfin's image endpoints answer 200 unauthenticated and every other path
+	# on it answers 401 - measured from inside this container, not assumed. That
+	# is what makes this cheap: the dashboard holds no credential, Caddy adds
+	# none, and if the matcher below is ever wrong the request falls through to
+	# Jellyfin's own 401 rather than opening its API. The guard is the first
+	# line of defence and not the only one.
+	#
+	# Same origin rather than watch.{$DOMAIN} on purpose. Cross-origin would
+	# work, and it would send 30-60 images per page load out through the router
+	# and back in through NAT loopback - measured at about 5x per request - and
+	# hang the poster grid off a route that is deliberately outside sign-on.
+	handle_path /api/images/* {
+		# Written against the STRIPPED path, like the two guards above: the
+		# browser asks for /api/images/Items/<id>/Images/Primary and Jellyfin
+		# sees /Items/<id>/Images/Primary.
+		#
+		# `not path_regexp` rather than a path matcher because the item id is
+		# the variable part. An id is 32 hex characters; anything else - a
+		# traversal, /Sessions, /Users/<id>/Images - is refused here.
+		@notimage not path_regexp ^/Items/[a-f0-9]{32}/Images/(Primary|Thumb|Backdrop|Logo)
+		respond @notimage "not through here" 403
+
+		# An image proxy has no business carrying a write, and Jellyfin's API
+		# does accept POST elsewhere. Cheap to refuse, so refuse it.
+		@write not method GET HEAD
+		respond @write "read only" 405
+
+		# ONLY A TAGGED REQUEST IS CACHEABLE, and the distinction is the point.
+		# The tag is a content hash of that image, so a changed poster changes
+		# the URL and a long immutable cache is safe. An untagged request is
+		# whatever the current image happens to be, so caching it would pin a
+		# stale poster for a year. Jellyfin itself sends a bare `Cache-Control:
+		# public` with no max-age, which is why this is set here.
+		@tagged query tag=*
+		header @tagged Cache-Control "public, max-age=31536000, immutable"
+
+		reverse_proxy jellyfin:8096
+	}
+
 	# The bundle. Last, because handle blocks are matched in source order among
 	# themselves and this one matches everything.
 	handle {
