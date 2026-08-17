@@ -1544,7 +1544,7 @@ Conclusions from auditing the running host. Do not rediscover these:
 - **`/boot` costs one slot per distinct KERNEL+INITRAMFS, not per deployment**, holds exactly two
   (2 x 146 MB + 11 MB GRUB = 303 MB of 350 MB), and **cannot be grown** - `nvme0n1p4` is XFS, which
   cannot be shrunk by any tool, so enlarging it means repartitioning the disk that carries `config/`.
-  Two corrections learned by doing it wrong on 2026-08-14:
+  Four corrections learned by doing it wrong, on 2026-08-14 and again on 2026-08-16:
   - **`ostree admin pin 0` is wrong whenever something is staged.** Index 0 is then the *staged*
     deployment and the command fails with `Cannot pin staged deployment`. Derive the booted index:
     `rpm-ostree status --json | jq '[.deployments[]] | map(.booted) | index(true)'`.
@@ -1562,6 +1562,35 @@ Conclusions from auditing the running host. Do not rediscover these:
     a rollback. **`bin/reboot-host.sh` gates on `verify-host.sh --greenboot`, not the full battery**,
     for the same reason: containers, backups and the checkout can all be unhealthy for reasons a
     rollback would not fix.
+  - **UNDER `--greenboot` IT IS A WARN WHATEVER THE CAUSE, pinned or not, and that was learned the
+    expensive way.** The bullet above narrowed the FAIL to "low `/boot` with nothing pinned" and
+    stopped there, which left the general case wrong: **a rollback cannot fix a full `/boot`, it
+    makes it worse**, because the deployment being rolled back to needs a slot of its own. On
+    2026-08-16 the unattended window applied a deployment, three deployments accumulated, `/boot`
+    hit **26 MB**, this check FAILed and greenboot rejected a **perfectly healthy boot** - then
+    could not act on its verdict: *"Boot counter exhausted but no rollback trigger set - manual
+    intervention required"*. `rpm-ostree cleanup -r` reclaimed it to 171 MB, the same figure as
+    2026-08-14. Nothing is lost by softening it there: the full battery still FAILs hourly into the
+    MOTD and `status.json`, and **both reboot paths refuse on their own `df`** - `bin/reboot-host.sh`
+    gates its pre-flight on the FULL battery and re-checks `/boot` itself, and
+    `bin/reboot-when-staged.sh` does the same, each against its own `BOOT_MIN_MB=160`.
+  - **`rpm-ostree cleanup -r` removes TWO deployments, not one**, when something is staged: it takes
+    the pending update along with the rollback (`deployment count change: -2`). Nothing is lost -
+    `rpm-ostreed-automatic.timer` re-stages nightly - but `greenboot.armed` warns "only 1 deployment,
+    nothing to roll back to" until it does, which reads like a fault and is not.
+- **A CHECK THAT COUNTS THE UNIT EXECUTING IT WILL BLOCK THE REMEDY FOR ITS OWN CONDITION**, and
+  `host.failed_units` did exactly that. `greenboot-healthcheck.service` is what execs
+  `verify-host.sh --greenboot`, and a failed unit stays failed for the rest of the boot - so one red
+  boot made that check FAIL for ever after, which made `--greenboot` exit 1, which made
+  `bin/reboot-host.sh` and `bin/reboot-when-staged.sh` both refuse. **The reboot they were refusing
+  is precisely what clears the runtime state.** Escaping it took `systemctl reset-failed` by hand on
+  2026-08-16, after the underlying cause was already fixed. That unit is now filtered from
+  `host.failed_units` **under `--greenboot` only**, which costs nothing: whatever made greenboot fail
+  is measured by that same battery in that same run and reported directly, so the failed unit adds
+  no information - it only carries a verdict past the point where its cause was repaired. At real
+  boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
+  the later gated runs, which is where it bit. Same shape as the phantom units the rename left
+  behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
 - **`ExecMainExitTimestamp` is runtime state and a reboot wipes it**, so "this nightly job has never
   run" and "it has not run in the twenty minutes since boot" look identical. `bin/verify-host.sh`
   therefore only treats a missing run as a finding once uptime exceeds the timer's period -

@@ -280,7 +280,13 @@ done
 # that carries config/.
 boot_free=$(df -Pm /boot | awk 'NR==2 {print $4}')
 fact boot_free_mb "${boot_free:-}" num
-if [ "$boot_free" -ge 160 ]; then
+if [ -z "$boot_free" ]; then
+	# Guarded because the comparison below is a bare -ge on this value: an
+	# unreadable df left it empty, `[` errored on the missing operand, and the
+	# elif chain then emitted a finding with an empty number - on the code path
+	# that decides whether the OS rolls itself back.
+	note deploy.boot_free "/boot free space could not be read - not measured"
+elif [ "$boot_free" -ge 160 ]; then
 	ok deploy.boot_free "/boot ${boot_free}M free, ${depl_count:-?} deployment(s)"
 elif [ "${pinned_count:-0}" -gt 0 ]; then
 	# A PIN IS THE USUAL CAUSE, AND IT IS NOT THE SAME PROBLEM. Pinning the
@@ -297,6 +303,23 @@ elif [ "${pinned_count:-0}" -gt 0 ]; then
 	# As a FAIL it told bin/reboot-host.sh that a perfectly good deployment was
 	# bad, and that script's failure path advises a rollback.
 	warn deploy.boot_free "/boot only ${boot_free}M free, but ${pinned_count} deployment(s) pinned - unpin and 'sudo rpm-ostree cleanup -r' reclaims it"
+elif [ -n "$GREENBOOT" ]; then
+	# A ROLLBACK CANNOT FIX A FULL /boot. It makes it worse: the deployment
+	# being rolled back to needs its own slot. So under --greenboot this must
+	# not be a FAIL, whatever the cause - the same rule the Logs and Metrics
+	# sections already follow, and which the pin branch above applies for one
+	# specific cause without ever generalising it.
+	#
+	# It cost a healthy boot on 2026-08-16. Three deployments had accumulated,
+	# /boot hit 26M, this check FAILed, greenboot marked the boot red - and then
+	# could not act on its own verdict: "Boot counter exhausted but no rollback
+	# trigger set - manual intervention required".
+	#
+	# Nothing is lost by softening it here. The full battery still FAILs, so it
+	# reaches the MOTD and status.json hourly, and both reboot paths refuse on
+	# their own df: bin/reboot-host.sh gates its pre-flight on the FULL battery
+	# and re-checks /boot itself, and bin/reboot-when-staged.sh does the same.
+	warn deploy.boot_free "/boot only ${boot_free}M free - the next staged update cannot write its kernel, but a rollback would need a slot of its own and make it worse"
 else
 	bad deploy.boot_free "/boot only ${boot_free}M free - the next staged update cannot write its kernel"
 fi
@@ -415,7 +438,31 @@ else
 	bad host.io_delegated "io is NOT delegated - every IOWeight= and IOReadBandwidthMax= is inert"
 fi
 
-sysfailed=$(systemctl list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ' -)
+# UNDER --greenboot, THE UNIT RUNNING THIS CHECK IS NOT EVIDENCE ABOUT IT.
+# greenboot-healthcheck.service is what execs this script in that mode, so
+# counting it here is self-referential - the same trap the Boot health section
+# documents about grading its own previous run, and verify.timer_enabled about
+# asserting its own liveness.
+#
+# It is self-sustaining rather than merely untidy. A failed unit stays failed
+# for the rest of the boot, so one red boot makes this FAIL for ever after,
+# which makes --greenboot exit 1, which makes bin/reboot-host.sh and
+# bin/reboot-when-staged.sh both refuse - blocking the reboot that is precisely
+# what clears the runtime state. Only `systemctl reset-failed` escaped it, by
+# hand, on 2026-08-16.
+#
+# Nothing is lost: whatever made greenboot fail is measured by THIS battery, in
+# this same run, and is reported directly. The failed unit adds no information -
+# it only carries a verdict past the point where its cause was fixed. At real
+# boot time the unit is `activating` rather than `failed`, so this filter is a
+# no-op there; it only affects the later gated runs, which is where it bit.
+#
+# awk rather than `grep -v`: set -uo pipefail is in force and a grep that
+# matches nothing exits 1. ${GREENBOOT:+...} leaves skip empty in the full
+# battery, where `$1 != ""` matches every real line, so that path is unchanged.
+sysfailed=$(systemctl list-units --failed --no-legend --plain 2>/dev/null \
+	| awk -v skip="${GREENBOOT:+greenboot-healthcheck.service}" '$1 != skip {print $1}' \
+	| paste -sd' ' -)
 if [ -z "$sysfailed" ]; then ok host.failed_units "no failed system units"
 else bad host.failed_units "failed system units: $sysfailed"; fi
 
