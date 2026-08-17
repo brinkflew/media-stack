@@ -908,6 +908,27 @@ def load_env():
     return env
 
 
+# NOT EVERY IMAGE SHIPS curl, AND THE ONES THAT DO NOT FAILED SILENTLY FOR
+# MONTHS. gluetun and jellyseerr carry wget and no curl, so every api_get
+# against them returned None - and because each caller guards with
+# `if isinstance(x, dict)`, that read as "the endpoint had nothing to say"
+# rather than as an error. home_server_vpn_info was therefore NEVER ONCE
+# EMITTED since the day it was written: absent from the TSDB, absent from the
+# dashboard's VPN row, and reported by nothing, because the source still
+# completed and still wrote home_server_collector_source_up 1.
+#
+# Same shape as the shellcheck leg that printed `all checks passed` over 2,224
+# lines it had never read. A client that is missing is not a body that is empty.
+CLIENT_UNAVAILABLE = object()
+
+# Containers that answered neither curl nor wget on this run. Emitted as a
+# series by main(), because the whole lesson above is that this failure has to
+# be visible from outside: a source can lose an endpoint entirely and still
+# report source_up 1, since one absent optional call is indistinguishable from
+# one that legitimately had nothing to say.
+MISSING_CLIENT = set()
+
+
 def api_get(container, url, headers=None, timeout=12):
     """A GET inside a container, with the credential passed on STDIN not argv.
 
@@ -915,16 +936,55 @@ def api_get(container, url, headers=None, timeout=12):
     appears in the process list - which `podman exec ... -H "X-Api-Key: ..."`
     cannot avoid, and which matters more here than in a job that runs twice an
     hour, because this one runs 288 times a day.
+
+    The wget fallback keeps that property rather than trading it away. wget has
+    no config-file equivalent of -K, so the header cannot go in a file - but it
+    can be read from stdin by a shell INSIDE the container and expanded there,
+    which keeps it out of the host's process list just the same. What it does
+    reach is that container's own `ps`, which is the same trust boundary the
+    credential is already inside.
+
+    Returns the decoded body, or None. Callers keep their existing
+    `if isinstance(x, dict)` guards - what changes is that "this image has no
+    HTTP client" now lands in MISSING_CLIENT and on stderr instead of vanishing.
     """
+    headers = list(headers or [])
     config = ['url = "%s"' % url, "silent", "max-time = 8"]
-    for header in (headers or []):
+    for header in headers:
         config.append('header = "%s"' % header)
+    body = _exec_json(container, ["curl", "-K", "-"],
+                      "\n".join(config) + "\n", timeout)
+    if body is not CLIENT_UNAVAILABLE:
+        return body
+
+    # One header is all any caller here passes, and wget's --header can only be
+    # given a literal - so the shell reads it and expands it, never argv.
+    script = 'read -r h 2>/dev/null; exec wget -q -T 8 -O - --header="$h" "%s"' % url
+    body = _exec_json(container, ["sh", "-c", script],
+                      (headers[0] if headers else "") + "\n", timeout)
+    if body is CLIENT_UNAVAILABLE:
+        MISSING_CLIENT.add(container)
+        print("collect-metrics: %s has neither curl nor wget; cannot poll %s"
+              % (container, url), file=sys.stderr)
+        return None
+    return body
+
+
+def _exec_json(container, argv, stdin, timeout):
+    """Run argv in a container, decode JSON, and tell the two failures apart.
+
+    A missing executable is exit 127 from the runtime, which is what separates
+    "this image has no curl" from "the API refused". Conflating them is the bug
+    this function exists to make impossible.
+    """
     try:
-        res = subprocess.run(["podman", "exec", "-i", container, "curl", "-K", "-"],
-                             input="\n".join(config) + "\n", capture_output=True,
+        res = subprocess.run(["podman", "exec", "-i", container] + argv,
+                             input=stdin, capture_output=True,
                              text=True, timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError):
-        return None
+        return CLIENT_UNAVAILABLE
+    if res.returncode == 127 or "executable file" in (res.stderr or ""):
+        return CLIENT_UNAVAILABLE
     if res.returncode != 0:
         return None
     try:
@@ -1386,6 +1446,14 @@ def main():
           "old' for ever after the collector dies.")
     m.add("home_server_collector_duration_seconds", "%.4f" % duration, None,
           "Wall time for the whole run.")
+    # Zero is written explicitly rather than omitted, because this series exists
+    # precisely to catch a silent absence and a series that is only present when
+    # something is wrong cannot be alerted on with `== 0` or graphed as healthy.
+    m.add("home_server_collector_client_unavailable", len(MISSING_CLIENT), None,
+          "Containers that answered neither curl nor wget, so an application "
+          "endpoint could not be polled at all. This is NOT the same as an "
+          "endpoint with nothing to report, and conflating them hid "
+          "home_server_vpn_info's total absence for months.")
     m.add("home_server_collector_series", m.count + slow.count + 1, None,
           "Series written last run. A source that silently stops emitting a "
           "sub-family looks identical to one emitting legitimate absence; a "
