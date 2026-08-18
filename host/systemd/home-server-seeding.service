@@ -1,0 +1,32 @@
+# ==============================================================================
+# Hold torrents for 72h, then let qBittorrent stop them at ratio 1.5 or a week
+# ------------------------------------------------------------------------------
+# A plain systemd user unit rather than a quadlet, because it runs ON the host:
+# `podman exec` reaches qBittorrent inside the torrent pod's network namespace,
+# where the WebUI needs no credential. A container doing the same job would need
+# a route onto net-download and a login, which is strictly more exposure for a
+# job that sets two numbers on a torrent.
+#
+# It deletes nothing. Stopping a torrent is what Radarr and Sonarr already wait
+# for before removing it and its files, so this unit only decides WHEN a torrent
+# becomes eligible to stop.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Apply the seeding policy to qBittorrent share limits
+Documentation=file:/var/home-server/bin/apply-seeding-policy.py
+# After= only, NEVER Wants=. A Wants= here would start the whole torrent pod -
+# VPN included - every hour, which is how home-server-promote.service came to
+# pull tdarr-server up every ten minutes. Ordering is worth keeping; starting
+# the download stack is not this unit's business.
+After=torrent-pod.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/home-server/bin/apply-seeding-policy.py
+# No Restart=. The script sets share limits and nothing else, so a failed run
+# changes nothing and the next tick retries against fresher data. Retrying a
+# oneshot through a transient API blip only buys duplicate log lines.
+SuccessExitStatus=0

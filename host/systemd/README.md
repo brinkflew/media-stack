@@ -18,7 +18,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now home-server-promote.timer home-server-verify.timer \
                               home-server-caddy-build.timer home-server-backup.timer \
                               home-server-reboot.timer home-server-metrics.timer \
-                              home-server-dashboard-build.timer
+                              home-server-dashboard-build.timer home-server-seeding.timer
 ```
 
 **The loop is a glob rather than a list on purpose.** It used to name the four files it knew about,
@@ -44,11 +44,13 @@ symlinks, so there is no copy step. Only `daemon-reload` is needed.
 | `home-server-reboot` | Applies a staged OS deployment, hourly 05:00-09:00 on Sundays - but only if greenboot is armed to undo it, no deployment has been rejected and left unexplained, no backup is running, the host is healthy now and nothing is mid-transcode. Every check is a refusal and doing nothing is the default; the one exception is the encoder, which stops being a veto past 14 days staged or 30 days of uptime. Five attempts rather than one because that refusal is transient. See `bin/reboot-when-staged.sh`. |
 | `home-server-metrics` | Collects, every 30 seconds, the numbers no container can honestly measure here: host filesystems (node-exporter's collector reads `/proc/1/mountinfo`, which no rootless container may), host network (`/proc/net` resolves in the reader's namespace), and the cgroup memory detail that separates a container holding cold page cache from one that is actually starved. It writes Prometheus exposition format into node-exporter's textfile directory rather than pushing, because Prometheus pulls - which also buys `node_textfile_mtime_seconds`, dating the file from outside the collector. See `bin/collect-metrics.py`. |
 | `home-server-backup` | Backs up `config/` nightly at 03:00, to `/var/backups/home-server` and then off-site by `restic copy`. This is the backup that actually happens; the workstation's `bin/backup-config.sh` is a third copy taken when someone is home. See `bin/backup-server.sh`. |
+| `home-server-seeding` | Enforces the one part of the seeding policy qBittorrent cannot express: a **72-hour floor** before any torrent may be stopped. Every share limit qBittorrent has is a maximum that triggers an action, so a minimum can only be enforced by withholding those limits - which is all this does. Past 72h a torrent gets ratio 1.5 and a seven-day seeding limit and qBittorrent stops it on whichever lands first; Radarr and Sonarr then delete it and its files, as they already did. It deletes nothing itself, and a stopped timer means nothing is ever reaped rather than things being reaped early. See `bin/apply-seeding-policy.py`. |
 
 ```bash
 systemctl --user list-timers home-server-promote.timer home-server-verify.timer
 journalctl --user -u home-server-promote -n 50
 /var/home-server/bin/promote-transcoded.py --dry-run     # safe, changes nothing
+/var/home-server/bin/apply-seeding-policy.py --dry-run --verbose   # ditto
 /var/home-server/bin/verify-host.sh                      # read-only apart from the MOTD
 /var/home-server/bin/verify-host.sh --routes             # also walks the public routes
 ```

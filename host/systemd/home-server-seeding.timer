@@ -1,0 +1,25 @@
+# ==============================================================================
+# Re-apply the seeding policy every hour
+# ------------------------------------------------------------------------------
+# Hourly is chosen against the resolution the policy actually needs, not against
+# how fast anything happens: the only event this timer has to notice is a
+# torrent crossing 72 hours of seeding, and being up to an hour late promoting
+# it costs nothing at all. The two limits it then hands over - ratio 1.5 and
+# seven days - are evaluated by qBittorrent continuously, not here.
+#
+# Persistent=true so a tick missed while the machine was off runs once at boot.
+# That matters more than usual here: torrents keep accumulating seeding time
+# across a reboot, so a host that was down for a week comes back with work to do.
+# ==============================================================================
+
+[Unit]
+Description=Apply the seeding policy to qBittorrent share limits, hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

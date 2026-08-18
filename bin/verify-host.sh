@@ -933,6 +933,53 @@ if [ -z "$GREENBOOT" ]; then
 	done
 
 	# --------------------------------------------------------------------------
+	# Seeding policy. Whether the 72h floor is actually being enforced.
+	# --------------------------------------------------------------------------
+	# WARN OR PASS, NEVER FAIL, for the reason the Logs and Metrics sections
+	# below already give: bin/reboot-host.sh refuses to act on a host this
+	# battery calls unhealthy, and a share-limit manager that has stopped must
+	# never hold up an OS security update. Its failure mode is a disk that grows,
+	# which is exactly the kind of thing a reboot does not fix.
+	#
+	# THE INVARIANT IS THE GLOBAL LIMITS BEING OFF, and it is checked rather than
+	# assumed because it lives in a UI anybody can click. A new torrent's limits
+	# default to -2, "use the global one" - so a global limit switched back on
+	# reaps torrents hours into their life, silently, and the 72h floor this
+	# whole policy exists for stops existing. The script re-asserts it every run;
+	# this proves the script is still running.
+	say seeding "Seeding policy"
+
+	if [ "$(systemctl --user is-enabled home-server-seeding.timer 2>/dev/null)" = enabled ]; then
+		ok seeding.timer_enabled "home-server-seeding.timer enabled"
+	else
+		warn seeding.timer_enabled "home-server-seeding.timer is not enabled - no torrent is ever promoted past the 72h floor, so nothing is ever cleaned up"
+	fi
+
+	seeding_state="${HOME:-/root}/.cache/home-server/seeding-state"
+	sd_ok=$(sed -n 's/^last_ok_at=//p' "$seeding_state" 2>/dev/null | tail -1)
+	sd_age=
+	if [ -n "$sd_ok" ]; then
+		sd_epoch=$(date -d "$sd_ok" +%s 2>/dev/null)
+		[ -z "$sd_epoch" ] || sd_age=$(( ( $(date +%s) - sd_epoch ) / 3600 ))
+	fi
+	# Stale at three hours against an hourly timer, so one missed tick reads as
+	# a blip rather than as a fault - the same tolerance the off-site delete
+	# probe gets for the same reason.
+	if [ -n "$sd_age" ] && [ "$sd_age" -le 3 ]; then
+		ok seeding.run_age "the policy was applied ${sd_age}h ago"
+	elif [ -n "$sd_age" ]; then
+		warn seeding.run_age "the policy was last applied ${sd_age}h ago, limit 3h - torrents past 72h are not being promoted"
+	elif [ "${uptime_s:-0}" -lt 3600 ]; then
+		ok seeding.run_age "not applied in the $((uptime_s / 60))m since boot - not yet due"
+	else
+		warn seeding.run_age "the seeding policy has no record of a successful run"
+	fi
+
+	fact seeding_last_ok_at "${sd_ok:-}"
+	fact seeding_managed "$(sed -n 's/^managed=//p' "$seeding_state" 2>/dev/null | tail -1)" num
+	fact seeding_holding "$(sed -n 's/^holding=//p' "$seeding_state" 2>/dev/null | tail -1)" num
+
+	# --------------------------------------------------------------------------
 	# Logs. The policy, and whether it is actually in force.
 	# --------------------------------------------------------------------------
 	# EVERY CHECK HERE IS WARN OR PASS, NEVER FAIL, and that is a constraint
