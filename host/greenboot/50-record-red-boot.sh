@@ -57,12 +57,32 @@ mkdir -p "$(dirname "$STATE")"
 # The FIRST red boot is the one worth keeping. If this is a rollback loop, later
 # boots are consequences, and overwriting the timestamp each time would make a
 # problem that started on Tuesday look like it started this morning.
+#
+# IT RECORDS *WHICH* DEPLOYMENT, NOT ONLY WHEN, and that is what stops the
+# marker from becoming a permanent hold. Written with a timestamp alone,
+# bin/reboot-when-staged.sh had to refuse EVERY deployment while it was set -
+# right for the image that was rejected, wrong for the fix when it is published,
+# and nothing could tell the two apart. So the Sunday window kept declining
+# until a human cleared it by hand, which is the "host silently stops taking OS
+# security updates" failure CLAUDE.md already records from two other directions.
+#
+# The checksum comes from the booted_checksum= line the CHECK WRAPPER
+# (40-home-server.sh) has already written to this same file, this same boot -
+# not from a fresh `rpm-ostree status --json`. This path runs when things are
+# already going wrong, and it must not depend on a D-Bus round trip to
+# rpm-ostreed, which may be exactly what is unwell.
+booted_csum=$(sed -n 's/^booted_checksum=//p' "$STATE" 2>/dev/null | tail -1)
+
 {
-	grep -v '^red_boot_at=' "$STATE" 2>/dev/null
+	grep -vE '^(red_boot_at|red_boot_csum)=' "$STATE" 2>/dev/null
 	if grep -q '^red_boot_at=' "$STATE" 2>/dev/null; then
-		grep '^red_boot_at=' "$STATE"
+		grep -E '^(red_boot_at|red_boot_csum)=' "$STATE"
 	else
 		echo "red_boot_at=$now"
+		# Absent when the wrapper could not read it. reboot-when-staged.sh
+		# treats a marker with no checksum as blocking EVERYTHING, which is the
+		# safe direction and preserves the old behaviour exactly.
+		[ -z "$booted_csum" ] || echo "red_boot_csum=$booted_csum"
 	fi
 } >"$STATE.tmp"
 mv "$STATE.tmp" "$STATE"

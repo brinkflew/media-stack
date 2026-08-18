@@ -60,6 +60,7 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 red=$(sed -n 's/^red_boot_at=//p' "$STATE" 2>/dev/null | tail -1)
+red_csum=$(sed -n 's/^red_boot_csum=//p' "$STATE" 2>/dev/null | tail -1)
 counter=$(grub2-editenv "$GRUBENV" list 2>/dev/null | sed -n 's/^boot_counter=//p' | tail -1)
 
 # NOTHING TO DO IS AN ANSWER, not a success. Reporting "cleared" when there was
@@ -70,7 +71,7 @@ if [ -z "$red" ] && [ -z "$counter" ]; then
 	exit 0
 fi
 
-echo "clear-red-boot: found${red:+ red_boot_at=$red}${counter:+ boot_counter=$counter}"
+echo "clear-red-boot: found${red:+ red_boot_at=$red}${red_csum:+ red_boot_csum=$red_csum}${counter:+ boot_counter=$counter}"
 if [ -n "$DRY" ]; then
 	echo "clear-red-boot: dry run - nothing was changed"
 	exit 0
@@ -82,9 +83,12 @@ fi
 # Write to a temporary and move, so a reader never sees a half-written file -
 # the same shape 50-record-red-boot.sh and the backup state file use.
 if [ -n "$red" ]; then
-	grep -v '^red_boot_at=' "$STATE" >"$STATE.tmp" 2>/dev/null
+	# Both keys, because they are one fact: the timestamp says a boot was
+	# rejected and the checksum says which. Leaving the checksum behind would
+	# strand an identity with nothing to identify.
+	grep -vE '^(red_boot_at|red_boot_csum)=' "$STATE" >"$STATE.tmp" 2>/dev/null
 	mv "$STATE.tmp" "$STATE"
-	echo "clear-red-boot: cleared red_boot_at from $STATE"
+	echo "clear-red-boot: cleared red_boot_at${red_csum:+ and red_boot_csum} from $STATE"
 fi
 
 # ------------------------------------------------------------------------------

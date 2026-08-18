@@ -149,9 +149,32 @@ note "staged $staged (${staged_age_d}d ago), $depl_count deployment(s) on disk, 
 # ------------------------------------------------------------------------------
 # Did the last attempt end badly?
 # ------------------------------------------------------------------------------
+# WHICH deployment was rejected, not merely that one was. Refusing on the
+# timestamp alone was right for the image that failed and wrong for its fix: once
+# ublue publishes a corrected image nothing could tell the two apart, so this
+# gate went on declining every Sunday until a human cleared the marker by hand -
+# the "host silently stops taking OS security updates" failure from a third
+# direction. It held from 11:55 on 2026-08-18 and was cleared manually.
+#
+# A MARKER WITH NO CHECKSUM STILL BLOCKS EVERYTHING. Markers written before this
+# change carry no identity, and treating "no checksum" as "no match" would
+# quietly un-hold every one of them - turning a safety change into a silent
+# release of exactly the brake it is about. Absent means block, which is also
+# what happens when the wrapper could not read the checksum at all.
 red=$(sed -n 's/^red_boot_at=//p' "$STATE" 2>/dev/null | tail -1)
-[ -z "$red" ] || refuse "a deployment was rejected at $red and nobody has cleared it.
+red_csum=$(sed -n 's/^red_boot_csum=//p' "$STATE" 2>/dev/null | tail -1)
+if [ -n "$red" ]; then
+	next_csum=$(jq -r '.deployments[0].checksum // empty' <<<"$status_json")
+	if [ -z "$red_csum" ]; then
+		refuse "a deployment was rejected at $red and nobody has cleared it.
   Understand why, then:  sudo $REPO/bin/clear-red-boot.sh"
+	elif [ "$red_csum" = "$next_csum" ]; then
+		refuse "this is the SAME deployment greenboot rejected at $red (${red_csum:0:12}).
+  Rebooting would repeat it. Understand why, then:  sudo $REPO/bin/clear-red-boot.sh"
+	else
+		note "a deployment was rejected at $red (${red_csum:0:12}), but ${next_csum:0:12} is a different one - proceeding"
+	fi
+fi
 
 # ------------------------------------------------------------------------------
 # Is the host healthy RIGHT NOW?

@@ -45,6 +45,8 @@
 #   HOME_SERVER_BOOT_STATE    greenboot's verdict file
 #   HOME_SERVER_GREENBOOT_BIN / _ETC, HOME_SERVER_GRUB_CUSTOM
 #   HOME_SERVER_GRUBENV       GRUB's environment block, which decides what boots
+#   HOME_SERVER_POLICY_JSON / _POLICY_IMAGE   the container signature policy
+#                             podman uses, and the one the OS image ships
 # ==============================================================================
 
 set -uo pipefail
@@ -280,8 +282,26 @@ else
 	# deployment that can pull no image is broken, the breakage ships IN the
 	# image, and a rollback is precisely the fix. This is the check that would
 	# have caught e5bf6651 on its first boot.
+	# AND THE REPAIR NEEDS ITS OWN EXIT, which is why this reads TWO files.
+	# /etc is what podman uses and what the repair wrote; /usr/etc is what the
+	# IMAGE ships. Once the two differ, a local override is in force - ostree
+	# preserves it for ever, and the entry this file's image-ref note makes
+	# applies in full: after a ublue cosign key rotation a stale override pins
+	# this host to DEAD KEYS and every pull fails. Reading only /etc, this check
+	# would report the repair as healthy for as long as it existed and could
+	# never say when it had stopped being needed.
+	#
+	# So the removal trigger is a check rather than a sentence in CLAUDE.md,
+	# because a sentence is the thing this repository keeps proving nobody acts
+	# on.
 	policy_json="${HOME_SERVER_POLICY_JSON:-/etc/containers/policy.json}"
-	policy_state=$(python3 -c '
+	policy_image="${HOME_SERVER_POLICY_IMAGE:-/usr/etc/containers/policy.json}"
+	# DO NOT REWRITE THIS WITH jq. jq ACCEPTS the broken file - it stops at the
+	# end of the top-level value and ignores the NUL padding - so the obvious
+	# spelling passes on exactly the input this exists to catch. Python's
+	# decoder rejects it the way Go's does, which is what podman uses.
+	policy_eval() {  # <file> -> ok | permissive:.. | missing | unparseable
+		python3 -c '
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -295,12 +315,36 @@ signed = any(e.get("type") == "sigstoreSigned"
              for k, v in scopes.items() if k.startswith("ghcr.io/ublue-os")
              for e in v)
 print("ok" if (default == "reject" and signed) else "permissive:%s:%s" % (default, signed))
-' "$policy_json" 2>/dev/null)
+' "$1" 2>/dev/null
+	}
+	policy_state=$(policy_eval "$policy_json")
+	policy_img_state=$(policy_eval "$policy_image")
+	# An override is "the two files differ", not "/usr/etc is broken" - so a
+	# divergence for any other reason is reported the same way and is equally
+	# worth knowing about.
+	policy_override=""
+	cmp -s "$policy_json" "$policy_image" 2>/dev/null || policy_override=1
+	fact policy_override "${policy_override:+yes}"
+	fact policy_image_state "${policy_img_state:-}"
 	case "$policy_state" in
-		ok)          ok   deploy.image_policy "container signature policy enforces ublue's cosign keys" ;;
-		permissive*) warn deploy.image_policy "$policy_json parses but does NOT verify ublue signatures ($policy_state) - pulls work, verification does not" ;;
 		missing)     bad  deploy.image_policy "$policy_json is MISSING - nothing can pull or build an image" ;;
 		unparseable) bad  deploy.image_policy "$policy_json is UNPARSEABLE - nothing can pull or build an image; the good copy is /usr/share/ublue-os/signing/usr/etc/containers/policy.json" ;;
+		permissive*) warn deploy.image_policy "$policy_json parses but does NOT verify ublue signatures ($policy_state) - pulls work, verification does not" ;;
+		ok)
+			if [ -z "$policy_override" ]; then
+				ok deploy.image_policy "container signature policy enforces ublue's cosign keys"
+			elif [ "$policy_img_state" != ok ]; then
+				# PASS, NOT WARN, and deliberately. Nothing is wrong: podman
+				# works and signatures verify. A permanent amber for a correct
+				# state nobody can act on is what teaches people to skim
+				# warnings - the same argument that softened greenboot.verdict.
+				# The message is what carries it.
+				ok deploy.image_policy "policy enforces ublue's cosign keys, via a LOCAL OVERRIDE - the image still ships a $policy_img_state $policy_image, so this file is load-bearing"
+			else
+				bad_msg="the image now ships a VALID $policy_image - the local override in $policy_json is no longer needed and will pin this host to dead keys after a ublue key rotation; remove it with 'sudo rm $policy_json' and confirm podman still pulls"
+				warn deploy.image_policy "$bad_msg"
+			fi
+			;;
 		*)           note deploy.image_policy "could not evaluate $policy_json - not measured" ;;
 	esac
 
@@ -678,11 +722,12 @@ if [ -z "$GREENBOOT" ]; then
 	# this mark is also what stops bin/reboot-when-staged.sh rebooting into the
 	# same image tonight - so it is cleared by a person, not aged out.
 	gb_red=$(sed -n 's/^red_boot_at=//p' "$boot_state" 2>/dev/null | tail -1)
+	gb_red_csum=$(sed -n 's/^red_boot_csum=//p' "$boot_state" 2>/dev/null | tail -1)
 	fact red_boot_at "${gb_red:-}"
 	if [ -z "$gb_red" ]; then
 		ok greenboot.red_boot "no boot has been rejected"
 	else
-		bad greenboot.red_boot "greenboot REJECTED a boot at $gb_red - unattended reboots are held; clear red_boot_at in $boot_state once understood"
+		bad greenboot.red_boot "greenboot REJECTED a boot at $gb_red${gb_red_csum:+ (${gb_red_csum:0:12})} - unattended reboots are held until a DIFFERENT deployment is offered; clear it with 'sudo bin/clear-red-boot.sh' once understood"
 	fi
 
 	# Hoisted out of the chain below so greenboot.installed reports on both
@@ -987,6 +1032,14 @@ if [ -z "$GREENBOOT" ]; then
 		bad update.caddy_build_timer "home-server-caddy-build.timer is off - Caddy will never be rebuilt"
 	fi
 
+	# ARMED IS NOT RAN, and only one of the two was ever asserted for these.
+	# containers.failed_units catches a build that FAILS - it caught both of
+	# these on 2026-08-18. Nothing caught a timer that quietly stops FIRING,
+	# which is the same shape as every other job here and the reason
+	# check_timer_run exists. A week for Caddy, whose timer is Saturday 22:00.
+	check_timer_run update.caddy_build_run "Caddy image rebuild" 604800 \
+		home-server-caddy-build.service --user
+
 	# The dashboard is the second built image, and its timer carries MORE than
 	# Caddy's does: this image's content comes from the checkout, so this timer
 	# is also the deploy path. Without it a `git pull` that changes
@@ -994,6 +1047,12 @@ if [ -z "$GREENBOOT" ]; then
 	# kind of change in the same commit takes effect on daemon-reload.
 	if [ "$(systemctl --user is-enabled home-server-dashboard-build.timer 2>/dev/null)" = enabled ]; then
 		ok update.dashboard_build_timer "home-server-dashboard-build.timer enabled"
+		# THE ONE WHERE "HAS NOT RUN" MEANS "HAS NOT DEPLOYED". Nightly, and it
+		# matters more than Caddy's: a stalled Caddy rebuild leaves a working
+		# proxy on a slightly old image, while a stalled dashboard rebuild
+		# leaves the committed source and the served bundle silently diverging.
+		check_timer_run update.dashboard_build_run "dashboard rebuild" 86400 \
+			home-server-dashboard-build.service --user
 	else
 		bad update.dashboard_build_timer "home-server-dashboard-build.timer is off - the dashboard will never pick up a commit"
 	fi
