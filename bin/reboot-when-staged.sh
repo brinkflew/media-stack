@@ -163,9 +163,23 @@ red=$(sed -n 's/^red_boot_at=//p' "$STATE" 2>/dev/null | tail -1)
 "$REPO/bin/verify-host.sh" --greenboot >/dev/null 2>&1 \
 	|| refuse "verify-host.sh --greenboot fails now - fix that before applying a new deployment"
 
+# THE SLOT IS ONLY NEEDED IF A KERNEL HAS TO BE WRITTEN, and only a STAGED
+# deployment writes one - ostree-finalize-staged does it at shutdown. A PENDING
+# deployment already has its entry, so this reboot writes nothing.
+#
+# GATING BOTH ON FREE SPACE DEADLOCKS, and unattended that means for ever. A
+# pending deployment is holding the second /boot slot, which is what puts /boot
+# below the threshold; booting it is what turns it into a rollback that
+# `rpm-ostree cleanup -r` can then free. So the refusal was blocking the only
+# thing that resolves its own condition - the same shape as host.failed_units
+# counting greenboot-healthcheck.service, and as greenboot.verdict before it.
+# Verified against the live host on 2026-08-18, where this refused at 26M free
+# with a pending deployment and would have gone on refusing every Sunday.
 boot_free=$(df -Pm /boot | awk 'NR==2 {print $4}')
-[ "$boot_free" -ge "$BOOT_MIN_MB" ] \
-	|| refuse "/boot has only ${boot_free}M free (want ${BOOT_MIN_MB}M)"
+next_staged=$(jq -r '.deployments[0] | select(.booted | not) | select(.staged) | .version // empty' <<<"$status_json")
+if [ "$boot_free" -lt "$BOOT_MIN_MB" ] && [ -n "$next_staged" ]; then
+	refuse "/boot has only ${boot_free}M free (want ${BOOT_MIN_MB}M) and $next_staged is STAGED - finalizing it needs a slot"
+fi
 
 pinned=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 [ "$pinned" -eq 0 ] || refuse "$pinned deployment(s) pinned - unpin and 'rpm-ostree cleanup -r' first"
