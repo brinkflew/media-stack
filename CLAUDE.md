@@ -1751,6 +1751,28 @@ Conclusions from auditing the running host. Do not rediscover these:
   boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
   the later gated runs, which is where it bit. Same shape as the phantom units the rename left
   behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
+- **THE HOURLY BATTERY SPENT THREE MINUTES A RUN ASKING EVERY REGISTRY A LOCAL QUESTION.**
+  `update.policy_count` counted containers carrying an auto-update policy by running
+  `podman auto-update --dry-run` - which contacts **every registry for every container** to work
+  out whether a newer image exists. Measured 2026-08-18: **3m02s wall against 4.2s of CPU**, i.e.
+  essentially the entire runtime of the battery, all of it network wait. Hourly, that is ~500
+  registry round trips a day for a number that changes only when a quadlet does - and
+  `bin/reboot-host.sh` runs the full battery in its pre-flight, so a human waited three minutes
+  for it at the moment they wanted an answer. The policy is a **label**
+  (`io.containers.autoupdate`, set from `AutoUpdate=`), so it reads locally in **0.055s**.
+  - **It is now exact rather than `>= 20`**, with both sides derived from `stacks/` - the same
+    authority `containers.units_active` and the topology lint use. A floor is a magic number
+    someone has to remember when a service is added, and this one silently tolerated three
+    missing policies.
+  - **`podman ps -a`, deliberately**: `podman auto-update` only ever saw RUNNING containers, so
+    the number read 21 instead of 23 while caddy and dashboard were down - moving for a reason
+    that had nothing to do with what it claims to measure. Whether a container is running is
+    `containers.units_active`'s question.
+  - **`$repo` WAS READ SEVERAL HUNDRED LINES BEFORE IT WAS ASSIGNED**, found immediately after.
+    It lived in the Checkout section, below two checks that now read it; under `set -u` the
+    command substitution failed into an empty string and `update.policy_count` reported **"not
+    measured"**. A check reading inconclusive from a variable that does not exist yet is the
+    quietest way for one to stop measuring - it is not even a WARN. It is defined at the top now.
 - **CADDY WAS DOWN FOR 35 MINUTES AND THE BATTERY REPORTED "22 containers up, none unhealthy".**
   The sharpest instance yet of the pattern this file keeps rediscovering, and it took every
   public service down while every signal read green. `caddy-build.service` failed on the
@@ -1799,9 +1821,12 @@ Conclusions from auditing the running host. Do not rediscover these:
   - **THAT REPAIR IS A LOCAL `/etc` OVERRIDE AND OSTREE KEEPS IT FOR EVER**, which is the exact
     thing the image-ref entry below says not to do - a ublue key rotation would then pin this
     host to dead keys and every update would fail. It is accepted here only because the
-    alternative was a host that could pull nothing at all. **Compare `/etc/containers/policy.json`
-    against `/usr/etc/containers/policy.json` after any OS update, and delete the override once
-    the image ships a valid one again.**
+    alternative was a host that could pull nothing at all. **`deploy.image_policy` now reads BOTH
+    files and carries the removal trigger**, because a sentence in this file is the thing nobody
+    acts on: it PASSes while the image's own copy is still broken (naming the override as
+    load-bearing) and **WARNs the moment the image ships a valid policy that differs**, which is
+    exactly what a key rotation looks like. Remove the override then - `sudo rm
+    /etc/containers/policy.json` - and confirm podman still pulls.
   - Two independent defects in one build - unlabelled binaries and a truncated file - so treat
     `e5bf6651` as a bad image rather than a bad package. **greenboot's original rejection was
     right for more reasons than the one it named.**
@@ -1838,6 +1863,17 @@ Conclusions from auditing the running host. Do not rediscover these:
   the 2026-08-16 red boot, after `/boot` was fixed and `red_boot_at` cleared by hand and the whole
   battery was green. It printed `PASS back after 73s` and `PASS host-level checks pass` - and the
   host came back on the deployment it started from. Four separate things went wrong at once:
+  - **THE MARKER NOW RECORDS *WHICH* DEPLOYMENT, NOT ONLY WHEN.** Refusing on a timestamp alone
+    was right for the image that failed and wrong for its fix: once a corrected image is
+    published nothing could tell the two apart, so the Sunday window kept declining until a
+    human cleared the marker by hand - the "host silently stops taking OS security updates"
+    failure from a third direction. `50-record-red-boot.sh` writes `red_boot_csum=` from the
+    `booted_checksum=` the check wrapper already put in the same file this same boot (no second
+    rpm-ostree call on a path that runs when things are already going wrong), and
+    `bin/reboot-when-staged.sh` refuses only when `.deployments[0]` carries that checksum.
+    **A marker with no checksum still blocks everything** - markers written before this change
+    carry no identity, and treating "no checksum" as "no match" would silently release every one
+    of them.
   - **`red_boot_at` is ours; `boot_counter` is GRUB's, and only the first was documented.** The
     clearing recipe was `sed -i '/^red_boot_at=/d'`, which disarms the unattended window and leaves
     GRUB pointed at the fallback. `bin/clear-red-boot.sh` now clears both, and
