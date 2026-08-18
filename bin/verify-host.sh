@@ -236,9 +236,72 @@ else
 
 	# The whole point of a signed ref: the OS image is verified against ublue's
 	# cosign keys rather than merely fetched over TLS.
+	#
+	# THIS CHECKS THE REF, NOT THE POLICY, and on 2026-08-18 it PASSED for hours
+	# on a host where signature verification was not happening at all and no
+	# image could be pulled. The ref is a string in rpm-ostree's metadata; what
+	# verification actually depends on is /etc/containers/policy.json, which is a
+	# separate file that can be absent, permissive or unparseable while the ref
+	# says exactly this. deploy.image_policy below is the half that measures it.
 	case "$booted_ref" in
 		ostree-image-signed:*) ok deploy.image_signed "image signature verification is on" ;;
 		*)                     warn deploy.image_signed "booted from an UNVERIFIED ref ($booted_ref)" ;;
+	esac
+
+	# ------------------------------------------------------------------------
+	# The policy that ref depends on, which the image itself broke
+	# ------------------------------------------------------------------------
+	# On 2026-08-18 ucore image e5bf6651 shipped /usr/etc/containers/policy.json
+	# as 256 bytes of the GENERIC containers-common default followed by ~2.5 KB
+	# of NUL padding - right length, wrong content. Consequences, none of which
+	# any check here could see:
+	#
+	#   - NOTHING could be pulled or built. Go's JSON decoder rejects trailing
+	#     NULs: `invalid character '\x00' after top-level value`. Every podman
+	#     pull, every .build unit and podman-auto-update would have failed,
+	#     nightly, while 22 running containers stayed healthy because a running
+	#     container needs no policy.
+	#   - The 256 bytes that DID parse were `insecureAcceptAnything` with no
+	#     sigstoreSigned scope at all, so had it parsed, ublue's cosign
+	#     verification would have been silently OFF while deploy.image_signed
+	#     went on reporting it as on.
+	#
+	# The same image also shipped five PCP binaries unlabelled, so this is a bad
+	# build rather than one defect - and greenboot was right to reject it. The
+	# repair is a local /etc override taken from the good copy the image ships at
+	# /usr/share/ublue-os/signing/usr/etc/containers/policy.json.
+	#
+	# DO NOT TEST THIS WITH jq. jq ACCEPTS the broken file - it stops at the end
+	# of the top-level value and ignores the padding - so the obvious spelling is
+	# a check that passes on exactly the input it exists to catch. Python's
+	# decoder rejects it the same way Go's does, which is what podman uses.
+	#
+	# FAIL rather than WARN, and it runs under --greenboot deliberately: a
+	# deployment that can pull no image is broken, the breakage ships IN the
+	# image, and a rollback is precisely the fix. This is the check that would
+	# have caught e5bf6651 on its first boot.
+	policy_json="${HOME_SERVER_POLICY_JSON:-/etc/containers/policy.json}"
+	policy_state=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except FileNotFoundError:
+    print("missing"); raise SystemExit
+except Exception:
+    print("unparseable"); raise SystemExit
+default = (d.get("default") or [{}])[0].get("type", "?")
+scopes = (d.get("transports", {}).get("docker", {}) or {})
+signed = any(e.get("type") == "sigstoreSigned"
+             for k, v in scopes.items() if k.startswith("ghcr.io/ublue-os")
+             for e in v)
+print("ok" if (default == "reject" and signed) else "permissive:%s:%s" % (default, signed))
+' "$policy_json" 2>/dev/null)
+	case "$policy_state" in
+		ok)          ok   deploy.image_policy "container signature policy enforces ublue's cosign keys" ;;
+		permissive*) warn deploy.image_policy "$policy_json parses but does NOT verify ublue signatures ($policy_state) - pulls work, verification does not" ;;
+		missing)     bad  deploy.image_policy "$policy_json is MISSING - nothing can pull or build an image" ;;
+		unparseable) bad  deploy.image_policy "$policy_json is UNPARSEABLE - nothing can pull or build an image; the good copy is /usr/share/ublue-os/signing/usr/etc/containers/policy.json" ;;
+		*)           note deploy.image_policy "could not evaluate $policy_json - not measured" ;;
 	esac
 
 	# Not the tag we think we are on is worth catching: stable-nvidia and
