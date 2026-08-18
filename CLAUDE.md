@@ -1751,6 +1751,37 @@ Conclusions from auditing the running host. Do not rediscover these:
   boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
   the later gated runs, which is where it bit. Same shape as the phantom units the rename left
   behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
+- **THE SAME IMAGE ALSO SHIPPED AN UNPARSEABLE `policy.json`, AND THAT IS WHY THE PCP MASK WAS
+  NOT THE WHOLE STORY.** ucore `e5bf6651` shipped `/usr/etc/containers/policy.json` as **256 bytes
+  of the generic containers-common default followed by ~2.5 KB of NUL padding** - the right
+  length, the wrong content. It was found only after masking PCP let the image boot.
+  - **Nothing could be pulled or built.** Go's JSON decoder rejects trailing NULs -
+    `invalid character '\x00' after top-level value` - so every `podman pull`, both `.build`
+    units and `podman-auto-update` fail. **22 running containers stayed healthy throughout**,
+    because a running container needs no policy, which is exactly why this was invisible.
+  - **And the part that DID parse had no `sigstoreSigned` scope at all**, so had the padding not
+    been there, ublue's cosign verification would have been silently off while
+    `deploy.image_signed` reported it as on. That check reads the **ref**, a string in
+    rpm-ostree's metadata; verification depends on a **separate file** that can be absent,
+    permissive or unparseable while the ref says `ostree-image-signed:`. `deploy.image_policy`
+    is the half that measures it, and it FAILs under `--greenboot`: the breakage ships in the
+    image and a rollback is the fix.
+  - **DO NOT TEST A POLICY FILE WITH `jq`. It ACCEPTS the broken one** - it stops at the end of
+    the top-level value and ignores the padding - so the obvious check passes on precisely the
+    input it exists to catch. Python's decoder rejects it the same way Go's does.
+  - **The good copy is in the same image**, at
+    `/usr/share/ublue-os/signing/usr/etc/containers/policy.json`, and the keys and
+    `registries.d/` entries were all byte-identical to pristine - **only `policy.json` was
+    damaged**. The repair is `install`ing that copy over `/etc/containers/policy.json`.
+  - **THAT REPAIR IS A LOCAL `/etc` OVERRIDE AND OSTREE KEEPS IT FOR EVER**, which is the exact
+    thing the image-ref entry below says not to do - a ublue key rotation would then pin this
+    host to dead keys and every update would fail. It is accepted here only because the
+    alternative was a host that could pull nothing at all. **Compare `/etc/containers/policy.json`
+    against `/usr/etc/containers/policy.json` after any OS update, and delete the override once
+    the image ships a valid one again.**
+  - Two independent defects in one build - unlabelled binaries and a truncated file - so treat
+    `e5bf6651` as a bad image rather than a bad package. **greenboot's original rejection was
+    right for more reasons than the one it named.**
 - **PERFORMANCE CO-PILOT IS MASKED, AND IT BLOCKED AN OS UPDATE BEFORE IT WAS.** uCore enables
   `pmcd`, `pmie` and `pmlogger` by default and the two `_farm` units are pulled in by those.
   **Nothing here reads any of it** - cockpit is inactive and the metrics layer is Prometheus,
