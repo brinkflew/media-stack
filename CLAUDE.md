@@ -1751,6 +1751,29 @@ Conclusions from auditing the running host. Do not rediscover these:
   boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
   the later gated runs, which is where it bit. Same shape as the phantom units the rename left
   behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
+- **CADDY WAS DOWN FOR 35 MINUTES AND THE BATTERY REPORTED "22 containers up, none unhealthy".**
+  The sharpest instance yet of the pattern this file keeps rediscovering, and it took every
+  public service down while every signal read green. `caddy-build.service` failed on the
+  truncated `policy.json`, so systemd skipped `caddy.service` entirely - *"Dependency failed for
+  caddy.service"*. Three checks looked straight at it and none could see it:
+  - **`containers.failed_units` counted zero, correctly.** A dependency failure leaves the unit
+    `inactive (dead)`, **not `failed`** - there was nothing in a failed state to count. This is
+    the one that looks like it should have caught it and cannot.
+  - **`containers.healthy` counted what IS running.** A container that never started is not
+    unhealthy, it is **absent**, and absent is indistinguishable from "not part of this stack".
+    It cheerfully reported 22 up and none unhealthy while the number should have been 24.
+  - **`routes.*` only runs under `--routes`**, which is not the hourly path.
+  - **The fix is to compare against what SHOULD run**, and the expected set comes from the unit
+    files in `stacks/` rather than a list in the script - a hand-maintained roster is the most
+    driftable thing here and would need editing in lockstep with every new service.
+    `containers.units_active` is that check. Verified by stopping a service: `failed_units` and
+    `healthy` both stay green and only the new one fires.
+- **`routes.ntfy` ASKED FOR `/`, WHICH IS NTFY'S PUBLIC WEB UI**, so it answered 200 whether the
+  instance was deny-all or wide open. The check could therefore only ever FAIL on a correctly
+  configured server, and could never have detected anonymous access being opened - a check that
+  is wrong in both directions at once. The property lives on a **topic** path, where deny-all
+  answers 403 to anonymous including for a topic that does not exist. Measured: `/` -> 200,
+  `/home-server/json` -> 403, `/verify-host-probe/json` -> 403.
 - **THE SAME IMAGE ALSO SHIPPED AN UNPARSEABLE `policy.json`, AND THAT IS WHY THE PCP MASK WAS
   NOT THE WHOLE STORY.** ucore `e5bf6651` shipped `/usr/etc/containers/policy.json` as **256 bytes
   of the generic containers-common default followed by ~2.5 KB of NUL padding** - the right
