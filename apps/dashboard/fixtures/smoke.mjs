@@ -104,6 +104,65 @@ check(
   null,
 );
 
+
+// --- the network graph -------------------------------------------------------
+// The topology and the edge list are compiled-in git data, so every claim below
+// is checkable without a browser - which is the whole reason graph.ts holds no
+// Vue and no DOM.
+const T = await load("/src/topology.ts");
+const NODE_NAMES = new Set(T.NODES.map((n) => n.name));
+const P = await load("/src/paths.ts");
+const G = await load("/src/graph.ts");
+
+console.log(`\n-- ${P.PATHS.length} declared routes --`);
+
+const impossible = P.PATHS.filter(
+  (p) => P.edgeKind(p) === "segment" && P.segmentsFor(p).length === 0,
+);
+check("every declared route crosses a shared segment", impossible.map((p) => `${p.from}->${p.to}`), []);
+
+const orphan = P.PATHS.filter(
+  (p) => ![p.from, p.to].every((n) => P.isPseudo(n) || NODE_NAMES.has(n)),
+);
+check("every endpoint is a container or a terminal", orphan.map((p) => `${p.from}->${p.to}`), []);
+
+// A terminal absorbs, so no chain may pass THROUGH one. Without this, the
+// inbound and outbound ends of the world join up and the walk reports
+// "duckdns -> wan -> caddy -> sonarr", which is two real routes spliced at a
+// place no packet crosses.
+const through = [];
+for (const name of ["sonarr", "caddy", "prowlarr", "jellyfin"]) {
+  for (const chain of P.tracePaths(name)) {
+    for (let i = 1; i < chain.length - 1; i += 1) {
+      if (P.isPseudo(chain[i])) through.push(chain.join(" -> "));
+    }
+  }
+}
+check("no route passes through a terminal", through, []);
+
+const L = G.layout();
+check("every box has a finite position", L.nodes.every((n) => Number.isFinite(n.x) && Number.isFinite(n.y)), true);
+check("the hub spans more than one rail", (L.hub?.rails.length ?? 0) > 1, true);
+check("no two boxes overlap", (() => {
+  const ext = L.nodes.map((n) => ({ ...n, bot: n.y + n.h + (n.members.length ? n.members.length * 12 + 10 : 0) }));
+  for (let i = 0; i < ext.length; i++)
+    for (let j = i + 1; j < ext.length; j++) {
+      const a = ext[i], b = ext[j];
+      if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.bot && b.y < a.bot) return `${a.name}/${b.name}`;
+    }
+  return null;
+})(), null);
+
+// Rate to motion. Zero must be still: a link carrying a keepalive is idle, and
+// animating it spends the reader's attention on nothing.
+check("below the floor is still", G.intensity(512), 0);
+check("absent is still", G.intensity(Number.NaN), 0);
+check("the scale is logarithmic", G.intensity(1024 ** 2) > 0.5 && G.intensity(1024 ** 2) < 0.7, true);
+check("the ceiling clamps", G.intensity(1024 ** 4), 1);
+check("busier is faster", G.flowDuration(10e6) < G.flowDuration(10e3), true);
+
+
 await server.close();
 console.log(`\n${failures === 0 ? "all checks passed" : `${failures} FAILED`}`);
+
 process.exit(failures === 0 ? 0 : 1);

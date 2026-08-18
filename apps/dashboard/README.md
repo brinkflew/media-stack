@@ -4,9 +4,11 @@ A Vue 3 application, served as static files, at `https://home.avanserv.com` behi
 sign-on as everything else. It is the last item on CLAUDE.md's roadmap: *"status.json for what is
 true now, keyed by stable ids, and Prometheus for when it stopped being true."*
 
-All four pages are built. **System** and **Services** landed first; **Home** and **Library** are
+All five pages are built. **System** and **Services** landed first; **Home** and **Library** were
 the second cut, and they needed a data layer before they needed a design - Prometheus holds counts,
-and a now-playing card with a number and no title is not the design.
+and a now-playing card with a number and no title is not the design. **Network** split out of
+Services on 2026-08-18 for the same reason a third time: drawing what can reach what, and what is
+actually moving, needed a per-segment measurement that did not exist.
 
 ```bash
 npm ci && npm run dev            # fixtures back every endpoint; no server needed
@@ -48,7 +50,8 @@ browser ---> caddy (home.avanserv.com, import protected)
 | **`status.json`** | the **prose** of the findings, plus `summary`, `facts`, `generated_at`, `mode` | `message` is deliberately absent from the metric. The id is stable and alertable; the prose is readable and disposable. That split is the intended join |
 | **`activity.json`** (30s) | what is playing and what is in flight, **with titles**: sessions, downloads, transcodes, torrents | a title cannot be a Prometheus label. Cardinality is the obvious reason and the lesser one - see below |
 | **`library.json`** (5min) | requests, recently added, recent completions, the stalled and queued files, the subtitle backlog | same, on the cadence its contents actually change at |
-| **`src/topology.ts`** | the network graph and the published-port table | the topology *is* static - it is defined in `stacks/`, in git. Only the node colouring is live |
+| **`src/topology.ts`** | the segment rails and the published-port table | the topology *is* static - it is defined in `stacks/`, in git. Only the node colouring is live |
+| **`src/paths.ts`** | who talks to whom, and why | half of these edges live in an application's own DATABASE - the \*arr download client, Prowlarr's FlareSolverr tag - so git cannot derive them. `bin/lint-repo.sh` validates instead: both endpoints must share a segment, because every bridge is `isolate=true` |
 
 ### The two documents are not series, and must never become them
 
@@ -96,6 +99,31 @@ textfile drop, and safe to relabel for the same reason: small, dedicated, ours.
 An absent file is reported as *"the check battery has never run here"*, which is a fresh host - a
 different thing from a broken one.
 
+## What the Network page can and cannot say
+
+**Per-flow accounting does not exist on this host and cannot be made to.** `nsenter -n` into a
+rootless netns is `EPERM` as `core`, and `/proc/net/nf_conntrack` is root-only - so there is no
+container-A-to-container-B number anywhere, and anything that appears to be one is an inference.
+
+What IS measured, by `source_container_network` in `bin/collect-metrics.py`, is a container's bytes
+on a **segment**: `home_server_container_network_{receive,transmit}_bytes_total{container,network}`.
+It reads `/proc/<pid>/net/dev` from the host as `core`, which works for the exact reason
+node-exporter's filesystem collector fails - rootless podman maps container uid 0 to `core`, so
+`ptrace_may_access` passes, where host PID 1 is real root and does not.
+
+So the drawing is **bipartite on purpose**: a rail is a segment, a box is a container, and the only
+line carrying a rate is the **spoke** between them. There is no point-to-point arrow with a number on
+it, because there is no number to put on one. Declared routes from `paths.ts` are a second language -
+they appear on hover, they are static, and they never animate. Reachability is asserted by git;
+motion is asserted by measurement; neither borrows the other's credibility.
+
+**A two-member segment is not automatically an exact edge**, which was the first guess and it is
+wrong. Every bridge also has a gateway to the outside: `net-dashboard` mirrors
+(`caddy.tx ~ dashboard.rx` and back), but `net-solver` does not - `prowlarr.tx` is 352 KB against
+`flaresolverr.rx` of 36 MB, because FlareSolverr is headless Chrome fetching indexer pages and nearly
+all of it is internet egress. Reconcile on **rates**, never on the raw counters: containers have
+different start times, so their totals cover different windows.
+
 ## The four things that will bite
 
 - **A stale dashboard must read as stale, never as healthy.** `src/stores/host.ts` tracks three
@@ -123,6 +151,9 @@ different thing from a broken one.
 |---|---|
 | `src/queries.ts` | **every PromQL expression this app issues.** The interface between the dashboard and `bin/collect-metrics.py`, in one readable file |
 | `src/topology.ts` | the network map, checked against `stacks/` by `bin/lint-repo.sh` |
+| `src/paths.ts` | the declared routes. Validated, not derived - see below |
+| `src/graph.ts` | the topology's coordinate arithmetic, the way `charts.ts` is the chart's. No Vue, no DOM, so `fixtures/smoke.mjs` can check it |
+| `src/composables/useTooltip.ts` | one tooltip, module-level, the `useCrosshair` shape |
 | `src/stores/host.ts` | `status.json`, the freshness primitives, the verdict |
 | `src/api/` | `http.ts` (the sign-on trap), `prometheus.ts`, `status.ts`, `alerts.ts` |
 | `src/charts.ts` | SVG path arithmetic. **No chart library** - the design is hand-drawn SVG, and a gap in a series must break the line rather than being drawn across |

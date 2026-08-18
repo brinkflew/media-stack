@@ -160,6 +160,19 @@
   }
 }
 
+/* The traffic flow on the Network page.
+   ANIMATED BY THE DASH PERIOD, NEVER BY THE PATH LENGTH. If the keyframe ran to
+   the path's own length, a long spoke and a short one at the same rate would
+   travel at visibly different apparent speeds - which is decoration pretending
+   to be data, the one thing that drawing must not be. With a fixed period the
+   apparent speed is 16 user units per cycle on every spoke, whatever its
+   length, so speed means rate and nothing else. */
+@keyframes flow {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -175,5 +188,16 @@
      goes rather than lingering as decoration. */
   .sweep {
     display: none !important;
+  }
+
+  /* The global rule above sets animation-duration to nearly zero, which for a
+     dash pattern leaves it FROZEN MID-CYCLE - a static dashed line that is
+     indistinguishable from the dotted style meaning "not measured". That is a
+     correctness bug rather than a cosmetic one, so the dashes go entirely and
+     the rate is read off the magnitude tick, which is drawn in both modes for
+     exactly this reason. */
+  .flow {
+    animation: none !important;
+    stroke-dasharray: none !important;
   }
 }

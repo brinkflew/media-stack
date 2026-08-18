@@ -228,6 +228,159 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+say "Paths"
+# ------------------------------------------------------------------------------
+# apps/dashboard/src/paths.ts is the second hand-maintained duplicate here and
+# the more dangerous one, because it cannot be derived in full. Half of these
+# edges live in Sonarr's, Radarr's, Prowlarr's, Bazarr's and Jellyseerr's own
+# databases - CLAUDE.md says it outright about the download client: "a git grep
+# does not find them and a restore brings the old value back."
+#
+# So this leg VALIDATES rather than diffs, and the check it can make is the one
+# that matters: every bridge carries Options=isolate=true, so two containers
+# that share no segment have no route to each other. An edge between them is a
+# drawing of a path that cannot exist - and a drawing of the network that is
+# wrong is worse than none, because it is used to reason about what can reach
+# what.
+#
+# It deliberately does NOT check which segment carries an edge, because paths.ts
+# deliberately does not say: caddy and sonarr share net-arr AND net-download,
+# and which one podman's DNS resolves at connect time is observable nowhere. The
+# intersection is derived at render time and rendered as ambiguity.
+#
+# THE FLOOR IS NOT DECORATION. A regex that stops matching prints nothing and
+# passes, which is indistinguishable from a clean run - the same shape as the
+# ShellCheck leg that once reported "all checks passed" over 2,224 lines it had
+# never read. (Note the capital: a comment opening with the lowercase name is
+# read as a directive by the very tool it is describing, which fails this file's
+# own ShellCheck leg. That is a small joke at nobody's expense.) So the parse
+# counts what it found and refuses a file with implausibly few edges in it.
+paths=apps/dashboard/src/paths.ts
+topo=apps/dashboard/src/topology.ts
+if [ -f "$paths" ] && [ -f "$topo" ] && command -v python3 >/dev/null 2>&1; then
+	drift=$(python3 - "$paths" "$topo" <<-'PY'
+		import re, sys, pathlib
+
+		# Raise this when edges are added. It exists so that a parse which has
+		# stopped matching reads as a failure rather than as a clean run.
+		MIN_PATHS = 30
+
+		paths = pathlib.Path(sys.argv[1]).read_text()
+		topo = pathlib.Path(sys.argv[2]).read_text()
+		problems = []
+
+		# topology.ts is parsed again rather than shared with the leg above: that
+		# one proves it matches stacks/, this one only needs the node table it
+		# has just been proved to hold. Sharing state would make one failure
+		# read as both.
+		nodes, pods = {}, {}
+		for block in re.finditer(
+		    r'name:\s*"([^"]+)"[^}]*?networks:\s*\[([^\]]*)\]([^}]*)', topo, re.S
+		):
+		    nodes[block.group(1)] = set(re.findall(r'"([^"]+)"', block.group(2)))
+		    pod = re.search(r'pod:\s*"([^"]+)"', block.group(3))
+		    if pod:
+		        pods[block.group(1)] = pod.group(1)
+		if not nodes:
+		    problems.append("topology.ts parsed to ZERO nodes - every check below would pass vacuously")
+
+		pseudo = set(re.findall(r'^\s*(\w+): "[^"]*(?:inbound|outbound)[^"]*",\s*$', paths, re.M))
+		if not pseudo:
+		    problems.append("paths.ts declares no PSEUDO_NODES - a terminal edge would read as a broken one")
+
+		# Records are split on the OPENING brace, never a closing one: a `why`
+		# legitimately contains "}" - "torrent:{$PORT_JOAL_WEB}" does - so any
+		# non-greedy {...} parse truncates records and reports nothing.
+		body = paths.split("export const PATHS", 1)
+		section = body[1] if len(body) == 2 else ""
+		if not section:
+		    problems.append("paths.ts has no `export const PATHS` - the parse below would find nothing and say nothing")
+		opens = len(re.findall(r"^\s*\{ from:", section, re.M))
+
+		edges = []
+		for chunk in re.split(r"^\s*\{(?=\s*from:)", section, flags=re.M)[1:]:
+		    rec = {}
+		    for key in ("from", "to", "why", "source"):
+		        m = re.search(r'\b%s: "((?:[^"\\]|\\.)*)"' % key, chunk)
+		        if m:
+		            rec[key] = m.group(1)
+		    if len(rec) == 4:
+		        edges.append(rec)
+
+		if opens != len(edges):
+		    problems.append(
+		        f"paths.ts: {opens} record(s) open with `from:` but only {len(edges)} "
+		        "parsed with all four fields - every edge needs from, to, why and source"
+		    )
+		if len(edges) < MIN_PATHS:
+		    problems.append(
+		        f"paths.ts parsed to {len(edges)} edge(s), floor is {MIN_PATHS} - either the "
+		        "file has shrunk or the parse has stopped matching, and those look identical here"
+		    )
+
+		bad_source = sorted({e["source"] for e in edges} - {"git", "runtime"})
+		if bad_source:
+		    problems.append("paths.ts: unknown source " + " ".join(bad_source) + " - it is a closed set")
+
+		def reach(node):
+		    """Which segments a node can actually use. A pod member declares
+		    networks: [] and reaches the world through its pod's, which is the
+		    entire point of the pod."""
+		    if node not in nodes:
+		        return None
+		    return nodes[node] | nodes.get(pods.get(node, ""), set())
+
+		terminals = crossed = ambiguous = 0
+		for e in edges:
+		    frm, to = e["from"], e["to"]
+		    for end in (frm, to):
+		        if end not in nodes and end not in pseudo:
+		            problems.append(f"edge {frm} -> {to}: {end} is in neither topology.ts NODES nor PSEUDO_NODES")
+		    if frm in pseudo or to in pseudo:
+		        terminals += 1
+		        continue
+		    a, b = reach(frm), reach(to)
+		    if a is None or b is None:
+		        continue
+		    if pods.get(frm) and pods.get(frm) == pods.get(to):
+		        # One namespace, not one network. Their networks lists are both
+		        # empty and intersect to nothing, which is not a violation - it
+		        # is the tightest coupling in the stack.
+		        continue
+		    shared = a & b
+		    if not shared:
+		        problems.append(
+		            f"edge {frm} -> {to} crosses no shared segment: stacks/ puts {frm} on "
+		            f"[{' '.join(sorted(a)) or '(none)'}] and {to} on [{' '.join(sorted(b)) or '(none)'}]. "
+		            "Every bridge is isolate=true, so that route cannot exist"
+		        )
+		    else:
+		        crossed += 1
+		        if len(shared) > 1:
+		            ambiguous += 1
+
+		if not problems:
+		    runtime = sum(1 for e in edges if e["source"] == "runtime")
+		    print("OK %d edges (%d runtime-only, %d terminal), %d cross a shared segment, "
+		          "%d of those share more than one" % (len(edges), runtime, terminals, crossed, ambiguous))
+		else:
+		    print("\n".join(problems))
+	PY
+	)
+	case "$drift" in
+	OK\ *) ok "paths.ts: ${drift#OK }" ;;
+	*)
+		bad "paths.ts does not describe this topology"
+		printf '%s\n' "$drift" | sed 's/^/    /'
+		;;
+	esac
+elif [ ! -f "$paths" ]; then
+	skip "no $paths"
+else
+	skip "python3 is not installed"
+fi
+
+# ------------------------------------------------------------------------------
 say "Quadlets"
 # ------------------------------------------------------------------------------
 # Catches syntax errors, NOT unset variables - systemd expands an unset ${VAR}

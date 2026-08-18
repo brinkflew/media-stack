@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import NavBar from "@/components/NavBar.vue";
 import StalenessBanner from "@/components/StalenessBanner.vue";
+import Tooltip from "@/components/Tooltip.vue";
 import { useHostStore } from "@/stores/host";
 import { useMediaStore } from "@/stores/media";
 
@@ -25,6 +26,11 @@ useMediaStore();
         <component :is="Component" />
       </RouterView>
     </main>
+
+    <!-- Mounted once, outside every panel: position:fixed inside a clipping
+         ancestor would be clipped, and one element is what makes "only one
+         tooltip at a time" structural rather than a rule everyone remembers. -->
+    <Tooltip />
   </div>
 </template>
 

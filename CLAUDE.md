@@ -703,8 +703,9 @@ systemctl --user start home-server-dashboard-build.service   # the deploy; see b
 cd apps/dashboard && npm run dev                             # fixtures, no server needed
 ```
 
-**All four pages are built.** System and Services were the first cut, on 2026-08-15; **Home and
-Library landed 2026-08-17** and needed a data layer before they needed a design.
+**All five pages are built.** System and Services were the first cut, on 2026-08-15; **Home and
+Library landed 2026-08-17** and needed a data layer before they needed a design. **Network split out
+of Services on 2026-08-18**, and needed a measurement that did not exist - see below.
 
 **It is READ-ONLY, and that is structural rather than a v1 shortcut.** The design has restart, pull,
 approve and terminate buttons, and no container here can have them: `container_t -> unconfined_t :
@@ -722,7 +723,8 @@ from `window.location.hostname` so no build-time variable is involved.
 | **`status.json`**, served as a file at `/data/status.json` | the **prose** of the findings. The metric carries the verdict and deliberately not the message; the id is the join |
 | **`activity.json`**, every 30s | what is playing and what is in flight, **with titles** - sessions, downloads, transcodes, torrents |
 | **`library.json`**, every 5 minutes | requests, recently added, recent completions, stalled and queued files, the subtitle backlog |
-| **`apps/dashboard/src/topology.ts`**, compiled in | the network graph and the published-port table. The topology *is* static - it is `stacks/`, in git - and only the node colouring is live |
+| **`apps/dashboard/src/topology.ts`**, compiled in | the segment rails and the published-port table. The topology *is* static - it is `stacks/`, in git - and only the node colouring is live |
+| **`apps/dashboard/src/paths.ts`**, compiled in | who talks to whom. Half of it lives in an application's own database, so it is **validated** rather than derived |
 
 **THE TWO DOCUMENTS EXIST BECAUSE A TITLE CANNOT BE A PROMETHEUS LABEL, AND THE SECOND REASON IS THE
 ONE THAT MATTERS.** Cardinality is the obvious one. The real one is that `source_playback` refuses to
@@ -807,7 +809,103 @@ verdict is `unknown` - **not folded into `fail`**, because "the battery says eve
 "nobody has asked the battery" must not look alike. The same reason `mode.routes: false` is rendered
 as "not measured" rather than omitted.
 
-**`src/topology.ts` duplicates what `stacks/` already declares**, which is the shape this file calls
+**THE NETWORK PAGE DRAWS WHAT IS MEASURED, WHICH IS NOT WHAT ANYONE WANTS IT TO DRAW.** The obvious
+design animates an arrow from container A to container B. **That number does not exist here and
+cannot be made to**: `nsenter -n` into a rootless netns is `EPERM` as `core`, and
+`/proc/net/nf_conntrack` is root-only, so there is no conntrack view of a netavark bridge at all.
+
+What IS available is a container's bytes on a **segment**, and cheaply, for the exact inverse of the
+reason node-exporter's filesystem collector fails. That one cannot read `/proc/1/mountinfo` because
+host PID 1 is real root; these are the other way round - rootless podman maps container uid 0 to
+`core`, so `ptrace_may_access` passes and every container's `/proc/<pid>/net/dev` is an ordinary file
+read from the host. Measured on all 24, not assumed.
+
+So the drawing is **bipartite**: a rail is a segment, a box is a container, and the only line
+carrying a rate is the **spoke** between them. Declared routes are a second visual language, shown on
+hover, static. **Reachability is asserted by git; motion is asserted by measurement; neither may
+borrow the other's credibility.**
+
+**A TWO-MEMBER SEGMENT IS NOT AUTOMATICALLY AN EXACT EDGE**, which was the first rule written and the
+first live run disproved it. Every bridge also carries a gateway to the outside. `net-dashboard`
+mirrors - `caddy.tx ~ dashboard.rx` and back - so those two really are only talking to each other.
+`net-solver` does not: `prowlarr.tx` is 352 KB against `flaresolverr.rx` of **36 MB**, because
+FlareSolverr is headless Chrome fetching indexer pages and nearly all of it is internet egress. So
+exactness is derived from the data rather than asserted from the topology - and **reconcile on rates,
+never on the raw counters**, because containers have different start times and their totals cover
+different windows.
+
+**THE TUNNEL IS THE BIGGEST NUMBER ON THE HOST AND THE FIRST IMPLEMENTATION THREW IT AWAY.** gluetun's
+`tun0` lives in the torrent pod's namespace carrying **223 MB in and 3.6 GB out** - every byte
+qBittorrent and JOAL have moved. It matches no declared subnet because it has no on-link route at
+all: gluetun steers traffic onto it with firewall marks and policy routing, so the main table's
+default stays on `eth0`. A subnet join therefore drops it silently. It is classified on the kernel's
+own `tun*`/`wg*` device naming - not a table of this stack's services - and
+`home_server_container_network_unmapped_interfaces` counts anything else that fails to map, written
+as an explicit 0 so it can be alerted on.
+
+**Three more things about that collector, each verified rather than reasoned about:**
+
+- **Interface names are not in declaration order.** caddy is `eth0=net-transcode`,
+  `eth3=net-ingress`, `eth6=net-media`. Join on the subnet from `/proc/<pid>/net/route`, never on the
+  index. And read it **little-endian**: `000A15AC` is `172.21.10.0`, and the obvious byte order
+  matches nothing at all, which is silent rather than wrong.
+- **The four torrent-pod containers share one netns**, so reading all four reports the same bytes
+  four times. `podman ps` reports `Networks: []` for gluetun, qbittorrent and joal and
+  `[net-download]` only for the infra container, so emitting only for a non-empty `Networks` list
+  attributes the pod once - from podman's own answer rather than a rule in a script.
+- **The pod's container is `torrent-infra` while `topology.ts` calls the node `torrent`**, and
+  `home_server_container_info{pod}` is **empty for all 24 containers**, so that label cannot bridge
+  it. The `unit` label can: `torrent-pod.service`. (Which also means `ServicesPage`'s
+  `pod {{ row.pod }}` branch has always been dead code.)
+
+**`apps/dashboard/src/paths.ts` is the second hand-maintained duplicate and the more dangerous one**,
+because it cannot be derived in full: `sonarr -> torrent`, `prowlarr -> flaresolverr` and nine others
+live in an application's own database, which is gitignored runtime state. So `bin/lint-repo.sh`
+**validates** rather than diffs - both endpoints must exist and must **share a segment**, since every
+bridge is `isolate=true` and an edge between two isolated bridges draws a route that cannot exist. It
+proves a path is *possible*, never that it is *used*, and the module header says so. Proven by
+adding `flaresolverr -> sonarr` and watching it fail.
+
+**It could not live in `topology.ts`.** That leg derives segment names with
+`re.findall(r'id:\s*"([^"]+)"', topo)` over the **whole file**, so any new object literal there
+carrying an `id:` field is read as a tenth network and fails the lint - a booby trap rather than a
+check.
+
+**`via` is derived, not declared, because the intersection is often larger than one.** caddy and
+sonarr share `net-arr` **and** `net-download`; caddy and jellyseerr share `net-arr` and `net-media`.
+Which one podman's DNS resolves at connect time is observable nowhere, so a hand-written `via` would
+be a claim nothing supports. Six of the 38 edges are ambiguous this way, and the drawing renders them
+as ambiguous.
+
+**Two terminals, not one.** `wan` is inbound and `internet` is outbound, and collapsing them into a
+single node is a modelling bug rather than a simplification: `duckdns -> wan` and `wan -> caddy` then
+join up, and a path walk cheerfully reports `duckdns -> wan -> caddy -> sonarr` - two real routes
+spliced at a place no packet crosses. A terminal also absorbs, so no chain passes through one.
+
+**Motion stops when the data is stale, and dimming alone would not be enough** - the eye reads
+movement long before it reads opacity, so a dimmed animation still asserts liveness. Under
+`prefers-reduced-motion` the flow is **replaced** by a static magnitude tick rather than paused:
+`tokens.css` kills animations with `animation-duration: 0.001ms !important`, which would leave a dash
+pattern frozen mid-cycle and indistinguishable from the dotted "not measured" style. That tick is
+drawn in both modes anyway, because `fixtures/shoot.mjs` takes still PNGs and is the only visual
+review this repo has - an animation-only encoding would be invisible to it.
+
+**Animate by the dash period, never by `getTotalLength()`.** A long spoke and a short one at the same
+rate would otherwise travel at visibly different apparent speeds, which is decoration pretending to
+be data. For the same reason the graph's viewBox preserves its aspect where `MetricChart`'s does not:
+a stretched viewBox advances `stroke-dashoffset` at different apparent speeds on horizontal and
+vertical spokes, and `vector-effect` cannot rescue it.
+
+**Tooltips are a component, not the `title` attribute**, because the one that matters most cannot be
+an attribute: `MetricChart`'s crosshair already snapped to the nearest real sample and computed its
+value, then rendered no readout of either - its own comment promises "the rule, the dot and the
+readout all name the same instant" about a readout that did not exist. The component carries three
+typed slots, and the third is the point: `caveat` is where "this number is not what it looks like"
+goes, so a grey LED meaning *nobody is checking* and a spoke showing an endpoint's total rather than
+an edge both say so on screen instead of only in a source file. Native `title` stays for truncation
+recovery, where a styled box would be worse than the one the OS positions.
+
+****`src/topology.ts` duplicates what `stacks/` already declares**, which is the shape this file calls
 the most driftable thing it has a name for when it rejects split-horizon DNS. It is allowed to exist
 only because `bin/lint-repo.sh` parses both and fails on any difference. Discovering it at run time
 is not available - no container may run `podman network inspect` - and these files are the authority
@@ -848,6 +946,7 @@ podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change,
 ./bin/verify-host.sh --json | jq .summary     # the same findings, machine-readable
 jq -r '.checks[]|select(.status!="pass")|"\(.status)  \(.id)  \(.message)"' \
   /var/lib/home-server/status.json            # what the hourly run last found
+bin/collect-metrics.py --print | grep container_network   # the per-segment counters
 ./bin/verify-media.sh "/mnt/media/library/transcoded/movies/<film>/<film>.mkv"
 ./bin/verify-media.sh --library movies        # will these drift in a browser?
 podman auto-update --dry-run                  # 17 rows with a policy, not an empty table
@@ -2226,7 +2325,10 @@ Remaining, in order:
    `home.avanserv.com`, in `apps/dashboard/`, built on the server from the checkout. It is what
    every keyed id and every series was for. See "The dashboard".
 
-   **All four pages are built as of 2026-08-17.** Home and Library needed Jellyfin sessions,
+   **All five pages are built as of 2026-08-18.** Network was the last, and it is the only one that
+   needed a new measurement rather than a new arrangement of existing ones - see "The dashboard".
+
+   **All four pages were built as of 2026-08-17.** Home and Library needed Jellyfin sessions,
    Jellyseerr requests, poster images and the \*arr queues, none of which was collected - so they
    are a collector change first and two pages second. **It is read-only, structurally**: no container
    can reach the podman socket, so restart and pull would need a privileged host-side surface

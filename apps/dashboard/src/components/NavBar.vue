@@ -17,6 +17,7 @@ const routes = [
   { to: "/home", label: "Home" },
   { to: "/library", label: "Library" },
   { to: "/services", label: "Services" },
+  { to: "/network", label: "Network" },
   { to: "/system", label: "System" },
 ];
 

@@ -135,9 +135,35 @@ export const AVAILABILITY = {
   containerHourly: "avg_over_time(home_server_container_running[1h])",
 } as const;
 
+/**
+ * The segments, per container.
+ *
+ * THERE IS NO FLOW MATRIX AND THERE CANNOT BE ONE. `nsenter -n` into a
+ * container namespace fails EPERM as core and the host's
+ * /proc/net/nf_conntrack is Permission denied, so per-flow accounting is not
+ * available on this host and no amount of collector work will make it so.
+ * These are per-container-per-SEGMENT endpoint counters; src/paths.ts carries
+ * the shape they hang on.
+ *
+ * DIRECTION IS THE CONTAINER'S. The collector reads /proc/<pid>/net/dev inside
+ * that container's own namespace, so `receive` is what the container received.
+ * Reading the host-side veth instead would report every one of these inverted
+ * while looking exactly the same.
+ */
+export const NETWORK = {
+  rx: `rate(home_server_container_network_receive_bytes_total[${RATE}])`,
+  tx: `rate(home_server_container_network_transmit_bytes_total[${RATE}])`,
+
+  /** Written as an explicit 0 by the collector, so it can be alerted on. A
+   *  series that appears only when something is wrong cannot be. */
+  unmapped: "home_server_container_network_unmapped_interfaces",
+  pairs: "home_server_container_network_pairs",
+} as const;
+
 /** Flattened, so the fixtures can assert they cover every one of them. */
 export const ALL_QUERIES: string[] = [
   ...Object.values(SYSTEM),
   ...Object.values(SERVICES),
   ...Object.values(AVAILABILITY),
+  ...Object.values(NETWORK),
 ];

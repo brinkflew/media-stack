@@ -10,7 +10,7 @@
  * to be wide, so a pointer position has to come from the element's own bounding
  * rect. See onMove.
  */
-import { computed, useId } from "vue";
+import { computed, ref, useId } from "vue";
 import {
   areaPath,
   extent,
@@ -23,6 +23,7 @@ import {
   type Point,
 } from "@/charts";
 import { useCrosshair } from "@/composables/useCrosshair";
+import * as fmt from "@/format";
 
 const props = withDefaults(
   defineProps<{
@@ -41,6 +42,10 @@ const props = withDefaults(
     /** Off for anything that does not naturally start at zero, e.g. a
      *  temperature. On for everything else - see charts.ts. */
     floorAtZero?: boolean;
+    /** How to render the readout's value. Passed in rather than inferred: this
+     *  component draws bytes, ratios, degrees and rates, and a number shown in
+     *  the wrong unit is the failure this repository keeps naming. */
+    format?: (v: number) => string;
   }>(),
   {
     points: undefined,
@@ -131,15 +136,50 @@ const cursor = computed(() => {
     // Mapped before filtering: a series whose sample is a hole must drop out
     // without shifting the tone of the ones after it.
     dots: lines.value
-      .map((s) => ({ sample: sampleAt(s.points, t), tone: s.tone ?? props.tone }))
-      .filter((d): d is { sample: Point; tone: "ok" | "warn" | "fail" } =>
+      .map((s) => ({ sample: sampleAt(s.points, t), tone: s.tone ?? props.tone, label: s.label }))
+      .filter((d): d is { sample: Point; tone: "ok" | "warn" | "fail"; label: string | undefined } =>
         d.sample !== null && Number.isFinite(d.sample[1]),
       )
-      .map((d) => ({ y: projectY(d.sample[1], frame.value), fill: `var(--${d.tone})` })),
+      .map((d) => ({
+        y: projectY(d.sample[1], frame.value),
+        fill: `var(--${d.tone})`,
+        // The VALUE, not only its position. This was already computed and
+        // thrown away: the comment on onMove promises that "the rule, the dot
+        // and the readout all name the same instant", and until now there was
+        // no readout for it to be true of.
+        value: d.sample[1],
+        label: d.label,
+      })),
+  };
+});
+
+/** Only the lane actually under the pointer draws the readout. The crosshair
+ *  itself is deliberately on every lane at once - that is what a shared time
+ *  axis is for - but twelve readout boxes stacked down the page is not a
+ *  reading, it is a wall. */
+const over = ref(false);
+
+/**
+ * The readout's text. `format` is a prop rather than a guess: this component
+ * draws bytes, ratios, degrees and rates, and a number rendered in the wrong
+ * unit is exactly the failure this repository keeps naming.
+ */
+const readout = computed(() => {
+  const c = cursor.value;
+  const t = cross.at.value;
+  if (!c || t === null || !c.dots.length) return null;
+  return {
+    time: fmt.clock(t),
+    rows: c.dots.map((d) => ({
+      label: d.label,
+      fill: d.fill,
+      value: props.format ? props.format(d.value) : fmt.number(d.value),
+    })),
   };
 });
 
 function onMove(event: PointerEvent): void {
+  over.value = true;
   if (props.from === undefined || props.to === undefined) return;
 
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
@@ -160,8 +200,8 @@ function onMove(event: PointerEvent): void {
     class="wrap"
     :style="{ height: `${height}px` }"
     @pointermove="onMove"
-    @pointerleave="cross.clear()"
-    @pointercancel="cross.clear()"
+    @pointerleave="over = false; cross.clear()"
+    @pointercancel="over = false; cross.clear()"
   >
     <svg
       :viewBox="`0 0 ${VIEW_W} ${height}`"
@@ -241,6 +281,21 @@ function onMove(event: PointerEvent): void {
 
     <!-- Not an empty frame: an empty frame reads as a flat line at zero. -->
     <span v-if="empty" class="empty mono">no data in this window</span>
+
+    <!-- The readout. Positioned as a percentage of the wrapper rather than in
+         viewBox units, for the same reason onMove reads getBoundingClientRect:
+         the viewBox is stretched, so a user-unit x means nothing in CSS. -->
+    <div
+      v-if="over && cursor && readout"
+      class="readout mono"
+      :style="{ left: `${(cursor.x / VIEW_W) * 100}%` }"
+    >
+      <div class="r-time">{{ readout.time }}</div>
+      <div v-for="(d, i) in readout.rows" :key="i" class="r-row">
+        <span v-if="d.label" class="r-label">{{ d.label }}</span>
+        <span class="r-value" :style="{ color: d.fill }">{{ d.value }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -268,5 +323,41 @@ function onMove(event: PointerEvent): void {
   font: var(--t-mono-sm);
   color: var(--fg-dim);
   pointer-events: none;
+}
+
+/* Follows the crosshair, clamped inside the lane by a translate that flips
+   past the midpoint - a box that ran off the right edge of a 900-unit chart
+   would be unreadable exactly where the newest data is. */
+.readout {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+  padding: 4px 7px;
+  border-radius: var(--r-xs);
+  background: var(--surface-high);
+  border: 1px solid var(--line-strong);
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 45%;
+}
+
+.r-time {
+  font: var(--t-mono-xs);
+  color: var(--fg-5);
+}
+
+.r-row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.r-label {
+  font: var(--t-mono-xs);
+  color: var(--fg-5);
+}
+
+.r-value {
+  font: var(--t-mono-sm);
 }
 </style>

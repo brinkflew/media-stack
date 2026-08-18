@@ -36,7 +36,7 @@ page.on("console", (m) => {
 page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
 page.on("requestfailed", (r) => problems.push(`requestfailed: ${r.url()} ${r.failure()?.errorText}`));
 
-for (const route of ["home", "library", "system", "services"]) {
+for (const route of ["home", "library", "system", "services", "network"]) {
   await page.goto(`http://localhost:5173/${route}`, { waitUntil: "networkidle" });
   await page.waitForTimeout(700);
   await page.screenshot({ path: `${out}/${route}.png` });

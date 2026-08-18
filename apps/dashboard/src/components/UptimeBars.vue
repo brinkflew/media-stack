@@ -10,6 +10,9 @@
 import { computed } from "vue";
 import { dayStarts } from "@/uptime";
 import { dayMonth, percent } from "@/format";
+import { useTooltip } from "@/composables/useTooltip";
+
+const tip = useTooltip();
 
 const props = defineProps<{
   /** One entry per day, oldest first. NaN where there is no data. */
@@ -20,8 +23,16 @@ const props = defineProps<{
 
 const good = computed(() => props.good ?? 0.999);
 
-/** Thirty identical rectangles say nothing about which day they are. The title
- *  is the only affordance that names one, and it costs no layout. */
+/**
+ * Thirty identical rectangles say nothing about which day they are, and naming
+ * one is the whole reason this had a native `title` first. It is a real tooltip
+ * now because the grey needs a sentence, not a date: "no data" beside a green
+ * neighbour reads as an outage unless something says the store simply does not
+ * go back that far.
+ *
+ * Thirty bars is NOT thirty tab stops. The strip is one, and each bar keeps a
+ * pointer tooltip - the same trade the rack rows make with their LEDs.
+ */
 const bars = computed(() => {
   const starts = dayStarts(props.days.length);
 
@@ -33,8 +44,18 @@ const bars = computed(() => {
         : ratio >= good.value / 2
           ? "warn"
           : "fail";
-    const reading = Number.isFinite(ratio) ? percent(ratio, 2) : "no data";
-    return { tone, title: `${dayMonth(starts[i])} - ${reading}` };
+    const known = Number.isFinite(ratio);
+    return {
+      tone,
+      day: dayMonth(starts[i]),
+      content: {
+        title: dayMonth(starts[i]),
+        lines: [known ? `${percent(ratio, 2)} up` : "no data"],
+        caveat: known
+          ? undefined
+          : "Grey is missing history, not downtime. The store only goes back as far as it goes.",
+      },
+    };
   });
 });
 </script>
@@ -46,7 +67,7 @@ const bars = computed(() => {
         v-for="(b, i) in bars"
         :key="i"
         class="bar"
-        :title="b.title"
+        v-bind="tip.hover(`up-${i}`, b.content)"
         :style="{ background: `var(--${b.tone})` }"
       />
     </div>

@@ -1,6 +1,11 @@
 <script setup lang="ts">
 /**
- * Services: the pod rack, the segmentation, and the published ports.
+ * Services: the container rack, and what the applications are doing.
+ *
+ * The segmentation, the routes and the traffic moved to NetworkPage on
+ * 2026-08-18. The two answer different questions - "is this container healthy"
+ * against "what can reach what, and what is moving" - and the second grew a
+ * measured data layer that wanted a page of its own.
  *
  * Every row is assembled from home_server_container_info's label set, which is
  * podman's own PODMAN_SYSTEMD_UNIT join - so `torrent-infra` resolves to
@@ -16,22 +21,23 @@ import { computed, watch } from "vue";
 import PanelBox from "@/components/PanelBox.vue";
 import StatusDot from "@/components/StatusDot.vue";
 import ActivityBars from "@/components/ActivityBars.vue";
-import NetworkGraph from "@/components/NetworkGraph.vue";
 import StaleNote from "@/components/StaleNote.vue";
 import WindowPicker from "@/components/WindowPicker.vue";
 
 import { usePoll } from "@/composables/usePoll";
 import { useMetricsStale } from "@/composables/useStaleness";
 import { useTimeWindow } from "@/composables/useTimeWindow";
+import { useTooltip } from "@/composables/useTooltip";
 import { containerTone } from "@/health";
 import type { Tone } from "@/types";
 import { instant, instantBy, labelsBy, range, value } from "@/api/prometheus";
 import { SERVICES } from "@/queries";
 import { toPoints } from "@/charts";
-import { NETWORKS, PUBLISHED, nodeByName } from "@/topology";
+import { nodeByName } from "@/topology";
 import * as fmt from "@/format";
 
 const { window: win } = useTimeWindow();
+const tip = useTooltip();
 
 interface Row {
   name: string;
@@ -57,6 +63,69 @@ interface Row {
 }
 
 const ACTIVITY_BARS = 24;
+
+/**
+ * The three LEDs have no legend anywhere on this page, and the leftmost one has
+ * a state that cannot be guessed: GREY MEANS NO HEALTH CHECK IS DEFINED, which
+ * is not the same as one that passed. @/health encodes that rule and
+ * home_server_container_health is absent rather than zero for duckdns,
+ * unpackerr and the pod's infra container - so the tooltip has to say it, or
+ * the only place it is written down is a source file.
+ */
+function ledTip(row: Row) {
+  return {
+    title: row.name,
+    lines: [row.state, row.image],
+    caveat:
+      row.tone === "off"
+        ? "Grey is not green. This container defines no health check, so nobody is checking it - which is a different thing from passing."
+        : undefined,
+  };
+}
+
+function runTip(row: Row) {
+  return {
+    title: row.running ? "running" : "stopped",
+    lines: [`up ${fmt.duration(row.uptime)}`, fmt.unitName(row.unit)],
+  };
+}
+
+function restartTip(row: Row) {
+  return {
+    title: `${fmt.number(row.restarts)} restart(s)`,
+    lines: ["podman's count, since the container was created"],
+    caveat:
+      row.restarts === 0 && row.uptime < 3600
+        ? "The counter is recreated with the container, and auto-update recreates every container nightly. A short uptime with zero restarts is not evidence of stability."
+        : undefined,
+  };
+}
+
+/** The same for every row, so it is computed once rather than rebuilt
+ *  twenty-three times on each render. */
+const activityTip = computed(() => {
+  return {
+    title: `CPU, last ${win.value.label}`,
+    lines: [
+      `${ACTIVITY_BARS} bars, one per ${fmt.duration(Math.round(win.value.seconds / ACTIVITY_BARS))}`,
+      "scaled to this row's own peak, not to the rack",
+    ],
+    caveat: "A grey bar is a missing sample, not an idle one.",
+  };
+});
+
+function rowTip(row: Row) {
+  return {
+    title: row.name,
+    lines: [
+      row.state,
+      `up ${fmt.duration(row.uptime)}, ${fmt.number(row.restarts)} restart(s)`,
+      `cpu ${fmt.percent(row.cpu, 1)}, memory ${fmt.bytes(row.memory)}`,
+      row.networks.length ? row.networks.join(" ") : "no network of its own",
+    ],
+    caveat: ledTip(row).caveat,
+  };
+}
 
 const rack = usePoll(async (signal) => {
   const end = Math.floor(Date.now() / 1000);
@@ -137,13 +206,6 @@ const tally = computed(() => {
   const counts = { ok: 0, warn: 0, fail: 0, off: 0 };
   for (const row of r) counts[row.tone] += 1;
   return counts;
-});
-
-/** For the topology graph, which colours its nodes live. */
-const tones = computed(() => {
-  const map = new Map<string, Tone>();
-  for (const row of rows.value) map.set(row.name, row.tone);
-  return map;
 });
 
 const memoryRatio = (row: Row): number =>
@@ -240,11 +302,23 @@ const metricsStale = useMetricsStale();
         <span class="r">UPTIME</span>
       </div>
 
-      <div v-for="row in rows" :key="row.name" class="row" :style="{ borderLeftColor: `var(--${row.tone})` }">
+      <div
+        v-for="row in rows"
+        :key="row.name"
+        class="row"
+        :style="{ borderLeftColor: `var(--${row.tone})` }"
+        v-bind="tip.bind(`row-${row.name}`, rowTip(row))"
+      >
         <div class="leds">
-          <StatusDot :tone="row.tone" :live="row.tone === 'fail'" glow :size="7" />
-          <StatusDot :tone="row.running ? 'ok' : 'off'" :size="7" />
-          <StatusDot :tone="row.restarts > 0 ? 'warn' : 'off'" :size="7" />
+          <span v-bind="tip.hover(`led-${row.name}`, ledTip(row))">
+            <StatusDot :tone="row.tone" :live="row.tone === 'fail'" glow :size="7" />
+          </span>
+          <span v-bind="tip.hover(`run-${row.name}`, runTip(row))">
+            <StatusDot :tone="row.running ? 'ok' : 'off'" :size="7" />
+          </span>
+          <span v-bind="tip.hover(`rst-${row.name}`, restartTip(row))">
+            <StatusDot :tone="row.restarts > 0 ? 'warn' : 'off'" :size="7" />
+          </span>
         </div>
 
         <div class="ident">
@@ -261,7 +335,9 @@ const metricsStale = useMetricsStale();
           </div>
         </div>
 
-        <ActivityBars :values="row.activity" :tone="row.tone === 'off' ? 'off' : row.tone" :height="20" />
+        <span v-bind="tip.hover(`act-${row.name}`, activityTip)">
+          <ActivityBars :values="row.activity" :tone="row.tone === 'off' ? 'off' : row.tone" :height="20" />
+        </span>
 
         <div class="mono num">{{ fmt.percent(row.cpu, 1) }}</div>
 
@@ -285,91 +361,66 @@ const metricsStale = useMetricsStale();
       absent from this table. That is what home_server_container_identity_unresolved counts.
     </p>
 
-    <!-- Topology and the two side panels -->
-    <section class="lower">
-      <PanelBox label="Network" :stale="metricsStale">
-        <template #aside>
-          <span>{{ NETWORKS.length }} bridges, all isolate=true</span>
-        </template>
-        <NetworkGraph :tones="tones" />
-      </PanelBox>
-
-      <div class="side">
-        <PanelBox label="Published ports">
-          <template #aside>
-            <span>{{ PUBLISHED.length }} in the whole stack</span>
-          </template>
-          <ul class="ports">
-            <li v-for="p in PUBLISHED" :key="`${p.node}-${p.mapping}`" class="port mono">
-              <span class="pmap">{{ p.mapping }}</span>
-              <span class="pnode">{{ p.node }}</span>
-            </li>
-          </ul>
-          <p class="hint mono">
-            Everything else is reached by container name over its own bridge. firewalld governs these
-            two: a new publish needs a matching rule or the port is closed while the container looks
-            healthy.
-          </p>
-        </PanelBox>
-
-        <PanelBox label="Applications" :stale="metricsStale">
-          <div class="apps mono">
-            <div class="app">
-              <span>indexers up</span>
-              <span
-                class="av"
-                :style="{
-                  color:
-                    (apps.data.value?.indexers.up ?? 0) * 2 < (apps.data.value?.indexers.total ?? 0)
-                      ? 'var(--warn)'
-                      : 'var(--fg-2)',
-                }"
-              >
-                {{ apps.data.value?.indexers.up ?? "-" }} of {{ apps.data.value?.indexers.total ?? "-" }}
-              </span>
-            </div>
-            <div class="app">
-              <span>sonarr queue</span>
-              <span class="av">{{ fmt.number(apps.data.value?.queue.get("sonarr") ?? Number.NaN) }}</span>
-            </div>
-            <div class="app">
-              <span>radarr queue</span>
-              <span class="av">{{ fmt.number(apps.data.value?.queue.get("radarr") ?? Number.NaN) }}</span>
-            </div>
-            <div class="app">
-              <span>tdarr queue</span>
-              <span class="av">{{ fmt.number(apps.data.value?.tdarr ?? Number.NaN) }}</span>
-            </div>
-            <div class="app">
-              <span>jellyfin sessions</span>
-              <span class="av">{{ fmt.number(apps.data.value?.sessions ?? Number.NaN) }}</span>
-            </div>
-            <div class="app">
-              <span>torrent</span>
-              <span
-                class="av"
-                :style="{
-                  color: (apps.data.value?.torrentState ?? 0) === 0 ? 'var(--ok)' : 'var(--warn)',
-                }"
-              >
-                {{ TORRENT_STATE[apps.data.value?.torrentState ?? 2] ?? "unknown" }}
-              </span>
-            </div>
-            <div class="app">
-              <span>torrent rate</span>
-              <span class="av">
-                {{ fmt.rate(apps.data.value?.down ?? Number.NaN) }} /
-                {{ fmt.rate(apps.data.value?.upRate ?? Number.NaN) }}
-              </span>
-            </div>
-            <div class="app">
-              <span>vpn exit</span>
-              <span class="av">{{ apps.data.value?.vpn || "-" }}</span>
-            </div>
-          </div>
-        </PanelBox>
+    <!-- The applications. The network half of this section moved to
+         NetworkPage; what is left is application state, so it reads as a strip
+         above nothing rather than a sidebar around one panel. -->
+    <PanelBox label="Applications" :stale="metricsStale">
+      <div class="apps mono">
+        <div class="app">
+          <span>indexers up</span>
+          <span
+            class="av"
+            :style="{
+              color:
+                (apps.data.value?.indexers.up ?? 0) * 2 < (apps.data.value?.indexers.total ?? 0)
+                  ? 'var(--warn)'
+                  : 'var(--fg-2)',
+            }"
+          >
+            {{ apps.data.value?.indexers.up ?? "-" }} of {{ apps.data.value?.indexers.total ?? "-" }}
+          </span>
+        </div>
+        <div class="app">
+          <span>sonarr queue</span>
+          <span class="av">{{ fmt.number(apps.data.value?.queue.get("sonarr") ?? Number.NaN) }}</span>
+        </div>
+        <div class="app">
+          <span>radarr queue</span>
+          <span class="av">{{ fmt.number(apps.data.value?.queue.get("radarr") ?? Number.NaN) }}</span>
+        </div>
+        <div class="app">
+          <span>tdarr queue</span>
+          <span class="av">{{ fmt.number(apps.data.value?.tdarr ?? Number.NaN) }}</span>
+        </div>
+        <div class="app">
+          <span>jellyfin sessions</span>
+          <span class="av">{{ fmt.number(apps.data.value?.sessions ?? Number.NaN) }}</span>
+        </div>
+        <div class="app">
+          <span>torrent</span>
+          <span
+            class="av"
+            :style="{
+              color: (apps.data.value?.torrentState ?? 0) === 0 ? 'var(--ok)' : 'var(--warn)',
+            }"
+          >
+            {{ TORRENT_STATE[apps.data.value?.torrentState ?? 2] ?? "unknown" }}
+          </span>
+        </div>
+        <div class="app">
+          <span>torrent rate</span>
+          <span class="av">
+            {{ fmt.rate(apps.data.value?.down ?? Number.NaN) }} /
+            {{ fmt.rate(apps.data.value?.upRate ?? Number.NaN) }}
+          </span>
+        </div>
+        <div class="app">
+          <span>vpn exit</span>
+          <span class="av">{{ apps.data.value?.vpn || "-" }}</span>
+        </div>
       </div>
-    </section>
+    </PanelBox>
+
   </div>
 </template>
 
@@ -498,59 +549,19 @@ const metricsStale = useMetricsStale();
   color: var(--warn);
 }
 
-.lower {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: 10px;
-  margin-top: 8px;
-  align-items: start;
-}
 
-.side {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
 
-.ports {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
 
-.port {
-  display: grid;
-  grid-template-columns: 92px 1fr;
-  gap: 9px;
-  padding: 5px 4px;
-  border-radius: var(--r-xs);
-  font: var(--t-mono-sm);
-}
 
-.port:hover {
-  background: oklch(1 0 0 / 0.04);
-}
 
-.pmap {
-  color: var(--fg-2);
-}
 
-.pnode {
-  color: var(--fg-5);
-}
-
-.hint {
-  margin-top: 10px;
-  padding-top: 9px;
-  border-top: 1px solid var(--line);
-  font: var(--t-mono-xs);
-  color: var(--fg-5);
-}
-
+/* A strip, not a sidebar: with the topology gone there is nothing to sit
+   beside, and eight facts in one column beside empty space reads as a leftover. */
 .apps {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px 18px;
+  margin-top: 8px;
 }
 
 .app {
@@ -566,17 +577,9 @@ const metricsStale = useMetricsStale();
   font-weight: 500;
 }
 
-@media (max-width: 1400px) {
-  .lower {
-    grid-template-columns: 1fr;
-  }
-
-  .side {
-    flex-direction: row;
-  }
-
-  .side > * {
-    flex: 1;
+@media (max-width: 1100px) {
+  .apps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>

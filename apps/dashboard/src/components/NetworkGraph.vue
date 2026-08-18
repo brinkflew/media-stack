@@ -1,292 +1,437 @@
 <script setup lang="ts">
 /**
- * The segmentation, drawn.
+ * The segmentation and the traffic on it, drawn.
  *
- * LAYOUT IS COMPUTED, NOT HAND-PLACED. The design mocks this up with absolute
- * pixel coordinates, which look right once and then need re-tuning every time a
- * service is added - and a diagram that is expensive to update is a diagram
- * that stops being true. Here the bands are laid out from src/topology.ts, so
- * adding a network is one entry in that array.
+ * LAYOUT IS COMPUTED, NOT HAND-PLACED. Inherited verbatim from the CSS version
+ * this replaces, and still the constraint that matters: the design mocks this
+ * up with absolute pixel coordinates, which look right once and then need
+ * re-tuning every time a service is added - and a diagram that is expensive to
+ * update is a diagram that stops being true. Every coordinate here comes out of
+ * src/graph.ts, which reads src/topology.ts, which bin/lint-repo.sh holds to
+ * stacks/.
  *
- * The shape it draws is the architecture's actual claim: Caddy is the only
- * thing that joins more than one segment, every bridge carries isolate=true, so
- * a member of one band has no route to a member of another. Colour is live -
- * it comes from home_server_container_health - and the shape is static, because
- * the shape is defined in git.
+ * WHY IT IS BIPARTITE. A rail is a segment; a box is a container; the only line
+ * carrying a measured number is the SPOKE between them. That is exactly the
+ * shape of what the collector can measure - a container's bytes on a segment -
+ * because per-flow accounting is unavailable on this host. A point-to-point
+ * arrow with a rate on it would be a claim nothing supports, so there isn't one.
+ *
+ * Declared routes from paths.ts are a different language: they appear on hover
+ * or focus, they are static, and they never animate. Reachability is asserted
+ * by git; motion is asserted by measurement. Neither may borrow the other's
+ * credibility.
+ *
+ * ASPECT-PRESERVING viewBox, unlike MetricChart. That component stretches
+ * because a time series has no intrinsic aspect; a wiring diagram does, and
+ * more to the point a stretched viewBox makes stroke-dashoffset advance at
+ * different apparent speeds on horizontal and vertical spokes - so the same
+ * rate would animate at two different speeds depending on direction.
+ * vector-effect cannot rescue that; only preserving the aspect can.
  */
-import { computed } from "vue";
-import { NETWORKS, NODES, podMembers, type Node } from "@/topology";
-import StatusDot from "./StatusDot.vue";
+import { computed, ref } from "vue";
+import { NETWORKS } from "@/topology";
+import { PATHS, segmentsFor, tracePaths } from "@/paths";
+import { LABEL_GUTTER, fitRole, flowDuration, intensity, layout, spokePath, type PlacedNode } from "@/graph";
+import { useTooltip } from "@/composables/useTooltip";
+import * as fmt from "@/format";
+import type { Tone } from "@/types";
 
 const props = defineProps<{
-  /** container name -> tone. Absent means "no health check defined". */
-  tones: Map<string, "ok" | "warn" | "fail" | "off">;
+  tones: Map<string, Tone>;
+  /** container|network -> bytes/sec. Absent key means NOT MEASURED. */
+  rx: Map<string, number>;
+  tx: Map<string, number>;
+  /** False freezes every spoke. Motion is the claim "this is happening now". */
+  flowing: boolean;
 }>();
 
-const HUB = "caddy";
+const tip = useTooltip();
+const L = layout();
+const focused = ref<string | null>(null);
+const pinned = ref(false);
 
-interface Band {
-  id: string;
-  purpose: string;
-  members: Node[];
-  /** Caddy joins this segment, so there is an edge to draw. */
-  joined: boolean;
-}
+const railY = new Map(L.rails.map((r) => [r.id, r.y]));
+const boxes = computed<PlacedNode[]>(() => (L.hub ? [...L.nodes, L.hub] : L.nodes));
 
-const bands = computed<Band[]>(() =>
-  NETWORKS.map((net) => ({
-    id: net.id,
-    purpose: net.purpose,
-    members: NODES.filter((n) => n.name !== HUB && n.networks.includes(net.id)),
-    joined: NODES.find((n) => n.name === HUB)?.networks.includes(net.id) ?? false,
-  })),
-);
-
-function tone(name: string): "ok" | "warn" | "fail" | "off" {
+function tone(name: string): Tone {
   return props.tones.get(name) ?? "off";
 }
 
-const hubTone = computed(() => tone(HUB));
+/** Absent is not zero. A container/segment pair nothing measured must render
+ *  grey and still, never as an idle green link. */
+function rate(container: string, network: string): { rx: number; tx: number } | null {
+  const key = `${container}|${network}`;
+  const r = props.rx.get(key);
+  const t = props.tx.get(key);
+  if (r === undefined && t === undefined) return null;
+  return { rx: r ?? 0, tx: t ?? 0 };
+}
 
-/** The one segment Caddy is deliberately NOT on. Worth stating rather than
- *  leaving as an absence somebody has to notice. */
-const unjoined = computed(() => bands.value.filter((b) => !b.joined).map((b) => b.id));
+function total(container: string, network: string): number {
+  const r = rate(container, network);
+  return r ? r.rx + r.tx : Number.NaN;
+}
+
+/** Two members means the spoke IS the edge - but only if neither talks past the
+ *  bridge, which is a measurement rather than a property of the topology. */
+function memberCount(network: string): number {
+  return L.rails.find((r) => r.id === network)?.members ?? 0;
+}
+
+// --- the highlighted route ---------------------------------------------------
+const lit = computed(() => {
+  const node = focused.value;
+  if (!node) return { nodes: new Set<string>(), edges: new Set<string>() };
+  const nodes = new Set<string>();
+  const edges = new Set<string>();
+  for (const chain of tracePaths(node)) {
+    for (let i = 0; i < chain.length; i += 1) {
+      nodes.add(chain[i]);
+      if (i > 0) edges.add(`${chain[i - 1]}>${chain[i]}`);
+    }
+  }
+  return { nodes, edges };
+});
+
+function dim(name: string): boolean {
+  return focused.value !== null && !lit.value.nodes.has(name);
+}
+
+/** Declared routes, drawn only while something is focused. Straight lines
+ *  between box centres: they are a different language from the spokes on
+ *  purpose, and routing them orthogonally would make them read as wiring. */
+const routes = computed(() => {
+  if (!focused.value) return [];
+  const at = new Map(boxes.value.map((b) => [b.name, b]));
+  return PATHS.filter((p) => lit.value.edges.has(`${p.from}>${p.to}`))
+    .map((p) => {
+      const a = at.get(p.from);
+      const b = at.get(p.to);
+      if (!a || !b) return null;
+      return {
+        key: `${p.from}>${p.to}`,
+        x1: a.x + a.w / 2,
+        y1: a.y + a.h / 2,
+        x2: b.x + b.w / 2,
+        y2: b.y + b.h / 2,
+        runtime: p.source === "runtime",
+      };
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
+});
+
+// --- tooltips ----------------------------------------------------------------
+function nodeTip(n: PlacedNode) {
+  const lines: string[] = [n.role];
+  let caveat: string | undefined;
+  for (const net of n.rails) {
+    const r = rate(n.name, net);
+    lines.push(
+      r
+        ? `${net}: ${fmt.rate(r.rx)} in / ${fmt.rate(r.tx)} out`
+        : `${net}: not measured`,
+    );
+  }
+  if (n.members.length) {
+    lines.push(`holds the namespace for ${n.members.map((m) => m.name).join(", ")}`);
+    caveat = "One number for all four. They share one namespace, so per-container series do not exist here.";
+  } else if (n.rails.some((net) => memberCount(net) > 2)) {
+    caveat = "These are this container's totals on each segment. Which peer they went to is not measured.";
+  }
+  if (n.name === "caddy") lines.push("the only container on more than one segment");
+  return { title: n.name, lines, caveat };
+}
+
+function railTip(id: string) {
+  const r = L.rails.find((x) => x.id === id);
+  const net = NETWORKS.find((x) => x.id === id);
+  const lines = [
+    net?.purpose ?? "",
+    `${r?.members ?? 0} member(s)`,
+    "Options=isolate=true",
+  ];
+  return {
+    title: id,
+    lines,
+    caveat:
+      (r?.members ?? 0) > 2
+        ? "Each container's total on this segment is measured; the split between peers is not."
+        : r?.detached
+          ? "caddy is not on this segment. That absence is the security model, not an omission."
+          : undefined,
+  };
+}
+
+function spokeTip(n: PlacedNode, net: string) {
+  const r = rate(n.name, net);
+  const members = memberCount(net);
+  return {
+    title: `${n.name} on ${net}`,
+    lines: r
+      ? [`${fmt.rate(r.rx)} received`, `${fmt.rate(r.tx)} sent`, `${members} member(s) on this segment`]
+      : ["not measured", `${members} member(s) on this segment`],
+    caveat:
+      !r
+        ? "No series covers this pair. Absent is not idle."
+        : members > 2
+          ? `This is ${n.name}'s total on ${net}, not traffic to any one peer. Per-flow accounting is not available on this host.`
+          : undefined,
+  };
+}
+
+// --- keyboard ----------------------------------------------------------------
+// ONE tab stop, then arrows. Twenty boxes plus thirty spokes as individual
+// stops would put fifty between this panel and the next, which is worse than no
+// keyboard access at all.
+const order = computed(() => boxes.value.map((b) => b.name));
+
+function move(delta: number): void {
+  const list = order.value;
+  const i = focused.value ? list.indexOf(focused.value) : -1;
+  focused.value = list[(i + delta + list.length) % list.length] ?? list[0];
+}
+
+function onKey(e: KeyboardEvent): void {
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+    move(1);
+    e.preventDefault();
+  } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+    move(-1);
+    e.preventDefault();
+  } else if (e.key === "Enter" || e.key === " ") {
+    pinned.value = !pinned.value;
+    e.preventDefault();
+  } else if (e.key === "Escape") {
+    if (pinned.value) pinned.value = false;
+    else focused.value = null;
+    tip.closeAll();
+  }
+}
+
+function enter(name: string, el: EventTarget | null, content: ReturnType<typeof nodeTip>): void {
+  if (!pinned.value) focused.value = name;
+  if (el) tip.show(`net-${name}`, el as SVGElement, content, 250);
+}
+function leave(name: string): void {
+  if (!pinned.value) focused.value = null;
+  tip.hide(`net-${name}`, 80);
+}
+
+const summary = computed(() => {
+  const exact = PATHS.filter((p) => {
+    const segs = segmentsFor(p);
+    return segs.length === 1 && memberCount(segs[0]) === 2;
+  }).length;
+  return `${PATHS.length} declared routes, ${exact} on a segment with only two members`;
+});
 </script>
 
 <template>
-  <div class="graph">
-    <div class="hub">
-      <div class="hub-node">
-        <div class="hub-head">
-          <StatusDot :tone="hubTone" :size="6" glow />
-          <span class="hub-name">caddy</span>
-        </div>
-        <div class="hub-sub mono">the only multi-homed container</div>
-        <div class="hub-ports mono">80, 443 published</div>
-      </div>
-      <div class="spine" />
-    </div>
+  <div class="wrap">
+    <svg
+      :viewBox="`0 0 ${L.width} ${L.height}`"
+      preserveAspectRatio="xMidYMid meet"
+      class="graph"
+      tabindex="0"
+      role="img"
+      :aria-label="`network topology: ${L.nodes.length + 1} containers across ${L.rails.length} isolated bridges. ${summary}`"
+      @keydown="onKey"
+    >
+      <!-- rails: one per segment, in topology.ts declaration order -->
+      <g v-for="r in L.rails" :key="r.id">
+        <line
+          :x1="LABEL_GUTTER - 8"
+          :y1="r.y"
+          :x2="L.width - 16"
+          :y2="r.y"
+          :stroke="r.detached ? 'var(--line-faint)' : 'var(--line)'"
+          stroke-width="1"
+          :stroke-dasharray="r.detached ? '2 5' : ''"
+          vector-effect="non-scaling-stroke"
+        />
+        <text
+          :x="8"
+          :y="r.y + 3"
+          class="rail-label"
+          v-bind="tip.bind(`rail-${r.id}`, railTip(r.id))"
+        >{{ r.id }}</text>
+        <text v-if="r.detached" :x="8" :y="r.y + 14" class="rail-note">no proxy route</text>
+      </g>
 
-    <div class="bands">
-      <div v-for="band in bands" :key="band.id" class="band" :class="{ detached: !band.joined }">
-        <span class="connector" :class="{ off: !band.joined }" />
+      <!-- declared routes, only while something is focused -->
+      <g v-if="routes.length" class="routes">
+        <line
+          v-for="r in routes"
+          :key="r.key"
+          :x1="r.x1"
+          :y1="r.y1"
+          :x2="r.x2"
+          :y2="r.y2"
+          stroke="var(--ok)"
+          stroke-width="1"
+          :stroke-dasharray="r.runtime ? '3 3' : ''"
+          opacity="0.5"
+          vector-effect="non-scaling-stroke"
+        />
+      </g>
 
-        <div class="band-head">
-          <span class="band-name mono">{{ band.id }}</span>
-          <span class="band-purpose mono">{{ band.purpose }}</span>
-          <span v-if="!band.joined" class="band-note mono">no proxy route</span>
-        </div>
+      <!-- spokes: the ONLY lines carrying a measured number -->
+      <g v-for="n in boxes" :key="`s-${n.name}`">
+        <g v-for="net in n.rails" :key="`${n.name}-${net}`">
+          <path
+            :d="spokePath(n, railY.get(net) ?? 0, n.name === 'caddy')"
+            fill="none"
+            :stroke="total(n.name, net) > 0 ? 'var(--ok)' : 'var(--fg-dim)'"
+            :stroke-width="Number.isFinite(total(n.name, net)) ? 1.4 : 2"
+            :stroke-dasharray="Number.isFinite(total(n.name, net)) ? '6 10' : '3 4'"
+            :class="{ flow: flowing && intensity(total(n.name, net)) > 0 }"
+            :style="{
+              animationDuration: `${flowDuration(total(n.name, net))}s`,
+              opacity: dim(n.name) ? 0.15 : 0.35 + intensity(total(n.name, net)) * 0.5,
+            }"
+            vector-effect="non-scaling-stroke"
+            v-bind="tip.bind(`spoke-${n.name}-${net}`, spokeTip(n, net))"
+          />
+          <!-- The magnitude tick. Drawn in BOTH modes, deliberately: it is the
+               reduced-motion encoding, and it is also the only thing that makes
+               a rate visible in fixtures/shoot.mjs, which takes still PNGs and
+               is the only visual review this repo has. -->
+          <rect
+            v-if="intensity(total(n.name, net)) > 0"
+            :x="n.name === 'caddy' ? n.x + n.w + 4 : n.x + n.w / 2 - 1"
+            :y="n.name === 'caddy' ? (railY.get(net) ?? 0) - 1.5 : ((railY.get(net) ?? 0) + n.y + n.h / 2) / 2 - 1.5"
+            :width="2 + intensity(total(n.name, net)) * 10"
+            height="3"
+            rx="1.5"
+            fill="var(--ok)"
+            :opacity="dim(n.name) ? 0.2 : 0.85"
+          />
+        </g>
+      </g>
 
-        <div class="members">
-          <div v-for="m in band.members" :key="m.name" class="member">
-            <div class="member-head">
-              <StatusDot :tone="tone(m.name)" :size="5" />
-              <span class="member-name">{{ m.name }}</span>
-            </div>
-            <div class="member-role mono">{{ m.role }}</div>
+      <!-- boxes -->
+      <g
+        v-for="n in boxes"
+        :key="n.name"
+        class="node"
+        :class="{ dim: dim(n.name), lit: focused === n.name }"
+        v-bind="tip.bind(`net-${n.name}`, nodeTip(n))"
+        @pointerenter="enter(n.name, $event.currentTarget, nodeTip(n))"
+        @pointerleave="leave(n.name)"
+        @focus="focused = n.name"
+      >
+        <rect
+          :x="n.x"
+          :y="n.y"
+          :width="n.w"
+          :height="n.h"
+          rx="6"
+          fill="var(--surface-high)"
+          :stroke="focused === n.name ? 'var(--ok)' : 'var(--line-strong)'"
+          :stroke-width="focused === n.name ? 1.5 : 1"
+          vector-effect="non-scaling-stroke"
+        />
+        <circle :cx="n.x + 11" :cy="n.y + 13" r="3" :fill="`var(--${tone(n.name)})`" />
+        <text :x="n.x + 20" :y="n.y + 16" class="node-name">{{ n.name }}</text>
+        <text :x="n.x + 9" :y="n.y + 27" class="node-role">{{ fitRole(n.role) }}</text>
 
-            <!-- The pod: three containers with no network stack of their own,
-                 living inside gluetun's namespace. Drawn nested because that
-                 is what makes the kill-switch structural rather than a rule. -->
-            <div v-if="podMembers(m.name).length" class="pod">
-              <div v-for="p in podMembers(m.name)" :key="p.name" class="pod-member">
-                <StatusDot :tone="tone(p.name)" :size="4" />
-                <span class="pod-name mono">{{ p.name }}</span>
-                <span class="pod-role mono truncate">{{ p.role }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+        <!-- the pod, nested: drawn inside because that is what makes the
+             kill-switch structural rather than a rule somebody remembers -->
+        <g v-if="n.members.length">
+          <rect
+            :x="n.x + 6"
+            :y="n.y + n.h - 4"
+            :width="n.w - 12"
+            :height="n.members.length * 12 + 6"
+            rx="4"
+            fill="oklch(0 0 0 / 0.25)"
+            stroke="var(--line-strong)"
+            stroke-dasharray="2 3"
+            vector-effect="non-scaling-stroke"
+          />
+          <g v-for="(m, i) in n.members" :key="m.name">
+            <circle :cx="n.x + 14" :cy="n.y + n.h + 6 + i * 12" r="2.5" :fill="`var(--${tone(m.name)})`" />
+            <text :x="n.x + 21" :y="n.y + n.h + 9 + i * 12" class="pod-name">{{ m.name }}</text>
+          </g>
+        </g>
+      </g>
+    </svg>
 
-    <p v-if="unjoined.length" class="legend mono">
-      Every bridge carries Options=isolate=true, so a member of one band has no route to a member of
-      another. {{ unjoined.join(", ") }} has no proxy route by design.
+    <p class="legend mono">
+      Every bridge carries <span class="lit">Options=isolate=true</span>, so a container on one rail
+      has no route to another. A spoke is a container's measured traffic on a segment - not traffic
+      to any one peer, which is not measurable here. {{ summary }}.
+      <span v-if="!flowing" class="frozen"> Motion is stopped: these rates are not current.</span>
     </p>
   </div>
 </template>
 
 <style scoped>
+.wrap {
+  min-width: 0;
+}
+
 .graph {
-  display: grid;
-  grid-template-columns: 210px 1fr;
-  gap: 0 18px;
-  align-items: start;
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
 }
 
-.hub {
-  position: sticky;
-  top: 12px;
-  display: grid;
-  grid-template-rows: auto 1fr;
-}
-
-.hub-node {
-  padding: 11px 12px;
+.graph:focus-visible {
+  outline: 2px solid var(--ok);
+  outline-offset: 3px;
   border-radius: var(--r-sm);
-  background: var(--surface-high);
-  border: 1px solid var(--line-strong);
-  border-left: 2px solid var(--ok);
-  box-shadow: var(--shadow-node);
 }
 
-.hub-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.hub-name {
-  font: var(--t-ui-md);
-}
-
-.hub-sub,
-.hub-ports {
+.rail-label {
   font: var(--t-mono-xs);
-  color: var(--fg-5);
-  margin-top: 4px;
+  fill: var(--fg-5);
+  cursor: default;
 }
 
-.spine {
-  width: 1px;
-  margin: 8px auto 0;
-  background: linear-gradient(var(--line-strong), transparent);
+.rail-note {
+  font: var(--t-mono-xs);
+  fill: var(--fg-dim);
 }
 
-.bands {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
+.node {
+  cursor: default;
+  transition: opacity 120ms linear;
 }
 
-.band {
-  position: relative;
-  padding: 14px 13px 12px;
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--r-sm);
-  background: oklch(1 0 0 / 0.018);
-  min-width: 0;
+.node.dim {
+  opacity: 0.25;
 }
 
-.band.detached {
-  border-style: dotted;
-  opacity: 0.85;
-}
-
-/* The edge from Caddy. A dashed teal line where a route exists, nothing but a
-   stub where it does not - net-solver and net-egress have no proxy route, and
-   that absence is a security property rather than an omission. */
-.connector {
-  position: absolute;
-  left: -18px;
-  top: 22px;
-  width: 18px;
-  height: 1px;
-  background: repeating-linear-gradient(90deg, var(--ok) 0 3px, transparent 3px 6px);
-  opacity: 0.75;
-}
-
-.connector.off {
-  background: repeating-linear-gradient(90deg, var(--off) 0 2px, transparent 2px 5px);
-}
-
-.band-head {
-  display: flex;
-  align-items: baseline;
-  gap: 9px;
-  margin-bottom: 10px;
-}
-
-.band-name {
+.node-name {
   font: var(--t-mono-md);
-  color: var(--fg-2);
+  fill: var(--fg-2);
 }
 
-.band-purpose {
+.node-role {
   font: var(--t-mono-xs);
-  color: var(--fg-5);
-}
-
-.band-note {
-  margin-left: auto;
-  font: var(--t-mono-xs);
-  color: var(--fg-dim);
-}
-
-.members {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.member {
-  flex: 1 1 165px;
-  min-width: 0;
-  max-width: 260px;
-  padding: 8px 10px;
-  border-radius: var(--r-sm);
-  background: var(--surface-high);
-  border: 1px solid var(--line-strong);
-  box-shadow: var(--shadow-node);
-}
-
-.member-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.member-name {
-  font: var(--t-ui-sm);
-  font-weight: 500;
-}
-
-.member-role {
-  font: var(--t-mono-xs);
-  color: var(--fg-5);
-  margin-top: 3px;
-  /* Wrap rather than truncate: the role is the only thing on the card that
-     says what the node is for, and half of it is worse than two lines. */
-  overflow-wrap: anywhere;
-}
-
-.pod {
-  margin-top: 8px;
-  padding: 7px 8px;
-  border-radius: var(--r-xs);
-  border: 1px dashed var(--line-strong);
-  background: oklch(0 0 0 / 0.18);
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.pod-member {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
+  fill: var(--fg-dim);
 }
 
 .pod-name {
   font: var(--t-mono-xs);
-  color: var(--fg-3);
-  flex: none;
-}
-
-.pod-role {
-  font: var(--t-mono-xs);
-  color: var(--fg-dim);
+  fill: var(--fg-4);
 }
 
 .legend {
-  grid-column: 1 / -1;
-  margin-top: 14px;
-  padding-top: 12px;
+  margin-top: 12px;
+  padding-top: 10px;
   border-top: 1px solid var(--line);
   font: var(--t-mono-sm);
   color: var(--fg-5);
+}
+
+.lit {
+  color: var(--fg-3);
+}
+
+.frozen {
+  color: var(--warn);
 }
 </style>

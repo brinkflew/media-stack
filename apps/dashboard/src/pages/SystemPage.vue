@@ -449,6 +449,7 @@ const jellyfinSessions = usePoll(
           :tone="lane.tone"
           :height="72"
           :grid="3"
+          :format="lane.format"
           show-median
           :from="series.data.value?.start"
           :to="series.data.value?.end"
@@ -495,6 +496,7 @@ const jellyfinSessions = usePoll(
           :series="lanesOf(lane.key)"
           :tone="lane.tone"
           :height="30"
+          :format="lane.format"
           show-median
           :from="series.data.value?.start"
           :to="series.data.value?.end"

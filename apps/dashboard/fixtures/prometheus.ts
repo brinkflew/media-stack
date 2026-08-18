@@ -8,8 +8,9 @@
 // dev server says so on the first request.
 // =============================================================================
 
-import { AVAILABILITY, SERVICES, SYSTEM } from "../src/queries";
+import { ALL_QUERIES, AVAILABILITY, NETWORK, SERVICES, SYSTEM } from "../src/queries";
 import { CONTAINERS, wave } from "./model";
+import { NODES } from "../src/topology";
 
 type At = (t: number) => number;
 
@@ -212,6 +213,51 @@ function bySeries(): Record<string, SeriesSpec[]> {
     },
   ];
 
+
+  // --- the segments, per container ----------------------------------------
+  // Derived from NODES so a topology change cannot leave the fixtures behind,
+  // the same reason model.ts builds CONTAINERS from it. Pod members declare
+  // networks: [] and are absent here for the reason the collector dedupes on
+  // the namespace inode: the four of them read one set of counters, charged
+  // once to the infra container.
+  //
+  // ASYMMETRIC ON PURPOSE. jellyfin streams out, the torrent pod pulls in,
+  // dashboard is nearly nothing. A fixture where rx and tx matched would let a
+  // page that had swapped them look perfectly correct.
+  const NET_RATE: Record<string, [number, number]> = {
+    "jellyfin/net-media": [0.4e6, 24e6],
+    "caddy/net-media": [24e6, 0.5e6],
+    "torrent-infra/net-download": [0.9e6, 3.1e6],
+    "torrent-infra/tunnel": [4.4e6, 1.2e6],
+    "caddy/net-dashboard": [2e3, 41e3],
+    "dashboard/net-dashboard": [41e3, 2e3],
+    "prowlarr/net-solver": [12e3, 1.1e6],
+    "flaresolverr/net-solver": [1.1e6, 12e3],
+  };
+  const netPairs = NODES.flatMap((n) =>
+    n.networks.map((network) => ({ container: n.name, network })),
+  ).concat([{ container: "torrent-infra", network: "tunnel" }]);
+
+  // bazarr on net-arr is deliberately ABSENT, so the "not measured" grey is on
+  // screen in dev - the same discipline as the six missing uptime days.
+  const measured = netPairs.filter((p) => !(p.container === "bazarr" && p.network === "net-arr"));
+
+  const rateFor = (c: string, n: string): [number, number] =>
+    NET_RATE[`${c}/${n}`] ?? [18e3, 9e3];
+
+  table[NETWORK.rx] = measured.map((p) => ({
+    metric: { container: p.container, network: p.network },
+    at: swing(`nrx${p.container}${p.network}`, rateFor(p.container, p.network)[0],
+              rateFor(p.container, p.network)[0] * 0.5),
+  }));
+  table[NETWORK.tx] = measured.map((p) => ({
+    metric: { container: p.container, network: p.network },
+    at: swing(`ntx${p.container}${p.network}`, rateFor(p.container, p.network)[1],
+              rateFor(p.container, p.network)[1] * 0.5),
+  }));
+  table[NETWORK.pairs] = [{ metric: {}, at: constant(measured.length) }];
+  table[NETWORK.unmapped] = [{ metric: {}, at: constant(0) }];
+
   return table;
 }
 
@@ -225,9 +271,12 @@ function table(): Record<string, SeriesSpec[]> {
 /** Names every catalogued query the fixtures do not answer. */
 export function uncovered(): string[] {
   const known = table();
-  return [...Object.values(SYSTEM), ...Object.values(SERVICES), ...Object.values(AVAILABILITY)].filter(
-    (q) => !(q in known),
-  );
+  // ALL_QUERIES, not a second hand-written list of the groups. This function
+  // re-enumerated SYSTEM/SERVICES/AVAILABILITY by hand, so a NEW group in
+  // queries.ts was covered by nothing and said nothing about it - a coverage
+  // check that silently stops covering things is the exact shape of the
+  // problem it exists to catch.
+  return ALL_QUERIES.filter((q) => !(q in known));
 }
 
 function format(v: number): string {

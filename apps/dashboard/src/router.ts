@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 /**
- * Four routes, all four built.
+ * Five routes, all five built.
  *
  * `/` lands on Home now. It used to land on System, because Home was the stub and
  * sending someone to a page that says "not built" would have been a strange front
@@ -25,6 +25,11 @@ export const router = createRouter({
       path: "/services",
       name: "services",
       component: () => import("@/pages/ServicesPage.vue"),
+    },
+    {
+      path: "/network",
+      name: "network",
+      component: () => import("@/pages/NetworkPage.vue"),
     },
     {
       path: "/home",
