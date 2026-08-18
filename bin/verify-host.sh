@@ -1167,6 +1167,47 @@ if [ -z "$GREENBOOT" ]; then
 		warn containers.storage_orphans "leftover build container(s) in storage: $orphans - they hold dangling images, so the nightly 'podman image prune -f' cannot reclaim; clear with 'podman rm --storage <name>'"
 	fi
 
+	# EVERY QUADLET IS SUPPOSED TO BE RUNNING, AND NOTHING ASSERTED IT.
+	# On 2026-08-18 caddy was DOWN for 35 minutes - every public service
+	# unreachable - while this battery reported "22 containers up, none
+	# unhealthy" and zero failed units. Three checks looked straight at it and
+	# none could see it:
+	#
+	#   containers.healthy       counts what IS running and looks for unhealthy.
+	#                            A container that never started is not
+	#                            unhealthy, it is ABSENT, and absent is
+	#                            indistinguishable from "not part of the stack".
+	#   containers.failed_units  a dependency failure leaves the unit `inactive
+	#                            (dead)`, NOT `failed` - caddy-build.service
+	#                            failed and systemd skipped caddy.service with
+	#                            "Job caddy.service/start failed with result
+	#                            'dependency'". Nothing was left in a failed
+	#                            state to count.
+	#   routes.*                 only runs under --routes, which is not the
+	#                            hourly path.
+	#
+	# So the fix is to compare against what SHOULD run rather than what does.
+	# The expected set comes from the unit files in stacks/, never a list here -
+	# a hand-maintained roster is the most driftable thing this repo has a name
+	# for, and it would have to be edited in lockstep with every new service.
+	expected_inactive=""
+	for qf in "$repo"/stacks/*/*.container "$repo"/stacks/*/*.pod; do
+		[ -e "$qf" ] || continue
+		qb=$(basename "$qf")
+		case "$qb" in
+			*.container) qu="${qb%.container}.service" ;;
+			*.pod)       qu="${qb%.pod}-pod.service" ;;
+			*)           continue ;;
+		esac
+		qs=$(systemctl --user is-active "$qu" 2>/dev/null)
+		[ "$qs" = active ] || expected_inactive="$expected_inactive $qu(${qs:-unknown})"
+	done
+	if [ -z "$expected_inactive" ]; then
+		ok containers.units_active "every quadlet service is active"
+	else
+		bad containers.units_active "quadlet service(s) NOT running:$expected_inactive"
+	fi
+
 	running=$(podman ps --format '{{.Names}}' 2>/dev/null | wc -l)
 	fact containers_running "${running:-}" num
 	unhealthy=$(podman ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | paste -sd' ' -)
@@ -1662,7 +1703,19 @@ if [ -z "$GREENBOOT" ]; then
 		# healthy-looking 302 once already. The dashboard's own health check is
 		# what covers the container.
 		for h in watch request id auth home sonarr radarr prowlarr tdarr torrent ntfy; do
-			code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h.avanserv.com/" 2>/dev/null)
+			# NTFY SERVES ITS WEB UI AT / TO ANYONE, so the refusal this battery
+			# wants to see is not on that path. Asked for "/", ntfy answers 200
+			# whether it is deny-all or wide open - so the check could only ever
+			# FAIL on a correctly configured server, and could never have
+			# detected the thing it exists to detect. The property lives on a
+			# TOPIC path, where deny-all answers 403 to anonymous, including for
+			# a topic that does not exist. Measured 2026-08-18: / -> 200,
+			# /home-server/json -> 403, /verify-host-probe/json -> 403.
+			case "$h" in
+				ntfy) rpath="/verify-host-probe/json?poll=1" ;;
+				*)    rpath="/" ;;
+			esac
+			code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "https://$h.avanserv.com$rpath" 2>/dev/null)
 			# ntfy IS THE ONE WHOSE HEALTHY ANSWER IS A REFUSAL, and it has to be
 			# in this battery rather than left out: it is the route every alert
 			# travels, so if it breaks, the thing that would have told you is the
