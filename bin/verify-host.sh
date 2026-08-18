@@ -818,12 +818,18 @@ if [ -z "$GREENBOOT" ]; then
 		# FAIL is safe. This whole section is inside `if [ -z "$GREENBOOT" ]`, so
 		# it never runs on the rollback path and cannot block either reboot
 		# script - the trap this battery has hit three times.
-		gb_env=$(priv grub2-editenv "$gb_grubenv" list 2>/dev/null || true)
+		# THE EXIT CODE, NOT THE OUTPUT. An emptied grubenv lists nothing and is
+		# a perfectly clean one - keying on `[ -z "$gb_env" ]` reported it as
+		# "not measured", i.e. the healthiest possible state read as the
+		# unknown one. Caught by the fixture that exercises this, which is the
+		# whole reason the override exists.
+		gb_readable="" gb_env=""
+		if gb_env=$(priv grub2-editenv "$gb_grubenv" list 2>/dev/null); then gb_readable=1; fi
 		gb_counter=$(sed -n 's/^boot_counter=//p' <<<"$gb_env" | tail -1)
 		gb_success=$(sed -n 's/^boot_success=//p' <<<"$gb_env" | tail -1)
 		fact boot_counter "${gb_counter:-}"
 		fact boot_success "${gb_success:-}"
-		if [ -z "$gb_env" ]; then
+		if [ -z "$gb_readable" ]; then
 			note greenboot.boot_target "could not read $gb_grubenv - not measured"
 		elif [ -z "$gb_counter" ]; then
 			ok greenboot.boot_target "the next boot selects the default deployment"
