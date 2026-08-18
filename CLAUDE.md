@@ -1314,6 +1314,52 @@ which is exactly what let a 7.7 GB 2D release replace a 38.3 GB 3D one that Rada
   seeding, so `os.link()` put them back for 0 bytes and no bandwidth. **Look in `downloads/` before
   re-downloading anything.**
 
+## The seeding policy, and the one part qBittorrent cannot express
+
+**Seed for at least 72 hours, then stop at ratio 1.5 or one week, whichever comes first.** Since
+2026-08-18 that is enforced by `bin/apply-seeding-policy.py` on `home-server-seeding.timer`, hourly.
+
+**Deletion is still Radarr's and Sonarr's**, and the script deletes nothing. Both run with
+`removeCompletedDownloads`, which removes the torrent *and its files* once the client reports it
+done seeding - so the whole policy is expressed by deciding when a torrent is allowed to **stop**.
+That split keeps deletion with the two applications that know whether a file was ever imported.
+
+**They still track torrents imported months ago**, which is easy to conclude the opposite of. Radarr's
+queue endpoint lists only what is downloading or awaiting import, so a seeding torrent looks
+forgotten - but `/api/v3/history?downloadId=<hash>` still holds `grabbed` and `downloadFolderImported`
+for a film grabbed in November 2025, and it was duly reaped. **Check history, not the queue.**
+
+**The floor is the half that needs code, because every share limit qBittorrent has is a MAXIMUM.**
+There is no minimum-seed-time setting anywhere in it, so a floor can only be enforced by withholding
+the limits until a torrent has earned them. It binds in exactly one case - a torrent reaching ratio
+1.5 in under three days - since the seven-day limit can never fire before 72 hours.
+
+**THE GLOBAL LIMITS MUST STAY OFF, and that is the load-bearing part.** A per-torrent limit of `-2`
+means "use the global one", and a new torrent starts at `-2` - so a global ratio limit reaps it hours
+into its life with the script none the wiser and the floor silently gone. The script re-asserts
+`max_ratio_enabled=false` every run rather than trusting the UI, and pins held torrents to an
+explicit `-1` rather than leaving them at `-2`, which is only as safe as the setting it defers to.
+`seeding.timer_enabled` and `seeding.run_age` are what prove the script is still running.
+
+**`shareLimitAction` IS A STRING THAT SILENTLY ACCEPTS THE INTEGER.** qBittorrent 5 made it a
+required parameter of `setShareLimits`, and `shareLimitAction=0` and `=3` **both answer 200 and both
+store `Default`** - so the spelling matching qBittorrent's own enum is accepted, ignored, and
+indistinguishable from success. Only `Stop` stores `Stop`. The only way to tell is to write the value
+and read `share_limit_action` back out of `torrents/info`; the status code cannot. It is set to
+`Stop` rather than `Default` for the same reason the limits are `-1` rather than `-2`: `Default`
+defers to the global action, and a global `RemoveWithContent` would have qBittorrent delete files
+behind Radarr.
+
+**It fails in the safe direction.** A stopped timer means no torrent is ever promoted past the floor,
+so nothing stops and nothing is deleted - the disk grows rather than the tracker account being spent.
+Every check in the `Seeding policy` section is therefore WARN or PASS, never FAIL, for the reason the
+Logs and Metrics sections give.
+
+**Applying it reclaimed 214 GB on the first run** (`downloads/` 445 -> 231 GB, the volume 14% -> 11%),
+because eight torrents had been seeding 13-39 days at **ratio 0** - the Harry Potter and Hobbit films
+whose data had been rewritten in place, so they could never reach a limit and could never be cleaned
+up. That is the space cost of the `mkvpropedit` damage, and it had no expiry.
+
 ## Ingress and access control
 
 **`caddy` is the single TLS terminator**, built from `apps/caddy/Dockerfile` because the official
