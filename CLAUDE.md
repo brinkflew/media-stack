@@ -1751,6 +1751,30 @@ Conclusions from auditing the running host. Do not rediscover these:
   boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
   the later gated runs, which is where it bit. Same shape as the phantom units the rename left
   behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
+- **PERFORMANCE CO-PILOT IS MASKED, AND IT BLOCKED AN OS UPDATE BEFORE IT WAS.** uCore enables
+  `pmcd`, `pmie` and `pmlogger` by default and the two `_farm` units are pulled in by those.
+  **Nothing here reads any of it** - cockpit is inactive and the metrics layer is Prometheus,
+  node-exporter and `bin/collect-metrics.py`. On **2026-08-18** the published image `e5bf6651`
+  shipped `/usr/libexec/pcp/lib/{pmcd,pmie,pmie_farm,pmlogger,pmlogger_farm}` with **no SELinux
+  label**, so PID 1 could not exec them - `status=203/EXEC`, `Permission denied`, with
+  `avc: denied ... scontext=init_t tcontext=unlabeled_t tclass=file` behind it.
+  `host.failed_units` caught it, greenboot rejected the deployment four boots deep and rolled
+  back. **That is the system working, and the rollback's first real firing.** But the standing
+  consequence was that the host would take **no OS security update at all** while that image was
+  published, over a telemetry daemon nobody reads - and no fix was published.
+  - **The defect was NARROW, which is what makes masking defensible rather than a shortcut.**
+    Exactly those five paths were unlabelled; everything else in the image was fine. Masking
+    removes them from `host.failed_units`' view and nothing else, so any *other* unlabelled
+    binary a unit execs is still caught. Filtering `pm*` inside the check was the alternative and
+    was rejected: it blinds the last line of defence permanently, and the units would go on
+    failing, restarting and writing archives.
+  - **THE TIMERS ARE `disabled` AND WERE RUNNING ANYWAY**, which is the trap this file already
+    names about `Wants=`. `pmie_check`, `pmlogger_check`, their `_farm` and `_daily` variants all
+    report `disabled` from `list-unit-files` and were **active and scheduled**, pulled in by the
+    three enabled services. Masking the services does not stop them in the running boot - they
+    have to be stopped too. Check `list-timers`, not `list-unit-files`.
+  - It also reclaimed **268 MB** from `/var/log/pcp` on `nvme0n1p4`, the disk that carries
+    `config/`, `/var/backups` and the checkout, and stopped a continuous writer on it.
 - **A RED BOOT ARMS *GRUB*, NOT JUST OUR MARKER, AND IT STAYS ARMED UNTIL THE MACHINE BOOTS
   GREEN - WHICH SILENTLY TURNS THE NEXT REBOOT INTO A ROLLBACK.** This is the most expensive
   thing in this file to rediscover, because every signal reads correct while it happens.

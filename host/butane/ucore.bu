@@ -456,6 +456,63 @@ systemd:
       enabled: true
 
     # ------------------------------------------------------------------------
+    # Performance Co-Pilot, which nothing here reads and which blocked an
+    # OS update for five unlabelled binaries
+    # ------------------------------------------------------------------------
+    # uCore enables pmcd, pmie and pmlogger by default; the two _farm units are
+    # pulled in by those. Nothing on this host consumes any of it - cockpit is
+    # inactive, and the metrics layer is Prometheus, node-exporter and
+    # bin/collect-metrics.py. See CLAUDE.md's "Metrics".
+    #
+    # ON 2026-08-18 IT COST AN OS UPDATE. The published image e5bf6651 shipped
+    # /usr/libexec/pcp/lib/{pmcd,pmie,pmie_farm,pmlogger,pmlogger_farm} with no
+    # SELinux label, so PID 1 could not exec them:
+    #
+    #   pmcd.service: Unable to locate executable ...: Permission denied
+    #   Failed at step EXEC spawning /usr/libexec/pcp/lib/pmcd: status=203/EXEC
+    #   avc: denied ... scontext=init_t tcontext=unlabeled_t tclass=file
+    #
+    # greenboot's host.failed_units caught it and rolled the deployment back,
+    # correctly and four boots deep - which is the system working. But the
+    # consequence is that this host takes NO OS security updates for as long as
+    # that image is published, over a telemetry daemon nobody reads.
+    #
+    # THE DEFECT IS NARROW AND THE BLINDNESS IS BOUNDED, which is what makes
+    # this defensible rather than a shortcut. Exactly those five paths were
+    # unlabelled; everything else in the image was fine. Masking them removes
+    # them from host.failed_units' view and nothing else - any other unlabelled
+    # binary a unit tries to exec is still caught. It is not a filter in the
+    # check, which would blind the last line of defence permanently.
+    #
+    # It also stops pmlogger writing archives continuously: 270 MB had
+    # accumulated in /var/log/pcp on nvme0n1p4, the disk that carries config/,
+    # /var/backups and the checkout.
+    #
+    # MASK rather than disable, for the reason given above: only a mask
+    # survives a Wants= from somewhere else. The _farm units are masked
+    # explicitly even though nothing enables them directly, because being
+    # pulled in by a dependency is exactly the case `disable` does not cover.
+    - name: pmcd.service
+      enabled: false
+      mask: true
+
+    - name: pmie.service
+      enabled: false
+      mask: true
+
+    - name: pmlogger.service
+      enabled: false
+      mask: true
+
+    - name: pmie_farm.service
+      enabled: false
+      mask: true
+
+    - name: pmlogger_farm.service
+      enabled: false
+      mask: true
+
+    # ------------------------------------------------------------------------
     # /mnt/media, with its SELinux label set once
     # ------------------------------------------------------------------------
     # This is the reason none of the media Volume= lines carry :z. SELinux is
