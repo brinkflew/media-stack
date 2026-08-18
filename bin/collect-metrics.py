@@ -390,6 +390,171 @@ def source_network(m):
 
 
 # ------------------------------------------------------------------------------
+# Container network, per segment
+# ------------------------------------------------------------------------------
+# THE ONE THING HERE THAT CAN BE MEASURED, AND THE ONE THAT CANNOT.
+#
+# Per-FLOW accounting - how many bytes container A sent container B - is not
+# available on this host at all. `nsenter -n` into a rootless netns is EPERM as
+# core, and /proc/net/nf_conntrack is root-only, so there is no conntrack view
+# of a netavark bridge from here. Nothing in this repository can produce an
+# A->B number, and anything that appears to is inferring one.
+#
+# Per-CONTAINER, per-SEGMENT accounting is available, and cheaply. Rootless
+# podman maps container uid 0 to core, so ptrace_may_access passes and every
+# container's /proc/<pid>/net/dev is an ordinary file read from the host. That
+# is the exact INVERSE of node-exporter's filesystem collector, which cannot
+# read /proc/1/mountinfo precisely BECAUSE host PID 1 is real root.
+#
+# What a reader may conclude depends on how many members the segment has, and
+# the dashboard states it rather than leaving it implied: net-egress has one
+# member and net-dashboard and net-solver have two, so on those three the
+# number IS the edge, direction included. On the other six it is the node's
+# total on that segment and the per-peer split is not measured.
+#
+# The labels are {container, network} and deliberately NOT the interface.
+# source_network above explains why: netavark recreates a veth per container
+# per network on every restart and auto-update restarts everything nightly, so
+# a device label would mint thousands of dead series a year. Container and
+# network names change only when stacks/ does.
+
+def _route_subnets(pid):
+    """iface -> "a.b.c.d/len" for every directly-connected route in
+    /proc/<pid>/net/route.
+
+    THE ADDRESS AND MASK ARE LITTLE-ENDIAN HEX. 000A15AC is 172.21.10.0, not
+    0.10.21.172 - reading them big-endian yields a plausible-looking address
+    that simply never matches a podman subnet, so the join would come back
+    empty and the whole source would look like it had nothing to report.
+    """
+    out = {}
+    try:
+        lines = read_text("/proc/%d/net/route" % pid).splitlines()[1:]
+    except OSError:
+        return out
+    for line in lines:
+        f = line.split()
+        if len(f) < 8:
+            continue
+        iface, dest, gateway, mask = f[0], f[1], f[2], f[7]
+        # A default route names the gateway, not a segment this container is
+        # on. Only the on-link routes identify a bridge.
+        if gateway != "00000000":
+            continue
+        try:
+            net = int(dest, 16)
+            bits = bin(int(mask, 16)).count("1")
+        except ValueError:
+            continue
+        out[iface] = "%d.%d.%d.%d/%d" % (net & 255, (net >> 8) & 255,
+                                         (net >> 16) & 255, (net >> 24) & 255,
+                                         bits)
+    return out
+
+
+def source_container_network(m):
+    raw = run(["podman", "ps", "--format", "json"], timeout=20)
+    if raw is None:
+        raise RuntimeError("podman ps failed")
+    containers = json.loads(raw)
+
+    raw_nets = run(["podman", "network", "ls", "--format", "json"], timeout=20)
+    if raw_nets is None:
+        raise RuntimeError("podman network ls failed")
+    by_subnet = {}
+    for net in json.loads(raw_nets):
+        for sub in net.get("subnets") or []:
+            cidr = sub.get("subnet")
+            if cidr:
+                by_subnet[cidr] = net.get("name", "")
+
+    pairs = 0
+    unmapped = 0
+    for c in containers:
+        # A container reporting no networks of its own is a pod member: it
+        # shares the infra container's namespace, so its /proc/<pid>/net/dev is
+        # literally the SAME counter. Reading all four members would report the
+        # pod's traffic four times. podman's own answer is the filter here - no
+        # rule in this script decides which containers are in a pod.
+        if not (c.get("Networks") or []):
+            continue
+        pid = c.get("Pid") or 0
+        if not pid:
+            continue
+        container = (c.get("Names") or ["?"])[0]
+
+        subnets = _route_subnets(pid)
+        try:
+            dev = read_text("/proc/%d/net/dev" % pid)
+        except OSError:
+            # The container went away between `podman ps` and this read.
+            # Emitting nothing is the right answer: a zero here is
+            # indistinguishable from an idle link.
+            continue
+
+        for line in dev.splitlines()[2:]:
+            if ":" not in line:
+                continue
+            iface, rest = line.split(":", 1)
+            iface = iface.strip()
+            if iface == "lo":
+                continue
+            # Join on the subnet, NEVER on the interface index: the names are
+            # not in declaration order. caddy is eth0=net-transcode,
+            # eth3=net-ingress, eth6=net-media.
+            network = by_subnet.get(subnets.get(iface, ""), "")
+            if not network:
+                # A TUNNEL IS NOT DRIFT, AND DROPPING IT LOSES THE BIGGEST
+                # NUMBER ON THE HOST. gluetun's tun0 sits in the torrent pod's
+                # namespace carrying 221 MB in and 3.57 GB out - every byte
+                # qBittorrent has moved - and it matches no declared subnet
+                # because it has no on-link route at all: gluetun steers
+                # traffic onto it with firewall marks and policy routing, so
+                # the main table's default stays on eth0.
+                #
+                # tun*/wg* is the kernel's own naming for a tunnel device, not
+                # a table of this stack's services, so classifying on it adds
+                # no drift surface. It is also the ONLY place the pod's egress
+                # is measurable: nothing here can see inside the namespace from
+                # the outside.
+                if iface.startswith("tun") or iface.startswith("wg"):
+                    network = "tunnel"
+                else:
+                    unmapped += 1
+                    continue
+            f = rest.split()
+            if len(f) < 16:
+                continue
+            labels = {"container": container, "network": network}
+            m.add("home_server_container_network_receive_bytes_total",
+                  int(f[0]), labels,
+                  "Bytes RECEIVED by this container on this segment. Read from "
+                  "inside the container's own namespace, so the direction is "
+                  "the container's - reading the host-side veth instead would "
+                  "report every one of these inverted while looking identical.",
+                  "counter")
+            m.add("home_server_container_network_transmit_bytes_total",
+                  int(f[8]), labels,
+                  "Bytes SENT by this container on this segment. Every "
+                  "intra-segment byte therefore appears twice - here and as "
+                  "its peer's receive - so halve any sum over a whole segment.",
+                  "counter")
+            pairs += 1
+
+    # The self-check. A container/network pair that stops being measured is
+    # otherwise silent - the series simply stops, which on a counter looks the
+    # same as a quiet link until you go looking for it.
+    m.add("home_server_container_network_pairs", pairs, None,
+          "Container/network pairs measured. Compare against the membership "
+          "declared in stacks/: a drop means a container lost an interface or "
+          "its /proc entry became unreadable.")
+    m.add("home_server_container_network_unmapped_interfaces", unmapped, None,
+          "Interfaces whose on-link subnet matched no podman network and which "
+          "are not a tunnel. Non-zero means traffic is being dropped on the "
+          "floor here - written as an explicit 0 so it can be alerted on, "
+          "rather than a series that only exists when something is wrong.")
+
+# ------------------------------------------------------------------------------
 # Containers
 # ------------------------------------------------------------------------------
 # THE JOIN KEY IS PODMAN'S OWN PODMAN_SYSTEMD_UNIT LABEL, never a name derived
@@ -2197,6 +2362,7 @@ SOURCES = (
     ("filesystems", source_filesystems, False, None),
     ("network", source_network, False, None),
     ("containers", source_containers, False, None),
+    ("container_network", source_container_network, False, None),
     ("gpu", source_gpu, False, None),
     ("sensors", source_sensors, False, None),
     ("status", source_status, False, None),

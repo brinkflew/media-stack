@@ -1698,6 +1698,29 @@ if [ -z "$GREENBOOT" ]; then
 		warn metrics.node_netns_scope "node-exporter is running namespace-scoped collectors ($netns_on) - those series describe its own container, not the host"
 	fi
 
+	# The per-segment byte counters, which are the whole data layer of the
+	# Network page. ABSENT AND ZERO ARE DIFFERENT ANSWERS and both are asked
+	# for: an empty read means source_container_network did not run at all, a
+	# zero means it ran and matched nothing. Either way every spoke on that page
+	# renders as unmeasured - which is the correct rendering, and still a thing
+	# somebody should be told about rather than left to notice.
+	#
+	# WARN, never FAIL, for the reason the rest of this section gives: the
+	# reboot scripts gate on this battery, and a blank network panel must never
+	# hold up an OS security update.
+	cn_pairs=$(promq home_server_container_network_pairs); cn_pairs=${cn_pairs%%.*}
+	cn_unmap=$(promq home_server_container_network_unmapped_interfaces); cn_unmap=${cn_unmap%%.*}
+	if [ -z "$prom_up" ] || [ -z "${cn_pairs:-}" ]; then
+		warn metrics.container_network "the per-segment byte counters could not be read - source_container_network may not have run at all"
+	elif [ "$cn_pairs" -eq 0 ]; then
+		warn metrics.container_network "no container/segment pair was measured - every spoke on the Network page reads as unmeasured"
+	elif [ "${cn_unmap:-0}" -ne 0 ]; then
+		warn metrics.container_network "$cn_pairs pair(s) measured, but $cn_unmap interface(s) matched no podman network and are not a tunnel - traffic is being dropped on the floor"
+	else
+		ok metrics.container_network "$cn_pairs container/segment pairs measured"
+	fi
+	fact metrics_container_network_pairs "${cn_pairs:-}" num
+
 	# A collector that fails on every scrape emits NOTHING, which looks exactly
 	# like a metric nobody configured - no gap in a graph, no error in a
 	# dashboard, just a panel that was never built. node_exporter keeps a
