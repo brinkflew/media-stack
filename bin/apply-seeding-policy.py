@@ -95,12 +95,29 @@ MAX_SEED_MINUTES = 7 * 24 * 60    # ... or a week of seeding, whichever is first
 UNLIMITED = -1
 USE_GLOBAL = -2
 
-# (ratio, seeding minutes, inactive minutes) for each of the two states a
-# torrent can be in here. Inactive seeding time is left unlimited in both: it
+# WHAT TO DO WHEN A LIMIT IS REACHED, and it is a STRING that qBittorrent
+# silently mis-parses if given as the integer its own enum uses.
+#
+# setShareLimits gained a required shareLimitAction parameter in qBittorrent 5.
+# It answers 200 to `shareLimitAction=0` AND to `shareLimitAction=3` and stores
+# "Default" for both - so the obvious integer spelling is accepted, ignored, and
+# indistinguishable from success. Only the name works. Verified by writing each
+# value and reading share_limit_action back out of torrents/info, which is the
+# only thing that tells them apart.
+#
+# "Stop" rather than "Default" for the same belt-and-braces reason the limits
+# are pinned to -1 rather than -2: Default deferred to the global action, and if
+# that global action were ever set to RemoveWithContent, qBittorrent would
+# delete the files itself - behind Radarr, which is the one component that knows
+# whether the file was ever imported.
+STOP = "Stop"
+
+# (ratio, seeding minutes, inactive minutes, action) for each of the two states
+# a torrent can be in here. Inactive seeding time is left unlimited in both: it
 # stops a torrent for being unpopular, which is the opposite of the obligation
 # this policy exists to honour.
-HOLDING = (float(UNLIMITED), UNLIMITED, UNLIMITED)
-MANAGED = (float(MAX_RATIO), MAX_SEED_MINUTES, UNLIMITED)
+HOLDING = (float(UNLIMITED), UNLIMITED, UNLIMITED, STOP)
+MANAGED = (float(MAX_RATIO), MAX_SEED_MINUTES, UNLIMITED, STOP)
 
 # What the global preferences must be for the floor to hold. max_ratio_act stays
 # 0 (stop the torrent) because stopping is what Radarr and Sonarr wait for; the
@@ -193,17 +210,24 @@ def enforce_global(port, dry_run, verbose):
 
 
 def current_limits(tor):
+    """The four fields the policy owns, read back the same way they are set.
+
+    share_limit_action is compared too, not just the numbers. Without it a
+    torrent whose action had drifted to RemoveWithContent would match on every
+    limit and never be corrected.
+    """
     return (float(tor.get("ratio_limit", USE_GLOBAL)),
             int(tor.get("seeding_time_limit", USE_GLOBAL)),
-            int(tor.get("inactive_seeding_time_limit", USE_GLOBAL)))
+            int(tor.get("inactive_seeding_time_limit", USE_GLOBAL)),
+            str(tor.get("share_limit_action", "Default")))
 
 
 def apply_limits(port, hashes, limits, dry_run):
     """setShareLimits takes a pipe-separated hash list, so this is one call."""
-    ratio, seed_minutes, inactive = limits
+    ratio, seed_minutes, inactive, action = limits
     data = ("hashes=%s&ratioLimit=%s&seedingTimeLimit=%d"
-            "&inactiveSeedingTimeLimit=%d"
-            % ("|".join(hashes), ratio, seed_minutes, inactive))
+            "&inactiveSeedingTimeLimit=%d&shareLimitAction=%s"
+            % ("|".join(hashes), ratio, seed_minutes, inactive, action))
     if dry_run:
         return
     qbt(port, "torrents/setShareLimits", data=data)
