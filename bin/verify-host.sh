@@ -823,8 +823,14 @@ if [ -z "$GREENBOOT" ]; then
 		# "not measured", i.e. the healthiest possible state read as the
 		# unknown one. Caught by the fixture that exercises this, which is the
 		# whole reason the override exists.
+		# AND THE FILE HAS TO EXIST, tested separately because grub2-editenv
+		# exits 0 with no output on a path that is not there - so the exit code
+		# alone reported a MISSING grubenv as "the next boot selects the default
+		# deployment". Green, from measuring nothing. Both wrong answers here
+		# were found by the fixture rather than by reading the code.
 		gb_readable="" gb_env=""
-		if gb_env=$(priv grub2-editenv "$gb_grubenv" list 2>/dev/null); then gb_readable=1; fi
+		if priv test -f "$gb_grubenv" 2>/dev/null &&
+		   gb_env=$(priv grub2-editenv "$gb_grubenv" list 2>/dev/null); then gb_readable=1; fi
 		gb_counter=$(sed -n 's/^boot_counter=//p' <<<"$gb_env" | tail -1)
 		gb_success=$(sed -n 's/^boot_success=//p' <<<"$gb_env" | tail -1)
 		fact boot_counter "${gb_counter:-}"
