@@ -1643,6 +1643,33 @@ Conclusions from auditing the running host. Do not rediscover these:
   `podman image prune -f` afterwards, but a superseded image keeps its repository digest and is
   therefore not *dangling* - verified: every pre-update image survived. Only `prune -a` would remove
   them, so **never run that**; the previous image in local storage is the only rollback there is.
+- **THAT SAME PRUNE FAILS THE UNIT, AND THE FAILURE NAMES THE ONE COMPONENT THAT WAS WORKING.**
+  A `.build` unit interrupted mid-run leaves a **buildah working container** in storage. It holds
+  the build-cache layer it was made from, so that image is both dangling *and* in use, and
+  `podman image prune -f` exits **125** on it rather than skipping it. podman ships that prune as
+  `ExecStartPost=` on `podman-auto-update.service`, and an `ExecStartPost` failure fails the unit -
+  so on 2026-08-17 and 2026-08-18 `podman auto-update` exited **0**, all eighteen containers
+  updated correctly, and systemd reported the updater broken:
+
+  ```
+  Main PID: ... (code=exited, status=0/SUCCESS)          <- the update
+  Control process exited, code=exited, status=125/n/a    <- the prune
+  Error: image used by 06fc6c080d43...: image is in use by a container
+  ```
+
+  Seven had accumulated across two occasions, four of them stamped inside the reboot transition of
+  the 2026-08-16 unattended window. They held 2.1 GB of dangling images and blocked **12.1 GB** of
+  reclaim, and nothing measured any of it - the only visible signal was `containers.failed_units`
+  naming `podman-auto-update.service`, three scripts from the cause and pointing at the wrong
+  component. Two changes, and **neither works without the other**:
+  `host/systemd/podman-auto-update.service.d/` makes the prune non-fatal, because housekeeping that
+  can be skipped for a night must not overrule the update `Notify=healthy` protects; and
+  `containers.storage_orphans` WARNs on the leftovers directly, which is what makes the first a
+  correction rather than a silencer. **`ExecStartPost=` must be cleared with an empty assignment
+  before the `-` form is added** - it is a list directive, so a drop-in that only adds appends, and
+  the original fatal line still runs first. Clear them with `podman rm --storage <name>`; **buildah
+  is absent on uCore**, so `buildah rm` is not the tool. Note this does not reopen the bullet above:
+  it is still `prune -f`, never `prune -a`.
 - **uCore ships NVIDIA's own `nvidia-cdi-refresh.{path,service}`**, writing `/run/cdi/nvidia.yaml` on
   tmpfs, with the `.path` unit watching `modules.dep` and `nvidia-ctk` so a driver change regenerates
   the spec with no reboot. `ucore.bu` used to define a second unit writing `/etc/cdi/nvidia.yaml`.
@@ -1718,6 +1745,34 @@ Conclusions from auditing the running host. Do not rediscover these:
   boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
   the later gated runs, which is where it bit. Same shape as the phantom units the rename left
   behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
+- **A FINDING WITH NO REMEDY THE ALERT CAN NAME IS AN ALERT THAT TEACHES PEOPLE TO IGNORE ALERTS**,
+  and `greenboot.verdict` was one. A red boot writes `greenboot_result=red` into
+  `/var/lib/home-server/boot-state`, and that is a fact about **this boot** - only a reboot rewrites
+  it. So the check FAILed indefinitely, firing `CheckFailing` at critical every 4h, for up to a
+  week given the Sunday window. Everything around it cleared normally: `/boot` was repaired,
+  `deploy.boot_free` went green, `red_boot_at` was cleared by hand, `greenboot.red_boot` went green -
+  and this one kept shouting about an event from two days earlier that nobody could act on. Exactly
+  the "send enough of them that the critical ones stop being read" failure the Alerting section is
+  written against.
+
+  **The acknowledgement already existed; the check simply did not read it.** `red_boot_at` is the
+  actionable FAIL - it holds unattended reboots and has a documented clearing procedure that asks
+  the only question worth asking. `greenboot.verdict` is the descriptive half. It now FAILs while
+  `red_boot_at` is present and **WARNs once a human has cleared it**, naming that the next boot is
+  what rewrites the verdict. One event, one FAIL.
+
+  **THAT DOWNGRADE WAS UNSOUND UNTIL A SECOND, MISSING CHECK WAS ADDED, and the gap is the more
+  serious half of this entry.** An absent `red_boot_at` has two readings - acknowledged, or the
+  `red.d` hook never ran - and boot-state cannot tell them apart. `greenboot.armed` asserts the
+  check is in `required.d` and that the GRUB counter exists; **nothing asserted
+  `50-record-red-boot.sh` was symlinked into `/etc/greenboot/red.d/`**, which is the hook that
+  breaks the loop FCOS's own documentation names: after a rollback nothing tells the updater the
+  image was bad, so it stages the same digest again within the day. Its absence is silent in the
+  worst way - every greenboot check still passes, a red boot still rolls back, and the only
+  consequence is that the mark is never written, so the unattended window re-applies the same
+  rejected deployment the following Sunday, for ever. `greenboot.red_hook` now asserts it, and is a
+  prerequisite for the softening above rather than a nicety. Both live outside `--greenboot`, so
+  neither can block a reboot.
 - **TWO SHA256 DIGESTS NAME THE SAME IMAGE, AND COMPARING THE WRONG PAIR IS WRONG FOR EVER.** The
   obvious way to ask "is the booted OS image current" is to compare `rpm-ostree status --json`'s
   `container-image-reference-digest` against `skopeo inspect`'s `.Digest`. **Those are different

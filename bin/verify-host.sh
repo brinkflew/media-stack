@@ -616,9 +616,45 @@ if [ -z "$GREENBOOT" ]; then
 		if [ "$uptime_s" -gt 300 ] && [ "$gb_epoch" -lt "$(( $(date +%s) - uptime_s ))" ]; then
 			bad greenboot.verdict "greenboot recorded no verdict for this boot (last was ${gb_at:-never}) - the check is not running"
 		else
+			# RED IS A FACT ABOUT THIS BOOT, AND ONLY A REBOOT REWRITES IT.
+			# Left as an unconditional FAIL this is the one finding here with
+			# no remedy a person can perform: greenboot.red_boot is cleared by
+			# hand and clears, deploy.boot_free is fixed and clears, and this
+			# one keeps firing CheckFailing at critical every 4h until the
+			# machine happens to reboot - up to a week, given the Sunday
+			# window. That is precisely the "send enough of them that the
+			# critical ones stop being read" failure the alerting design is
+			# written against, and it happened: the 2026-08-16 red boot was
+			# understood and repaired on the 17th and still alerting on the
+			# 18th.
+			#
+			# So red_boot_at is read as the ACKNOWLEDGEMENT it already is.
+			# greenboot.red_boot is the actionable FAIL - it is what holds
+			# unattended reboots, and it has a documented clearing procedure
+			# that asks the only question worth asking. This check is the
+			# descriptive half. One event, one FAIL; once a human has answered
+			# it, a standing WARN in the MOTD and on the dashboard until the
+			# next boot, which is all that is left to say.
+			#
+			# THE DOWNGRADE IS ONLY SOUND BECAUSE greenboot.red_hook EXISTS.
+			# An absent red_boot_at otherwise has two readings - acknowledged,
+			# or the red.d hook never ran - and they are indistinguishable from
+			# this file alone. Asserting the hook is what collapses them to the
+			# first. Do not soften this without that check.
+			#
+			# Nothing covers the tail of "acknowledged and then never rebooted"
+			# here, and nothing needs to: a host that stops applying staged
+			# deployments surfaces as deploy.image_digest, which OsImageStale
+			# already alerts on at WARN after 6h.
 			case "$gb_result" in
 				green)   ok greenboot.verdict "greenboot verified this boot healthy" ;;
-				red)     bad greenboot.verdict "greenboot FAILED this boot's health check" ;;
+				red)
+					if [ -n "$gb_red" ]; then
+						bad greenboot.verdict "greenboot FAILED this boot's health check"
+					else
+						warn greenboot.verdict "greenboot FAILED this boot's health check at ${gb_at:-?}, and it has been acknowledged - the verdict is rewritten at the next boot"
+					fi
+					;;
 				timeout) warn greenboot.verdict "greenboot's health check timed out - inconclusive, nothing was rolled back" ;;
 				missing) warn greenboot.verdict "greenboot found no checkout to run - nothing was verified this boot" ;;
 				*)       warn greenboot.verdict "greenboot recorded an unrecognised verdict '${gb_result:-none}'" ;;
@@ -678,6 +714,28 @@ if [ -z "$GREENBOOT" ]; then
 			ok greenboot.armed "greenboot is armed - a failed check reverts the deployment"
 		else
 			warn greenboot.armed "greenboot is observe-only (${gb_dir}.d, GRUB counter: ${gb_grub}) - a bad deployment will NOT roll back"
+		fi
+
+		# ARMED SAYS THE CHECK RUNS. THIS SAYS THE VERDICT IS REMEMBERED, and
+		# nothing asserted it until 2026-08-18. red.d is what breaks the loop
+		# FCOS's own documentation names: after a rollback, nothing has told the
+		# updater the image was bad, so it stages the same digest again within
+		# the day. 50-record-red-boot.sh is what stops that - it writes
+		# red_boot_at, bin/reboot-when-staged.sh refuses while it is there, and
+		# a human clears it.
+		#
+		# Its absence is silent in the worst way. Every other greenboot check
+		# still passes, a red boot still rolls back, and the ONLY consequence is
+		# that the mark is never written - so the unattended window reboots into
+		# the same rejected deployment the following Sunday, for ever, healing
+		# nothing and telling no one.
+		#
+		# It also carries greenboot.verdict's downgrade: with this proven, an
+		# absent red_boot_at means acknowledged rather than never-recorded.
+		if [ -e "$gb_etc/red.d/50-record-red-boot.sh" ]; then
+			ok greenboot.red_hook "the red-boot hook is installed"
+		else
+			bad greenboot.red_hook "50-record-red-boot.sh is NOT in $gb_etc/red.d - a rejected deployment would leave no mark and the unattended window would re-apply it"
 		fi
 	fi
 
@@ -911,6 +969,35 @@ if [ -z "$GREENBOOT" ]; then
 	userfailed=$(systemctl --user list-units --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | paste -sd' ' -)
 	if [ -z "$userfailed" ]; then ok containers.failed_units "no failed user units"
 	else bad containers.failed_units "failed user units: $userfailed"; fi
+
+	# THE CONDITION THAT USED TO REPORT ITSELF THREE SCRIPTS AWAY, as
+	# "podman-auto-update.service failed" - which is worse than silence, because
+	# it names the one thing that was working. The chain, found on 2026-08-18:
+	#
+	#   a .build unit interrupted mid-run leaves a buildah working container in
+	#   storage -> it holds the build-cache layer it was made from, so that image
+	#   is dangling AND in use -> `podman image prune -f` exits 125 on it ->
+	#   podman ships that prune as ExecStartPost= on podman-auto-update.service,
+	#   so the unit is marked failed every night while `podman auto-update`
+	#   itself exits 0 and every container updates correctly.
+	#
+	# Seven of them had accumulated across two occasions, holding 2.1 GB of
+	# dangling images and blocking 12.1 GB of reclaim. Nothing measured any of
+	# it. host/systemd/podman-auto-update.service.d/ now makes that prune
+	# non-fatal, which is only defensible because this check reports the real
+	# condition - so do not remove one without the other.
+	#
+	# WARN rather than FAIL: it is reclaimable disk, not a health problem, and a
+	# fourth critical alert for housekeeping is the failure this whole change is
+	# about. Buildah leftovers report their status as exactly `Storage`; a real
+	# container reports `Up ...` or `Exited ...`, so the two cannot be confused.
+	orphans=$(podman ps -a --external --format '{{.Status}} {{.Names}}' 2>/dev/null \
+		| awk '$1 == "Storage" {print $2}' | paste -sd' ' -)
+	if [ -z "$orphans" ]; then
+		ok containers.storage_orphans "no leftover build containers in storage"
+	else
+		warn containers.storage_orphans "leftover build container(s) in storage: $orphans - they hold dangling images, so the nightly 'podman image prune -f' cannot reclaim; clear with 'podman rm --storage <name>'"
+	fi
 
 	running=$(podman ps --format '{{.Names}}' 2>/dev/null | wc -l)
 	fact containers_running "${running:-}" num

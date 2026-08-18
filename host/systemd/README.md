@@ -14,6 +14,9 @@ mkdir -p ~/.config/systemd/user
 for u in /var/home-server/host/systemd/*.service /var/home-server/host/systemd/*.timer; do
   ln -sf "$u" ~/.config/systemd/user/
 done
+for d in /var/home-server/host/systemd/*.service.d; do
+  ln -sfn "$d" ~/.config/systemd/user/
+done
 systemctl --user daemon-reload
 systemctl --user enable --now home-server-promote.timer home-server-verify.timer \
                               home-server-caddy-build.timer home-server-backup.timer \
@@ -32,6 +35,27 @@ directory - unlike `~/.config/containers/systemd/{common,torrent,media,infra}`, 
 whole directories in `stacks/` and so pick up new files for free. A unit added here and not
 symlinked is invisible, and nothing complains.
 
+**A `*.service.d/` directory is the one exception, and it is symlinked WHOLE**, which is why there
+is a second loop. These are drop-ins over units this repository does not own - podman's own
+`podman-auto-update.service` today - so there is no file of ours to symlink beside them, and
+systemd resolves a symlinked drop-in directory happily. Linking the directory rather than each
+`.conf` inside it means a second drop-in is picked up for free, the way `stacks/` already works.
+Note `ln -sfn`: without `-n`, a re-run follows the existing symlink and nests the target inside
+itself.
+
+**Drop-ins over a USER unit may be symlinks into the checkout; over a SYSTEM unit they may not.**
+`systemd --user` for uid 1000 runs as `unconfined_t` and reads `var_t` fine, which is why every
+quadlet here is already a symlink. PID 1 cannot, so `host/journald/` and greenboot's ordering
+drop-in are duplicated into `host/butane/ucore.bu` instead - and the failure there is silent, with
+`systemctl cat` printing a file that does not apply and no AVC logged. See
+`host/greenboot/README.md`.
+
+**Assert a drop-in by its effect, never by its presence**, for that same reason:
+
+```bash
+systemctl --user show podman-auto-update.service -p ExecStartPost
+```
+
 After that a `git pull` deploys changes to these units the same way it does for quadlets - they are
 symlinks, so there is no copy step. Only `daemon-reload` is needed.
 
@@ -45,6 +69,7 @@ symlinks, so there is no copy step. Only `daemon-reload` is needed.
 | `home-server-metrics` | Collects, every 30 seconds, the numbers no container can honestly measure here: host filesystems (node-exporter's collector reads `/proc/1/mountinfo`, which no rootless container may), host network (`/proc/net` resolves in the reader's namespace), and the cgroup memory detail that separates a container holding cold page cache from one that is actually starved. It writes Prometheus exposition format into node-exporter's textfile directory rather than pushing, because Prometheus pulls - which also buys `node_textfile_mtime_seconds`, dating the file from outside the collector. See `bin/collect-metrics.py`. |
 | `home-server-backup` | Backs up `config/` nightly at 03:00, to `/var/backups/home-server` and then off-site by `restic copy`. This is the backup that actually happens; the workstation's `bin/backup-config.sh` is a third copy taken when someone is home. See `bin/backup-server.sh`. |
 | `home-server-seeding` | Enforces the one part of the seeding policy qBittorrent cannot express: a **72-hour floor** before any torrent may be stopped. Every share limit qBittorrent has is a maximum that triggers an action, so a minimum can only be enforced by withholding those limits - which is all this does. Past 72h a torrent gets ratio 1.5 and a seven-day seeding limit and qBittorrent stops it on whichever lands first; Radarr and Sonarr then delete it and its files, as they already did. It deletes nothing itself, and a stopped timer means nothing is ever reaped rather than things being reaped early. See `bin/apply-seeding-policy.py`. |
+| `podman-auto-update.service.d` | **Not a unit of ours - a drop-in over podman's.** It makes the `ExecStartPost=` image prune non-fatal, so a disk reclaim that could be skipped for a night cannot mark the unit that updates eighteen containers as failed. It could and did: on 2026-08-17 and 2026-08-18 `podman auto-update` exited 0, every container updated, and the unit reported failure because the prune hit a leftover build container and exited 125. The condition itself is now measured by `containers.storage_orphans`, which is what makes this a correction and not a silencer. |
 
 ```bash
 systemctl --user list-timers home-server-promote.timer home-server-verify.timer
