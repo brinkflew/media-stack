@@ -1059,11 +1059,42 @@ if [ -z "$GREENBOOT" ]; then
 
 	# Every container that can be auto-updated should be. A unit that lost its
 	# policy would simply never appear here again, silently.
-	au_count=$(podman auto-update --dry-run 2>/dev/null | grep -cE 'registry|local' || true)
-	if [ "${au_count:-0}" -ge 20 ]; then
-		ok update.policy_count "$au_count containers carry an auto-update policy"
+	#
+	# LOCAL LABELS, NOT `podman auto-update --dry-run`. That command answers a
+	# question this check is not asking: it contacts EVERY REGISTRY for every
+	# container to work out whether a newer image exists. Measured 2026-08-18,
+	# it took **three minutes** and was, on its own, essentially the entire
+	# runtime of the battery - 3m02s wall against 4.2s of CPU, the rest pure
+	# network wait. Hourly, that is ~500 registry round trips a day to count a
+	# number that changes only when a quadlet does, and bin/reboot-host.sh runs
+	# the full battery in its pre-flight, so a human waited three minutes for it
+	# at exactly the moment they wanted an answer. The same objection
+	# deploy.image_digest's comment already raises about ONE registry call.
+	#
+	# The policy is a LABEL on the container - `io.containers.autoupdate`, set
+	# from AutoUpdate= in the quadlet - so it is local metadata and reads in
+	# 0.055s.
+	#
+	# EXACT, NOT A FLOOR, because the expected set is derivable. It used to be
+	# `>= 20`, which is a magic number that has to be remembered whenever a
+	# service is added - and it silently tolerated up to three missing policies.
+	# Both sides now come from the same authority the topology and
+	# containers.units_active checks use: the unit files in stacks/.
+	#
+	# `-a` INCLUDES STOPPED CONTAINERS DELIBERATELY. `podman auto-update` only
+	# ever saw running ones, so this check quietly read 21 instead of 23 while
+	# caddy and dashboard were down - a number that moved for a reason that had
+	# nothing to do with what it claims to measure. Whether a container is
+	# RUNNING is containers.units_active's question, and it answers it properly.
+	au_expected=$(grep -l '^AutoUpdate=' "$repo"/stacks/*/*.container 2>/dev/null | wc -l)
+	au_count=$(podman ps -a --filter label=io.containers.autoupdate \
+		--format '{{.Names}}' 2>/dev/null | wc -l)
+	if [ "${au_expected:-0}" -eq 0 ]; then
+		note update.policy_count "no quadlet declares AutoUpdate= - not measured"
+	elif [ "${au_count:-0}" -eq "$au_expected" ]; then
+		ok update.policy_count "all $au_count containers carry an auto-update policy"
 	else
-		bad update.policy_count "only ${au_count:-0} containers carry an auto-update policy, expected 20"
+		bad update.policy_count "${au_count:-0} of $au_expected containers carry an auto-update policy - a unit has lost AutoUpdate= or was never created"
 	fi
 
 	# ------------------------------------------------------------------------------
