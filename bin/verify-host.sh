@@ -85,6 +85,19 @@ fi
 # but -n means we never hang waiting for a password prompt nobody can answer.
 if [ "$(id -u)" = 0 ]; then priv() { "$@"; }; else priv() { sudo -n "$@"; }; fi
 
+# DERIVED, NOT HARDCODED, and defined UP HERE rather than beside its first
+# reader. From BASH_SOURCE, so it answers "the checkout I am part of" rather
+# than "the checkout at /var/<name>" - the same sentence right up until the tree
+# moves, which is exactly when the answer matters.
+#
+# It used to be assigned inside the Checkout section, several hundred lines
+# below two other checks that now read it. Under `set -u` an unset $repo makes
+# their command substitutions fail into an empty string, so update.policy_count
+# silently reported "not measured" - a check reading green-ish from a variable
+# that did not exist yet. Anything here that needs the tree needs it before the
+# first section runs.
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # ------------------------------------------------------------------------------
 # Findings, and their machine-readable shadow
 # ------------------------------------------------------------------------------
@@ -1200,7 +1213,6 @@ if [ -z "$GREENBOOT" ]; then
 	# at /var/<name> clean" rather than "is the checkout I am part of clean".
 	# Those are the same sentence right up until the tree moves, which is
 	# exactly when you want the answer to be about the tree that moved.
-	repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 	dirty=$(git -C "$repo" status --porcelain 2>/dev/null)
 	fact checkout_clean "$([ -z "$dirty" ] && echo true || echo false)" bool
 	if [ -z "$dirty" ]; then
