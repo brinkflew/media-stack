@@ -233,6 +233,24 @@ while that marker is unacknowledged. `bin/verify-host.sh` FAILs on it and the MO
 line says `HELD` rather than naming the next window, so the held state is visible without
 anyone knowing to look for the file.
 
+**A RED BOOT ARMS TWO THINGS, AND CLEARING ONE IS NOT CLEARING BOTH.** `red_boot_at` is ours
+and holds the unattended window. **`boot_counter`, in `/boot/grub2/grubenv`, is GRUB's, and it
+is the one that decides what actually boots** - `custom.cfg` takes `set default=1`, the previous
+deployment, while it is set and `boot_success` is `0`. Only a **green** boot clears it, so it
+survives every repair in between: on 2026-08-18 a deliberate reboot, two days after the red boot
+and after the cause was fixed and `red_boot_at` cleared by hand, was silently turned into a
+rollback. The deployment finalized at shutdown, wrote its 146 MB `/boot` entry and was never
+booted - which also filled `/boot`, because the partition was then holding two entries.
+
+```bash
+sudo /var/home-server/bin/clear-red-boot.sh     # clears BOTH; the old sed recipe cleared one
+sudo grub2-editenv /boot/grub2/grubenv list     # boot_counter absent == the default boots
+```
+
+`greenboot.boot_target` is the check that reports the second arm; `bin/reboot-when-staged.sh`
+refuses on it, and `bin/reboot-host.sh` warns before the confirmation and asserts afterwards that
+the deployment it wanted is the one that booted.
+
 **Rollback needs somewhere to roll back to.** `/boot` holds exactly two kernel slots and
 cannot be grown. That is enough, because slots are counted per distinct kernel+initramfs and
 rpm-ostree drops the rollback when it stages the next update - but a host that has just run

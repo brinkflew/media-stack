@@ -16,7 +16,24 @@
 # MOTD. Clearing it is a human act, deliberately: the question it asks is "do you
 # know why this deployment was rejected", and only a person can answer that.
 #
-#   sudo sed -i '/^red_boot_at=/d' /var/lib/home-server/boot-state
+#   sudo /var/home-server/bin/clear-red-boot.sh
+#
+# THAT IS A SCRIPT RATHER THAN A `sed`, AND THE REASON COST AN OS UPDATE. A red
+# boot arms TWO things, and this file writes only one of them:
+#
+#   red_boot_at    ours, below. It holds bin/reboot-when-staged.sh.
+#   boot_counter   GRUB's, in /boot/grub2/grubenv, armed by greenboot. It is
+#                  what actually DECIDES what boots - /boot/grub2/custom.cfg
+#                  takes `set default=1`, the previous deployment, while it is
+#                  set and boot_success is 0.
+#
+# The old recipe here was `sed -i '/^red_boot_at=/d'`, which cleared our refusal
+# and left GRUB pointed at the fallback. Only a GREEN boot clears boot_counter,
+# so on 2026-08-18 a deliberate, attended reboot - two days after the red boot,
+# after the cause was fixed and the marker cleared - was silently converted into
+# a rollback. The staged deployment finalized at shutdown, wrote its 146 MB
+# /boot entry, and was never booted. bin/verify-host.sh now reports the second
+# arm as greenboot.boot_target; clear-red-boot.sh clears both together.
 #
 # It writes red_boot_at rather than rollback_at because red is what actually
 # happened. A rollback follows only once the boot counter is exhausted -

@@ -1719,6 +1719,12 @@ Conclusions from auditing the running host. Do not rediscover these:
     lost - `rpm-ostreed-automatic.timer` re-stages nightly", which was assumed rather than measured,
     and is false. After the 2026-08-16 `cleanup -r`, the next two automatic runs staged **nothing**,
     the later one exiting in 9 seconds, while a newer amd64 manifest sat on ghcr.io throughout.
+  - **`cleanup -r` CANNOT RECLAIM A SLOT HELD BY A PENDING DEPLOYMENT**, which is the case that
+    looks identical from `df` and is not. `-r` removes the **rollback**; a deployment that was
+    finalized and then not booted sits at index **0**, is not a rollback, and the command exits 0
+    reporting *"Deployments unchanged"*. Seen on 2026-08-18 with `/boot` at 26M. The remedy there is
+    to **boot it** - see the GRUB fallback entry below - after which it becomes the booted
+    deployment, the old one becomes a real rollback, and `cleanup -r` frees the 146 MB.
 - **`rpm-ostree upgrade --check` CAN BE WRONG, AND THE NIGHTLY UPDATER BELIEVES IT.** This is the
   mechanism behind the entry above, and it was measured rather than reasoned about: on 2026-08-17,
   within the same minute, `rpm-ostree upgrade --check` reported *"No updates available"* (exit 77)
@@ -1745,6 +1751,38 @@ Conclusions from auditing the running host. Do not rediscover these:
   boot time it is `activating` rather than `failed`, so the filter is a no-op there and only affects
   the later gated runs, which is where it bit. Same shape as the phantom units the rename left
   behind, and as the self-liveness trap `verify-host.sh` documents about its own timer.
+- **A RED BOOT ARMS *GRUB*, NOT JUST OUR MARKER, AND IT STAYS ARMED UNTIL THE MACHINE BOOTS
+  GREEN - WHICH SILENTLY TURNS THE NEXT REBOOT INTO A ROLLBACK.** This is the most expensive
+  thing in this file to rediscover, because every signal reads correct while it happens.
+  `/boot/grub2/custom.cfg` selects the **previous** deployment whenever `boot_counter` is set and
+  `boot_success` is `0`, and `boot_success` is set to 1 only by a green greenboot run. So the pair
+  survives the repair: on **2026-08-18**, `bin/reboot-host.sh` was run deliberately, two days after
+  the 2026-08-16 red boot, after `/boot` was fixed and `red_boot_at` cleared by hand and the whole
+  battery was green. It printed `PASS back after 73s` and `PASS host-level checks pass` - and the
+  host came back on the deployment it started from. Four separate things went wrong at once:
+  - **`red_boot_at` is ours; `boot_counter` is GRUB's, and only the first was documented.** The
+    clearing recipe was `sed -i '/^red_boot_at=/d'`, which disarms the unattended window and leaves
+    GRUB pointed at the fallback. `bin/clear-red-boot.sh` now clears both, and
+    `greenboot.boot_target` reports the second - it is the check whose absence cost the update.
+  - **`ostree admin status` says `(pending)`; `rpm-ostree status --json` says `.staged=false`.**
+    ostree has TWO pre-boot states and this repo knew one: **staged** (written, not finalized, no
+    `/boot` entry, `/run/ostree/staged-deployment` exists) and **pending** (finalized at shutdown,
+    `/boot` entry **written and holding a slot**, `.staged` **false**, and it is what boots next).
+    **Six sites selected on `.staged`** and went blind together - the MOTD banner,
+    `deploy.image_digest`, the `reboot-host.sh` pre-flight, and worst,
+    `bin/reboot-when-staged.sh`, which would have refused *"nothing is staged"* every Sunday for
+    ever while the deployment sat ready. All six now use `.deployments[0] | select(.booted | not)`:
+    **index 0 is what boots next**, correct in all four shapes, with no state enumeration.
+  - **`deploy.image_digest` reported the exact opposite of the truth** - *"a NEWER image is
+    published and nothing has staged it ... 'sudo rpm-ostree upgrade' is the first thing to try"* -
+    about a deployment that was staged, finalized and entered in `/boot`, while naming the one
+    action that could not help. It now separates "nothing has applied it" from "applied but has
+    not booted".
+  - **A reboot script that verifies HEALTH cannot see this, because a rollback is healthy.**
+    `bin/reboot-host.sh` now captures index 0's checksum before rebooting and asserts the booted
+    checksum matches it afterwards. On a mismatch it says so and **still unpins** - the deployment
+    is fine and merely was not selected, and leaving a pin would hold a third `/boot` slot on a
+    partition that has two, making the condition worse.
 - **A FINDING WITH NO REMEDY THE ALERT CAN NAME IS AN ALERT THAT TEACHES PEOPLE TO IGNORE ALERTS**,
   and `greenboot.verdict` was one. A red boot writes `greenboot_result=red` into
   `/var/lib/home-server/boot-state`, and that is a fact about **this boot** - only a reboot rewrites

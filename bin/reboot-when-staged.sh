@@ -40,6 +40,7 @@ export PATH="${HOME:-/var/home/core}/.local/bin:$PATH"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE="${HOME_SERVER_BOOT_STATE:-/var/lib/home-server/boot-state}"
+GRUBENV="${HOME_SERVER_GRUBENV:-/boot/grub2/grubenv}"
 BOOT_MIN_MB=160
 
 DRY=""
@@ -71,16 +72,47 @@ else
 fi
 [ -n "$status_json" ] || refuse "rpm-ostree status returned nothing"
 
-staged=$(jq -r '.deployments[] | select(.staged) | .version // empty' <<<"$status_json")
-[ -n "$staged" ] || refuse "nothing is staged"
+# INDEX 0 IS WHAT BOOTS NEXT, AND `select(.staged)` IS NOT - see the long note at
+# next_dep in bin/verify-host.sh. Written the obvious way this gate was blind to
+# a FINALIZED pending deployment (.staged=false, /boot entry already written),
+# and refused "nothing is staged" about a deployment sitting ready at index 0.
+# That is not a missed opportunity, it is a permanent one: nothing else applies
+# it, so the deployment stays unbooted and its /boot slot stays spent, every
+# Sunday, for ever, with no human in the loop. Found on 2026-08-18.
+staged=$(jq -r '.deployments[0] | select(.booted | not) | .version // empty' <<<"$status_json")
+[ -n "$staged" ] || refuse "nothing is waiting to boot"
+
+# WOULD THIS REBOOT APPLY IT, OR ROLL BACK? custom.cfg selects the PREVIOUS
+# deployment whenever boot_counter is set and boot_success is 0, and boot_success
+# is set to 1 only by a green greenboot run - so a red boot leaves GRUB armed
+# until the machine boots green once. Rebooting into that unattended does the
+# exact damage this whole script exists to prevent: it rolls back silently, and
+# the deployment it declined to boot stays finalized and unbooted, holding a
+# /boot slot on a partition that has two. Exactly what happened on 2026-08-18,
+# attended, where at least someone was reading the output.
+#
+# This does NOT deadlock, which is the trap this repo has hit three times: the
+# marker is clearable without a reboot, and the refusal names how.
+grub_counter=$(priv grub2-editenv "$GRUBENV" list 2>/dev/null | sed -n 's/^boot_counter=//p' | tail -1)
+[ -z "$grub_counter" ] || refuse "GRUB is armed to boot the FALLBACK (boot_counter=$grub_counter);
+  this reboot would roll back rather than apply $staged.
+  Understand why, then:  sudo $REPO/bin/clear-red-boot.sh"
 
 depl_count=$(jq '.deployments | length' <<<"$status_json")
 
 # HOW LONG THIS ONE HAS BEEN WAITING, which is what decides below whether a
 # transcode still outranks an OS update. /run/ostree/staged-deployment is the
-# same source bin/verify-host.sh uses for its MOTD line, and it is honest here
-# because a staged deployment cannot outlive a reboot: ostree-finalize-staged
-# applies it at shutdown, so the file's mtime really is "since we last declined".
+# same source bin/verify-host.sh uses for its MOTD line.
+#
+# THIS COMMENT USED TO SAY "a staged deployment cannot outlive a reboot", AND
+# THAT IS FALSE. ostree-finalize-staged FINALIZES it at shutdown; it does not
+# make GRUB boot it. If GRUB takes the fallback, the deployment outlives the
+# reboot as a pending one - finalized, entered in /boot, unbooted - and
+# /run/ostree/staged-deployment is gone, because staging really did end. So the
+# `else 0` below reported a fortnight-old deployment as brand new, which is the
+# direction that silently disables the escalation: the transcode gate would
+# outrank it for ever. Fall back to the boot entry's own mtime, which is written
+# at finalization and is exactly "since this became ready to boot".
 #
 # The override exists for the same reason HOME_SERVER_STATUS_JSON does, and the
 # reason is stronger: the escalation below is unreachable for a fortnight, and a
@@ -90,7 +122,15 @@ if [ -n "${HOME_SERVER_STAGED_AGE_DAYS:-}" ]; then
 elif [ -e /run/ostree/staged-deployment ]; then
 	staged_age_d=$(( ( $(date +%s) - $(stat -c %Y /run/ostree/staged-deployment) ) / 86400 ))
 else
-	staged_age_d=0
+	# Newest boot entry, which for a pending deployment is its own. `stat` on a
+	# glob that matches nothing yields no output, so the arithmetic is guarded
+	# rather than assumed - `set -u` is on and this runs unattended.
+	newest=$(priv stat -c %Y /boot/ostree/*/ 2>/dev/null | sort -n | tail -1)
+	if [ -n "${newest:-}" ]; then
+		staged_age_d=$(( ( $(date +%s) - newest ) / 86400 ))
+	else
+		staged_age_d=0
+	fi
 fi
 uptime_d=$(( $(cut -d. -f1 /proc/uptime) / 86400 ))
 note "staged $staged (${staged_age_d}d ago), $depl_count deployment(s) on disk, up ${uptime_d}d"
@@ -111,7 +151,7 @@ note "staged $staged (${staged_age_d}d ago), $depl_count deployment(s) on disk, 
 # ------------------------------------------------------------------------------
 red=$(sed -n 's/^red_boot_at=//p' "$STATE" 2>/dev/null | tail -1)
 [ -z "$red" ] || refuse "a deployment was rejected at $red and nobody has cleared it.
-  Understand why, then:  sudo sed -i '/^red_boot_at=/d' $STATE"
+  Understand why, then:  sudo $REPO/bin/clear-red-boot.sh"
 
 # ------------------------------------------------------------------------------
 # Is the host healthy RIGHT NOW?

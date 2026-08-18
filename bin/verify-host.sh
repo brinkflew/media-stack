@@ -44,6 +44,7 @@
 #   HOME_SERVER_STATUS_FILE   where status.json goes
 #   HOME_SERVER_BOOT_STATE    greenboot's verdict file
 #   HOME_SERVER_GREENBOOT_BIN / _ETC, HOME_SERVER_GRUB_CUSTOM
+#   HOME_SERVER_GRUBENV       GRUB's environment block, which decides what boots
 # ==============================================================================
 
 set -uo pipefail
@@ -189,18 +190,45 @@ say deploy "Deployment"
 status_json=$(rpm-ostree status --json 2>/dev/null)
 if [ -z "$status_json" ]; then
 	bad deploy.booted "rpm-ostree status returned nothing"
-	booted_ver="?" staged_ver="" pinned_count=0
+	booted_ver="?" next_ver="" next_finalized="" pinned_count=0
 else
 	booted_ver=$(jq -r '.deployments[] | select(.booted) | .version' <<<"$status_json")
 	booted_ref=$(jq -r '.deployments[] | select(.booted) | ."container-image-reference" // "-"' <<<"$status_json")
-	staged_ver=$(jq -r '.deployments[] | select(.staged) | .version' <<<"$status_json")
+
+	# INDEX 0 IS WHAT BOOTS NEXT, AND `select(.staged)` IS NOT.
+	# ostree has TWO pre-boot states and this file knew only one:
+	#
+	#   staged   written, NOT finalized. .staged=true, no /boot entry yet,
+	#            /run/ostree/staged-deployment exists. Finalized at shutdown.
+	#   pending  FINALIZED. .staged=FALSE, /boot entry written and costing a
+	#            slot, and it is what GRUB will boot.
+	#
+	# A deployment reaches `pending` whenever it was finalized at shutdown and
+	# then not booted - which happens whenever GRUB takes the fallback, i.e.
+	# after any red boot whose counter is still armed. On 2026-08-18 exactly
+	# that happened, and every consumer of `select(.staged)` went blind at once:
+	# the MOTD banner vanished, deploy.image_digest reported "nothing has staged
+	# it" about a deployment sitting finalized at index 0, and
+	# bin/reboot-when-staged.sh refused with "nothing is staged" - which would
+	# have left it unbooted, and /boot full, for ever.
+	#
+	# Deployments are ordered by boot priority, so index 0 is the answer in all
+	# four shapes: staged (index 0), pending (index 0), steady state (index 0 IS
+	# booted, so this is empty), and booted-plus-rollback (the rollback is index
+	# 1, so this is empty). One expression, no state enumeration.
+	next_dep=$(jq -c '.deployments[0] | select(.booted | not)' <<<"$status_json")
+	next_ver=$(jq -r '.version // ""' <<<"${next_dep:-{\}}")
+	# Whether its /boot entry is already written, which is the difference
+	# between "a reboot must find room for a kernel" and "a reboot need not".
+	# bin/reboot-host.sh gates on this.
+	next_finalized=$(jq -r 'if .staged then "" else "yes" end' <<<"${next_dep:-{\}}")
 	# uCore's version string is the FCOS build date, and it does not move on
 	# every image change - a rebase to a signed ref, or a week of package
 	# updates, can leave it identical to the booted one. "OS UPDATE STAGED
 	# 44.20260720.3.1" against a booted 44.20260720.3.1 reads as a no-op and
 	# gets ignored, so carry the digest when the version cannot tell them apart.
-	staged_dig=$(jq -r '.deployments[] | select(.staged) | .["base-checksum"] // .checksum // ""' <<<"$status_json" | cut -c1-8)
-	staged_signed=$(jq -r '.deployments[] | select(.staged) | .["container-image-reference"] // ""' <<<"$status_json")
+	next_dig=$(jq -r '.["base-checksum"] // .checksum // ""' <<<"${next_dep:-{\}}" | cut -c1-8)
+	next_signed=$(jq -r '.["container-image-reference"] // ""' <<<"${next_dep:-{\}}")
 	pinned_count=$(jq '[.deployments[] | select(.pinned)] | length' <<<"$status_json")
 	depl_count=$(jq '.deployments | length' <<<"$status_json")
 
@@ -236,7 +264,11 @@ fi
 # dashboard can then tell "not measured" from "measured as empty"; a key that
 # comes and goes forces it to guess.
 fact booted_version  "${booted_ver:-}"
-fact staged_version  "${staged_ver:-}"
+# next_version rather than staged_version: the key names what it measures - the
+# deployment that boots next - and the old name was only ever right for half of
+# the states it was read in. A consumer keying on staged_version wants this.
+fact next_version    "${next_ver:-}"
+fact next_finalized  "${next_finalized:-}"
 fact deployments     "${depl_count:-}"   num
 fact pinned          "${pinned_count:-}" num
 
@@ -299,10 +331,14 @@ if [ -z "$GREENBOOT" ] && [ -n "${booted_ref:-}" ] && [ "${booted_ref:-}" != "-"
 		skopeo inspect --no-tags "docker://$image_ref" 2>/dev/null \
 		| jq -r '.Digest // ""' 2>/dev/null)
 
-	# Against what WOULD run, not what is running. A staged deployment matching
-	# the remote is up to date and pending, which is the ordinary state between
-	# the nightly stage and the Sunday window - not a finding.
-	image_digest_local=$(jq -r '(.deployments[] | select(.staged)
+	# Against what WOULD run, not what is running - which is index 0, for the
+	# reason spelled out at next_dep above. Written as `select(.staged)` this
+	# was wrong in the one state that matters: a FINALIZED pending deployment
+	# has .staged=false, so the selector missed it, fell through to the booted
+	# digest, and reported "nothing has staged it" about a deployment whose
+	# /boot entry was already written. The advice it then gave - run
+	# `rpm-ostree upgrade` - was the one action that could not help.
+	image_digest_local=$(jq -r '(.deployments[0] | select(.booted | not)
 		| ."container-image-reference-digest") // empty' <<<"$status_json" 2>/dev/null)
 	[ -n "$image_digest_local" ] || image_digest_local=$(jq -r '(.deployments[]
 		| select(.booted) | ."container-image-reference-digest") // empty' \
@@ -317,10 +353,22 @@ elif [ -z "$image_digest_remote" ] || [ -z "$image_digest_local" ]; then
 	# architecture - all inconclusive, and a DNS blip must never be able to read
 	# as a stalled updater.
 	note deploy.image_digest "could not resolve the published image digest - not measured"
-elif [ "$image_digest_local" = "$image_digest_remote" ]; then
+elif [ "$image_digest_local" != "$image_digest_remote" ]; then
+	warn deploy.image_digest "a NEWER image is published and nothing has applied it - have ${image_digest_local:7:12}, published ${image_digest_remote:7:12}; 'sudo rpm-ostree upgrade' is the first thing to try"
+elif [ -z "${next_ver:-}" ]; then
 	ok deploy.image_digest "running the published ${image_arch:-} image (${image_digest_local:7:12})"
+elif [ -z "${next_finalized:-}" ]; then
+	# Staged and matching: the ordinary state between the nightly stage and the
+	# Sunday window. Nothing to do, but say which of the three it is - the old
+	# message could not, and that is how the case below hid inside this one.
+	ok deploy.image_digest "the published image is staged (${image_digest_local:7:12}); the reboot window applies it"
 else
-	warn deploy.image_digest "a NEWER image is published and nothing has staged it - booted ${image_digest_local:7:12}, published ${image_digest_remote:7:12}; 'sudo rpm-ostree upgrade' is the first thing to try"
+	# FINALIZED AND STILL NOT BOOTED, which is never ordinary. Finalization
+	# happens at shutdown, so the very next boot should have taken it - and a
+	# deployment that is written, entered in /boot and unbooted means that boot
+	# selected something else. GRUB's fallback is how: see greenboot.boot_target.
+	# It also costs a second /boot slot, on a partition that holds two.
+	warn deploy.image_digest "the published image is APPLIED but has not booted (${image_digest_local:7:12}) - a reboot selected something else; check greenboot.boot_target, then reboot"
 fi
 fact image_digest_local  "$image_digest_local"
 fact image_digest_remote "$image_digest_remote"
@@ -555,6 +603,7 @@ if [ -z "$GREENBOOT" ]; then
 	boot_state="${HOME_SERVER_BOOT_STATE:-/var/lib/home-server/boot-state}"
 	gb_etc="${HOME_SERVER_GREENBOOT_ETC:-/etc/greenboot}"
 	gb_cfg="${HOME_SERVER_GRUB_CUSTOM:-/boot/grub2/custom.cfg}"
+	gb_grubenv="${HOME_SERVER_GRUBENV:-/boot/grub2/grubenv}"
 	# THE BINARY, NOT /etc/greenboot, IS WHAT "INSTALLED" MEANS. /etc is
 	# merged forward across deployments and can be created by hand, so it
 	# survives a rollback to a deployment that has no greenboot in it - and
@@ -736,6 +785,50 @@ if [ -z "$GREENBOOT" ]; then
 			ok greenboot.red_hook "the red-boot hook is installed"
 		else
 			bad greenboot.red_hook "50-record-red-boot.sh is NOT in $gb_etc/red.d - a rejected deployment would leave no mark and the unattended window would re-apply it"
+		fi
+
+		# WHAT GRUB WILL ACTUALLY BOOT, which is not what rpm-ostree says.
+		# THIS IS THE CHECK THAT WAS MISSING ON 2026-08-18, and its absence cost
+		# an OS update: bin/reboot-host.sh ran, reported PASS twice, and the host
+		# came back on the deployment it started from. custom.cfg reads exactly
+		# two variables -
+		#
+		#   if [ -n "${boot_counter}" -a "${boot_success}" = "0" ]; then
+		#     if [ "${boot_counter}" = "0" -o "${boot_counter}" = "-1" ]; then
+		#       set default=1                      <- the PREVIOUS deployment
+		#
+		# - and boot_success is set to 1 only by a green greenboot run. So a red
+		# boot leaves the pair armed, and it stays armed across every repair
+		# until the machine boots green ONCE. Here it survived two days: the
+		# cause was fixed, red_boot_at was cleared by hand, every check passed,
+		# and GRUB was still pointed at the fallback with nothing saying so.
+		#
+		# THE TWO MARKERS ARE SEPARATE ARMS AND ONLY ONE WAS EVER VISIBLE.
+		# red_boot_at is ours and holds bin/reboot-when-staged.sh; boot_counter
+		# is GRUB's and decides what boots. Clearing ours does not clear GRUB's -
+		# which is the whole reason bin/clear-red-boot.sh now does both.
+		#
+		# boot_counter's PRESENCE is the entire condition: greenboot clears it on
+		# every green boot, so finding it here means the last boot was not green
+		# and the next one takes the fallback. boot_success is read only to
+		# describe the state, never to decide it - it is 0 for the first seconds
+		# of every boot, before greenboot runs, and a check that keyed on it
+		# would fire against itself.
+		#
+		# FAIL is safe. This whole section is inside `if [ -z "$GREENBOOT" ]`, so
+		# it never runs on the rollback path and cannot block either reboot
+		# script - the trap this battery has hit three times.
+		gb_env=$(priv grub2-editenv "$gb_grubenv" list 2>/dev/null || true)
+		gb_counter=$(sed -n 's/^boot_counter=//p' <<<"$gb_env" | tail -1)
+		gb_success=$(sed -n 's/^boot_success=//p' <<<"$gb_env" | tail -1)
+		fact boot_counter "${gb_counter:-}"
+		fact boot_success "${gb_success:-}"
+		if [ -z "$gb_env" ]; then
+			note greenboot.boot_target "could not read $gb_grubenv - not measured"
+		elif [ -z "$gb_counter" ]; then
+			ok greenboot.boot_target "the next boot selects the default deployment"
+		else
+			bad greenboot.boot_target "GRUB is armed to boot the FALLBACK deployment (boot_counter=$gb_counter, boot_success=${gb_success:-unset}) - a reboot would roll back rather than apply anything; clear it with 'sudo /var/home-server/bin/clear-red-boot.sh'"
 		fi
 	fi
 
@@ -1519,17 +1612,28 @@ fi
 motd=/run/motd.d/40-home-server.motd
 {
 	printf '  \033[1m-- home-server -------------------------------------------------\033[0m\n'
-	if [ -n "${staged_ver:-}" ]; then
+	if [ -n "${next_ver:-}" ]; then
 		staged_age=""
+		# Only meaningful while the deployment is still STAGED - the file is
+		# gone once ostree-finalize-staged has run, so a pending deployment has
+		# no age here rather than a misleadingly fresh one.
 		if [ -e /run/ostree/staged-deployment ]; then
 			d=$(( ( $(date +%s) - $(stat -c %Y /run/ostree/staged-deployment) ) / 86400 ))
 			staged_age=" (staged ${d}d ago)"
 			[ "$d" -ge 7 ] && staged_age=" (staged ${d} DAYS ago - running a superseded image)"
 		fi
-		label="$staged_ver"
-		[ "$staged_ver" = "${booted_ver:-}" ] && [ -n "$staged_dig" ] && label="$staged_ver @$staged_dig"
-		case "$staged_signed" in ostree-image-signed:*) label="$label signed" ;; esac
-		printf '  \033[33mOS UPDATE STAGED\033[0m  %s%s\n' "$label" "$staged_age"
+		label="$next_ver"
+		[ "$next_ver" = "${booted_ver:-}" ] && [ -n "$next_dig" ] && label="$next_ver @$next_dig"
+		case "$next_signed" in ostree-image-signed:*) label="$label signed" ;; esac
+		# PENDING AND STAGED READ DIFFERENTLY TO A PERSON DECIDING WHETHER TO
+		# REBOOT. Staged means the reboot window will apply it. Pending means it
+		# was already applied, a boot did not take it, and it is holding a /boot
+		# slot until one does - so the banner must not call both "STAGED".
+		if [ -n "${next_finalized:-}" ]; then
+			printf '  \033[33mOS UPDATE APPLIED, NOT BOOTED\033[0m  %s - a reboot selected something else\n' "$label"
+		else
+			printf '  \033[33mOS UPDATE STAGED\033[0m  %s%s\n' "$label" "$staged_age"
+		fi
 		# NAME THE UNATTENDED ROUTE FIRST, because it is now the one that
 		# usually applies this. Saying only "sudo systemctl reboot - attended"
 		# reads as "nothing will happen until you do this", which stopped being

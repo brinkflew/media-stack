@@ -100,11 +100,35 @@ else
 	printf '%s\n' "$battery" | sed 's/^/  /'
 fi
 
+# THE SLOT IS ONLY NEEDED IF A KERNEL HAS TO BE WRITTEN, and that is decided by
+# whether the next deployment is STAGED or already PENDING. Finalization at
+# shutdown is what writes a /boot entry: a staged deployment needs room for one,
+# a pending deployment already has one, and a host with nothing waiting writes
+# nothing at all. Gating all three on 160M free refuses exactly the reboot that
+# reclaims the space - on 2026-08-18 /boot sat at 26M precisely because a pending
+# deployment was holding the second slot, and the reboot that would have freed it
+# is the one this gate would have blocked.
 boot_free=$(sshq "df -Pm /boot | awk 'NR==2 {print \$4}'")
+next_staged=$(sshq "rpm-ostree status --json | jq -r '.deployments[0] | select(.booted | not) | select(.staged) | .version // empty' 2>/dev/null")
 if [ "${boot_free:-0}" -ge "$BOOT_MIN_MB" ]; then
 	ok "/boot ${boot_free}M free"
+elif [ -z "$next_staged" ]; then
+	warn "/boot has only ${boot_free}M free, but nothing staged needs a new kernel written -"
+	warn "this reboot writes no boot entry. 'rpm-ostree cleanup -r' after it reclaims the slot."
 else
-	die "/boot has only ${boot_free}M free - unpin and 'rpm-ostree cleanup -r' first"
+	die "/boot has only ${boot_free}M free and $next_staged is STAGED - finalizing it at
+  shutdown needs a slot. Unpin and 'rpm-ostree cleanup -r' first."
+fi
+
+# WHAT WILL ACTUALLY BE SELECTED, asked before the typed confirmation rather than
+# discovered afterwards. See greenboot.boot_target in bin/verify-host.sh: a red
+# boot leaves GRUB armed to take the fallback, and it stays armed across every
+# repair until the machine boots green once.
+grub_counter=$(sshq "sudo -n grub2-editenv /boot/grub2/grubenv list 2>/dev/null | sed -n 's/^boot_counter=//p' | tail -1")
+if [ -n "$grub_counter" ]; then
+	warn "GRUB is armed to boot the FALLBACK (boot_counter=$grub_counter) - this reboot would"
+	warn "ROLL BACK rather than apply anything. Clear it first:"
+	warn "  ssh $HOST 'sudo /var/home-server/bin/clear-red-boot.sh'"
 fi
 
 # Nothing mid-encode. A transcode killed halfway leaves a partial file in the
@@ -116,11 +140,19 @@ else
 	bad "encoder is busy (${enc%+}) - a transcode will be killed"
 fi
 
-staged=$(sshq "rpm-ostree status --json | jq -r '.deployments[] | select(.staged) | .version' 2>/dev/null")
+# Index 0, not select(.staged) - see the note at the /boot gate above and the
+# long one at next_dep in bin/verify-host.sh. Written the obvious way this said
+# "NOTHING IS STAGED. A reboot would come back on the same deployment" about a
+# pending deployment that was finalized and ready, i.e. it argued against the
+# exact reboot that was needed.
+staged=$(sshq "rpm-ostree status --json | jq -r '.deployments[0] | select(.booted | not) | .version // empty' 2>/dev/null")
 booted=$(sshq "rpm-ostree status --json | jq -r '.deployments[] | select(.booted) | .version' 2>/dev/null")
 if [ -z "$staged" ]; then
-	printf '\n  booted %s, and NOTHING IS STAGED.\n' "$booted"
+	printf '\n  booted %s, and NOTHING IS WAITING TO BOOT.\n' "$booted"
 	printf '  A reboot would come back on the same deployment.\n'
+elif [ -z "$next_staged" ]; then
+	printf '\n  booted   %s\n  pending  %s - already applied, waiting only for this reboot\n' \
+		"$booted" "$staged"
 else
 	printf '\n  booted  %s\n  staged  %s\n' "$booted" "$staged"
 fi
@@ -175,6 +207,14 @@ if [ -z "$idx" ] || [ "$idx" = "null" ]; then
 	die "could not determine the booted deployment index"
 fi
 sshq "sudo ostree admin pin $idx" || die "could not pin index $idx"
+
+# WHAT THIS REBOOT IS SUPPOSED TO END UP ON, captured before it happens because
+# afterwards there is nothing left to compare against. Index 0 is what GRUB
+# selects by default; the check after the reboot asks whether that is what we
+# actually got. Without it this script verifies HEALTH and never IDENTITY, and a
+# silent rollback is perfectly healthy - which is how 2026-08-18 produced two
+# PASS lines and no OS update.
+intended=$(sshq "rpm-ostree status --json | jq -r '.deployments[0].checksum'")
 ok "pinned index $idx ($booted) - this is the rollback"
 
 # ------------------------------------------------------------------------------
@@ -244,6 +284,44 @@ done
 printf '\n'
 if [ -n "$verified" ]; then
 	ok "host-level checks pass after $(( $(date +%s) - started ))s"
+
+	# DID WE BOOT WHAT WE MEANT TO? Health and identity are different questions
+	# and only the first was ever asked. A GRUB fallback produces a completely
+	# healthy host running the deployment you were trying to move off, so every
+	# check above passes and the reboot reads as a success. On 2026-08-18 it did
+	# exactly that, and the update went unapplied for the rest of the day.
+	#
+	# REPORTED, NOT TREATED AS A FAILED VERIFICATION, and the difference matters.
+	# The failure path below leaves the pin in place because the pin is the
+	# rollback - correct when the deployment might be bad. Here the deployment is
+	# fine and simply was not selected, so leaving a pin would hold a third /boot
+	# slot on a partition that has room for two, which is the very condition that
+	# makes this whole class of failure worse. Unpin, clean up, and say plainly
+	# what to do next.
+	now_csum=$(sshq "rpm-ostree status --json | jq -r '.deployments[] | select(.booted) | .checksum'")
+	if [ -n "$intended" ] && [ -n "$now_csum" ] && [ "$intended" != "$now_csum" ]; then
+		bad "BOOTED THE WRONG DEPLOYMENT - wanted ${intended:0:12}, got ${now_csum:0:12}"
+		cat <<EOF
+
+  GRUB selected the FALLBACK entry rather than the default. That happens when
+  boot_counter is set and boot_success is 0 in /boot/grub2/grubenv, which a red
+  boot leaves behind and only a GREEN boot clears - so a rejected boot weeks ago
+  still redirects the next reboot, whenever it happens.
+
+  This boot has just cleared it. The deployment you wanted is finalized, has its
+  /boot entry, and is what index 0 now selects, so simply run this again:
+
+    ssh $HOST 'sudo /var/home-server/bin/clear-red-boot.sh'   # if still armed
+    $0
+
+  Nothing is broken and nothing needs rolling back - the host is healthy, it is
+  merely running the deployment you were trying to move off.
+
+EOF
+	else
+		ok "booted the intended deployment (${now_csum:0:12})"
+	fi
+
 	# Informational, and deliberately not a gate. Anything failing here is worth
 	# reading and is not a reason to roll the OS back.
 	say "Full battery (not a gate)"
