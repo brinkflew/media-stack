@@ -279,6 +279,28 @@ groups:
             unit gives up after ~100s and lands in `failed`; if it is still
             looping, something is restarting it from outside.
 
+      - alert: UpdateRolledBack
+        # A THIRD WARN THAT HAS TO NOTIFY, for the reason OsImageStale and
+        # ProbeBinaryMissing already give: CheckFailing is `== 3` and this check
+        # is a WARN whenever the affected unit has recovered on its own.
+        #
+        # The FAIL half - the service still not active - is carried by
+        # CheckFailing and needs nothing here. This covers the quieter half: an
+        # upstream image was published that cannot run on this host, podman put
+        # the old one back, and everything now reads green. Nothing else would
+        # ever mention it, and it will be offered again at midnight.
+        expr: home_server_check_status{id="update.rollback"} == 2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last container update rolled back"
+          description: >-
+            An image would not go healthy and the previous one was restored.
+            The stack is running, on yesterday's image, and tonight's run will
+            try the same one again. `jq -r '.checks[]|select(.id=="update.rollback")'
+            /var/lib/home-server/status.json`.
+
       - alert: ProbeBinaryMissing
         # A SECOND WARN THAT HAS TO NOTIFY, for the same reason OsImageStale
         # does: CheckFailing is `== 3` and containers.probe_binaries is
@@ -358,6 +380,30 @@ groups:
             the delete to be refused. This does not mean the policy failed - it
             means it has not been confirmed. A policy that silently stops
             working looks exactly like one that works.
+
+      - alert: RestoreNeverProven
+        # KEYED ON THE CHECK, NOT ON THE TIMESTAMP, and that is the whole point.
+        # Every other rule in this group reads a marker's age - which requires
+        # the marker to EXIST. The state this one has to cover is a marker that
+        # was never written at all, where there is no series to subtract from
+        # time() and a staleness rule stays silent for ever on the one host that
+        # has never verified a restore.
+        #
+        # bin/verify-host.sh already resolves both cases into one WARN, so
+        # reading its status covers "overdue" and "never" together. And WARN is
+        # why this rule has to exist: CheckFailing is `== 3`, the same gap
+        # OsImageStale, ProbeBinaryMissing and UpdateRolledBack each needed
+        # their own rule for.
+        expr: home_server_check_status{id=~"backup.restore_(local|offsite)_age"} == 2
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.id }} - the backups are not proven to restore"
+          description: >-
+            A backup is not proven until it has been restored. Run
+            `./bin/verify-restore.sh` from the workstation, and
+            `--repo offsite --deep` for the copy that survives the disk.
 
       - alert: BackupTsdbSnapshotStale
         expr: time() - home_server_backup_tsdb_snapshot_timestamp_seconds > 172800

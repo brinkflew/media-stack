@@ -1067,11 +1067,28 @@ if [ -z "$GREENBOOT" ]; then
 		fact update_rollback_failed "${pau_broke:-}"
 		fact update_rolled_back "${pau_back:-}"
 		if [ -n "$pau_broke" ]; then
-			# The image is restored and the database is NOT - see
-			# stacks/infra/pocket-id.container for the repair, which is the
-			# pre-update snapshot and not the rollback.
-			bad update.rollback "the last update run COULD NOT ROLL BACK:$( \
-				printf ' %s' "$pau_broke") - that service is down; restore its database from ~/.cache/home-server/pre-update-db/ or pull the newer image again"
+			# GRADED ON WHETHER IT IS STILL TRUE, not on whether it happened.
+			# This reads the LAST INVOCATION, which on a nightly timer can be
+			# up to a day old - so the service it names may well have been
+			# repaired since. Saying "that service is down" about a container
+			# that is up is how a check stops being believed, and FAIL here
+			# would also block bin/reboot-host.sh over a finished incident.
+			#
+			# Still reported once recovered, and deliberately: a rollback that
+			# could not complete means an upstream image was published that
+			# cannot run here AND that the way back was blocked, which is worth
+			# knowing until the next run clears it.
+			pau_down=""
+			for pau_u in $pau_broke; do
+				[ "$(systemctl --user is-active "$pau_u" 2>/dev/null)" = active ] \
+					|| pau_down="$pau_down $pau_u"
+			done
+			if [ -n "$pau_down" ]; then
+				bad update.rollback "the last update run COULD NOT ROLL BACK:$pau_down - still not active; restore the database from ~/.cache/home-server/pre-update-db/ or pull the newer image again, because the rollback is not the repair"
+			else
+				warn update.rollback "the last update run could not roll back$( \
+					printf ' %s' "$pau_broke") - recovered since, but the image that failed will be offered again tonight"
+			fi
 		elif [ -n "$pau_back" ]; then
 			warn update.rollback "the last update run rolled back:$( \
 				printf ' %s' "$pau_back") - the new image would not go healthy, so an upstream release cannot run here"
@@ -1259,6 +1276,29 @@ if [ -z "$GREENBOOT" ]; then
 	# gone and everything else still reads green.
 	check_backup_age backup.pre_update_age      "pre-update database snapshot" pre_update_db_at 48 warn
 
+	# A BACKUP IS NOT PROVEN UNTIL IT HAS BEEN RESTORED, which this repository has
+	# said in prose since the backups were built and never once measured. Every
+	# leg above records that it RAN; none of them records that what it produced can
+	# be read back, and bin/verify-restore.sh - the script that answers exactly
+	# that - wrote nothing at all until 2026-08-19. "Nobody has run this since
+	# March" and "this ran last night" were indistinguishable.
+	#
+	# WARN AND NOT FAIL, for the reason the whole backup block already gives:
+	# bin/reboot-host.sh refuses to act on a host this battery calls unhealthy,
+	# and a restore verification that is overdue is not fixed by a reboot. It is
+	# fixed by running the script, which needs a workstation.
+	#
+	# TWO KEYS, TWO CEILINGS. The local repository sits on the same disk as
+	# config/, so proving it restores says nothing about surviving that disk - and
+	# a single shared marker would let a cheap monthly local run stand in for an
+	# off-site copy nobody has ever tested. The off-site ceiling is the LONGER of
+	# the two only because that verification pulls data back across the network and
+	# costs egress; it is the more important of the pair, not the less.
+	check_backup_age backup.restore_local_age   "local restore verification" \
+		restore_verified_local_at   720 warn
+	check_backup_age backup.restore_offsite_age "off-site restore verification" \
+		restore_verified_offsite_at 2160 warn
+
 	# ------------------------------------------------------------------------------
 	say checkout "Checkout"
 	# ------------------------------------------------------------------------------
@@ -1364,6 +1404,49 @@ if [ -z "$GREENBOOT" ]; then
 		ok checkout.tdarr_flows "$tdarr_checked tracked Tdarr flow(s) match the running database"
 	else
 		warn checkout.tdarr_flows "Tdarr flow(s) differ from apps/tdarr/flows/:${tdarr_drift}${tdarr_missing:+ (absent from Tdarr:$tdarr_missing)} - re-export from the flow editor, or the copy in git is fiction"
+	fi
+
+	say secrets "Secrets"
+	# ------------------------------------------------------------------------------
+	# THE ONE THING HERE THAT CANNOT BE REGENERATED. Everything else on this host
+	# rebuilds from git or from a backup; the age private keys do not, and without
+	# them secrets/env.sops.env is a public file full of ciphertext. Step 11 of
+	# host/RUNBOOK.md is "the age key - nothing works before this", and until
+	# 2026-08-19 nothing ever confirmed that this machine's key still worked.
+	#
+	# ASSERTED BY DECRYPTING, not by looking at the recipient list. bin/lint-repo.sh
+	# already compares the recipients named in .sops.yaml against those on the file,
+	# which is the drift a diff can show. This is the other half and the one a text
+	# comparison cannot reach: whether the private key on THIS machine still opens
+	# it. A key file that was truncated, chowned, or restored from the wrong backup
+	# passes every list comparison ever written.
+	#
+	# The plaintext goes to /dev/null and is never held, printed, or written. Same
+	# argument as the off-site delete probe: prove the property, keep nothing.
+	sops_src="$repo/secrets/env.sops.env"
+	if [ ! -f "$sops_src" ]; then
+		note secrets.decryptable "no secrets/env.sops.env in the checkout"
+	elif ! command -v sops >/dev/null 2>&1; then
+		# PATH is set at the top of this script, so this is a genuinely absent
+		# binary rather than the non-interactive-ssh trap render-env.sh documents.
+		warn secrets.decryptable "sops is not installed - the encrypted secrets cannot be verified OR rendered"
+	elif sops --decrypt --input-type dotenv --output-type dotenv "$sops_src" >/dev/null 2>&1; then
+		ok secrets.decryptable "this host's age key still decrypts secrets/env.sops.env"
+	else
+		bad secrets.decryptable "this host CANNOT decrypt secrets/env.sops.env - ./bin/render-env.sh will fail and .env cannot be regenerated; check ~/.config/sops/age/keys.txt against .sops.yaml"
+	fi
+
+	# RENDERED, NOT EDITED - and a `git pull` that changes the encrypted source
+	# does not re-render anything. The deploy for a secrets change is three steps
+	# and the middle one is easy to skip, so the stack keeps running happily on the
+	# previous credential until something restarts and cannot authenticate.
+	# Comparing mtimes catches exactly that window and nothing else.
+	if [ ! -f "$sops_src" ] || [ ! -f "$repo/.env" ]; then
+		note secrets.env_current "no rendered .env to compare"
+	elif [ "$repo/.env" -nt "$sops_src" ]; then
+		ok secrets.env_current ".env is newer than the encrypted source"
+	else
+		bad secrets.env_current "secrets/env.sops.env is NEWER than .env - a secrets change was pulled and never rendered; run ./bin/render-env.sh then restart the affected units"
 	fi
 
 	say containers "Containers"

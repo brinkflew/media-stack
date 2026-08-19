@@ -66,6 +66,45 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+say "Secrets"
+# ------------------------------------------------------------------------------
+# THE RECIPIENT LIST DRIFTS SILENTLY AND NOTHING NOTICED. .sops.yaml warns in its
+# own header that adding a recipient does NOT re-encrypt existing files - you
+# have to run `sops updatekeys secrets/env.sops.env` yourself - so the rules file
+# and the encrypted file can disagree indefinitely while every commit looks fine.
+# Two ways that hurts, and neither announces itself: a key added to .sops.yaml
+# but never applied cannot decrypt anything, discovered at the moment a machine
+# is being rebuilt; and a key REMOVED from .sops.yaml but still on the file is a
+# revocation that did not happen.
+#
+# TEXT ONLY, DELIBERATELY. This compares the age recipients named in the two
+# files and never decrypts, so it needs no private key and runs anywhere - which
+# is what lets it live in the linter rather than only on a machine that holds a
+# key. Whether the server can actually USE its key is a different question and a
+# different check: secrets.decryptable in bin/verify-host.sh.
+if [ ! -f .sops.yaml ] || [ ! -f secrets/env.sops.env ]; then
+	skip "no .sops.yaml or secrets/env.sops.env"
+else
+	want=$(grep -oE 'age1[a-z0-9]+' .sops.yaml | sort -u)
+	have=$(grep -oE 'recipient=age1[a-z0-9]+' secrets/env.sops.env \
+		| sed 's/^recipient=//' | sort -u)
+	if [ -z "$want" ]; then
+		bad ".sops.yaml names no age recipients"
+	elif [ "$want" = "$have" ]; then
+		ok "secrets/env.sops.env is encrypted for all $(printf '%s\n' "$want" | wc -l | tr -d ' ') recipients in .sops.yaml"
+	else
+		missing=$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have"))
+		extra=$(comm -13 <(printf '%s\n' "$want") <(printf '%s\n' "$have"))
+		# tr rather than an unquoted expansion. The keys belong on one line,
+		# and letting the shell word-split them is not how to say so - SC2086
+		# is right about that. (A comment line may not BEGIN with the linter's
+		# own name either: that parses as a directive and fails with SC1072.)
+		[ -z "$missing" ] || bad "in .sops.yaml but NOT on the encrypted file: $(printf '%s' "$missing" | tr '\n' ' ')- run: sops updatekeys secrets/env.sops.env"
+		[ -z "$extra" ] || bad "on the encrypted file but NOT in .sops.yaml: $(printf '%s' "$extra" | tr '\n' ' ')- a revoked key still decrypts this; run: sops updatekeys secrets/env.sops.env"
+	fi
+fi
+
+# ------------------------------------------------------------------------------
 say "ShellCheck"
 # ------------------------------------------------------------------------------
 if command -v shellcheck >/dev/null 2>&1; then

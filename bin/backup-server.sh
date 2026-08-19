@@ -437,6 +437,12 @@ if [ -z "$DRY" ]; then
 		# above: name every key that has to survive, because the default is
 		# that it does not.
 		grep -E '^pre_update_db_at=' "$STATE" 2>/dev/null
+		# Same again, from the workstation this time. bin/verify-restore.sh writes
+		# restore_verified_local_at / restore_verified_offsite_at over SSH when a
+		# restore actually verifies, and this 03:00 rewrite would erase it the same
+		# night. Matched as a PREFIX so a third repository kind does not silently
+		# stop being carried forward the day someone adds one.
+		grep -E '^restore_verified_[a-z]+_at=' "$STATE" 2>/dev/null
 	} >"$STATE.tmp"
 	mv "$STATE.tmp" "$STATE"
 fi

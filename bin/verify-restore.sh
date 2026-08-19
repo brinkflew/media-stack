@@ -322,3 +322,31 @@ if [ "$fails" -gt 0 ]; then
 	exit 1
 fi
 printf '\033[32mthis snapshot restores\033[0m\n'
+
+# THE MARKER THIS SCRIPT SPENT ITS WHOLE LIFE WITHOUT. Every other backup leg
+# writes one - local_at, offsite_at, offsite_pruned_at, offsite_policy_ok_at,
+# tsdb_snapshot_at, pre_update_db_at - and bin/verify-host.sh grades each for
+# staleness. The one job that proves the backups actually RESTORE recorded
+# nothing at all, so "nobody has run this since March" and "this ran last night"
+# were the same observable state. CLAUDE.md states the rule in the abstract - an
+# automated job needs a durable record of its last success, not just an exit 0 -
+# and this was the job it was not applied to.
+#
+# WRITTEN OVER SSH, exactly as bin/backup-offsite.sh does for offsite_pruned_at,
+# and for the same reason: this runs on the WORKSTATION, and the check that
+# reads it runs on the server. Non-fatal - a marker that could not be recorded
+# must never turn a successful restore verification into a failure.
+#
+# The repo kind is part of the key. Proving the local copy restores says nothing
+# about the one that survives the disk, and collapsing them into one marker
+# would let a monthly local run hide an off-site copy nobody has ever tested.
+stamp="restore_verified_${REPO_KIND}_at"
+if ssh "${HOME_SERVER_HOST:-home.local}" \
+  'f=~/.cache/home-server/backup-state; mkdir -p "$(dirname "$f")"; touch "$f";
+   grep -v "^'"$stamp"'=" "$f" > "$f.tmp";
+   echo "'"$stamp"'=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f.tmp";
+   mv "$f.tmp" "$f"' 2>/dev/null; then
+	printf '  recorded the verification on the server as %s\n' "$stamp"
+else
+	printf '  (could not reach the server to record it - harmless)\n'
+fi
