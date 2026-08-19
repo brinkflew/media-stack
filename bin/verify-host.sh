@@ -1452,23 +1452,35 @@ if [ -z "$GREENBOOT" ]; then
 	while read -r pc; do
 		[ -n "$pc" ] || continue
 		# {{.Config.Healthcheck.Test}} renders as a Go slice - [CMD-SHELL cmd].
-		# Strip the brackets and the CMD/CMD-SHELL prefix, then look at the
-		# words that could be a binary. Anything with a slash or a scheme is
-		# either an absolute path the image ships on purpose (pocket-id,
-		# gluetun) or a URL, and neither is the failure mode being watched for.
+		# Strip the brackets and the CMD/CMD-SHELL prefix; what is left begins
+		# with the command, which is the only word worth testing.
 		ptest=$(podman inspect "$pc" --format '{{if .Config.Healthcheck}}{{.Config.Healthcheck.Test}}{{end}}' 2>/dev/null)
 		[ -n "$ptest" ] || continue
 		probe_checked=$((probe_checked + 1))
-		for pw in $(printf '%s' "$ptest" | tr -d '[]' | tr '|;&' '   '); do
-			case "$pw" in
-				CMD|CMD-SHELL|NONE|/*|-*|*=*|*://*|'||'|exit|[0-9]*) continue ;;
-			esac
-			# Only the first word of each pipeline segment is a command, and
-			# `command -v` answers for builtins and PATH alike.
-			podman exec "$pc" command -v "$pw" >/dev/null 2>&1 \
-				|| probe_missing="$probe_missing $pc($pw)"
-			break
-		done
+		# TAKE THE FIRST WORD, NOT THE FIRST PLAUSIBLE-LOOKING ONE. The first
+		# version skipped anything beginning with `/` on the grounds that an
+		# absolute path is deliberate, and so tested the next word along - which
+		# for pocket-id's `/app/pocket-id healthcheck` is the SUBCOMMAND. It
+		# duly reported a missing binary called `healthcheck` on a container
+		# that was perfectly healthy.
+		pcmd=$(printf '%s' "$ptest" | tr -d '[]' | awk '{ if ($1 == "CMD-SHELL" || $1 == "CMD") print $2; else print $1 }')
+		if [ -z "$pcmd" ] || [ "$pcmd" = NONE ]; then continue; fi
+		# `sh -c`, AND THAT IS THE WHOLE POINT OF THIS CHECK REPEATING ITSELF.
+		# podman exec runs no shell, so `podman exec c command -v curl` looks
+		# for an executable named `command`, finds none, and reports curl
+		# missing on all twenty-one containers - a check that fires on
+		# everything is as useless as one that fires on nothing, and this one
+		# managed to reproduce the exact trap CLAUDE.md documents about
+		# promtool. `command -v` is a shell builtin and needs a shell.
+		#
+		# An absolute path is tested as a path rather than looked up on PATH,
+		# because `command -v /app/pocket-id` answers on the string alone.
+		case "$pcmd" in
+			/*) pprobe="test -x '$pcmd'" ;;
+			*)  pprobe="command -v '$pcmd'" ;;
+		esac
+		podman exec "$pc" sh -c "$pprobe" >/dev/null 2>&1 \
+			|| probe_missing="$probe_missing $pc($pcmd)"
 	done <<-EOF
 		$(podman ps --format '{{.Names}}' 2>/dev/null)
 	EOF
