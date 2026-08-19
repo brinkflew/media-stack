@@ -101,6 +101,23 @@ nothing points at is one nobody reads.
   qBittorrent. This predates the migration; it came in with the restored config. "Localhost" here is
   inside gluetun's namespace, which only gluetun, qBittorrent and JOAL share, so this is not the
   same as exposing the API.
+- **BUT JOAL IS INSIDE THAT NAMESPACE, AND THAT IS THE PART THE SENTENCE ABOVE UNDERSTATES.**
+  Re-examined 2026-08-19. The three containers share one network namespace, so `127.0.0.1` is common
+  to all of them - and `bypass_local_auth: true` means anything in that namespace reaches
+  qBittorrent's WebUI **with no credential at all**. gluetun is the one that needs it:
+  `VPN_PORT_FORWARDING_UP_COMMAND` posts to `/api/v2/app/setPreferences` unauthenticated on every
+  reconnect. JOAL gets the same reach for free, and JOAL is third-party software whose whole job is
+  talking to trackers - so it is the least trustworthy thing in the pod holding an unauthenticated
+  path to the client that owns the download directory.
+  **It is recorded rather than fixed, and the reason is worth keeping.** The obvious repair is to
+  make the up-command authenticate, and it does not work cleanly: gluetun ships busybox `wget`,
+  which has no `--save-cookies`, so acquiring and replaying a qBittorrent SID means scraping
+  `Set-Cookie` out of `-S` stderr inside a quoted systemd `Environment=` line - more moving parts in
+  the path that keeps the kill-switch working than the exposure justifies. The alternatives are
+  worse: a subnet whitelist cannot separate two containers that share an address, and moving JOAL
+  out of the pod would have it announce from the host's own IP, which is the reason it is in there.
+  **What would actually close it is dropping JOAL**, and that is a decision about whether ratio
+  padding is wanted at all, not a networking fix.
 
 ## The host: image, driver, and which updater is armed
 

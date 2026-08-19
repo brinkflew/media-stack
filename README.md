@@ -33,8 +33,10 @@ maintain.
 Certificates are issued per hostname on demand over DNS-01, so adding a service is a DNS record and
 a block in the Caddyfile, and a hostname nobody has configured simply fails the TLS handshake.
 
-`CLAUDE.md` is the real documentation: architecture, and the reasoning behind each decision. The
-things learned the hard way are indexed there and written out in `docs/known-state.md`.
+`CLAUDE.md` is the entry point: what this is, how a change reaches the server, secrets, the commands,
+and an index of everything else. The reasoning behind each decision lives beside it in `docs/` -
+networking, the media pipeline, observability, backups, the dashboard, repository conventions, and
+`docs/known-state.md` for the things learned the hard way.
 
 ## Direction
 

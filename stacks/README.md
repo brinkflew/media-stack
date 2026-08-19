@@ -117,7 +117,7 @@ saying `healthy`. They are off entirely now, via `healthcheck_events = false` in
 `host/containers/containers.conf`, which drops `health_status` and keeps every lifecycle event.
 So **pick a health interval for how fast you want a failure noticed**, not to protect the journal.
 The cost of turning them off, and why `Notify=healthy` still makes auto-update's rollback fire, is
-in CLAUDE.md under "Logs and status".
+in `docs/observability.md`.
 
 **`duckdns` and `unpackerr` define no healthcheck**, so they get no rollback beyond "did it crash
 immediately". That is accepted, not overlooked.
