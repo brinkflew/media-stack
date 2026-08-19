@@ -1585,7 +1585,14 @@ if [ -z "$GREENBOOT" ]; then
 	# another repository, and a FAIL here blocks bin/reboot-host.sh and so an OS
 	# security update. That is the one blast radius worth spending a filter on.
 	unhealthy=$(podman ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | managed | paste -sd' ' -)
-	if [ -z "$unhealthy" ]; then ok containers.healthy "$running containers up, none unhealthy${eph_n:+, $eph_n ephemeral}"
+	# The clause only speaks when there is something to say. ${eph_n:+...} would
+	# not do it - "0" is a non-empty string - and the MOTD is read by a person on
+	# every ssh, where "0 ephemeral" for the months before conduct ships is noise
+	# about a concept the host does not have yet. The explicit zero that a reader
+	# CAN alert on is the containers_ephemeral fact above, which is always set.
+	eph_says=""
+	[ "${eph_n:-0}" -eq 0 ] || eph_says=", $eph_n ephemeral"
+	if [ -z "$unhealthy" ]; then ok containers.healthy "$running containers up, none unhealthy$eph_says"
 	else bad containers.healthy "unhealthy: $unhealthy"; fi
 
 	# duckdns, unpackerr and the pod's infra container define no healthcheck.
