@@ -421,6 +421,24 @@ nothing points at is one nobody reads.
   `bin/backup-config.sh` - and its newest snapshot was **2026-08-15**, four days old and predating
   ntfy, so it FAILed on a missing `ntfy/auth.db`. Nothing tracks the freshness of that third copy:
   `offsite_pruned_at` records the workstation's *prune*, and there is no marker for the copy itself.
+- **A DUMP OUTLIVES ITS OWN ACCURACY, AND TWO CORRECT DECISIONS ARE WHAT MAKE IT DO SO.**
+  `windmill-db` is Postgres, so it is excluded from the file copy and captured by `pg_dumpall` into
+  the shadow tree instead. Two properties that are right on their own combine badly: the shadow tree
+  is **deliberately never deleted** between runs, so restic only transfers what changed, and
+  `--filter='protect /windmill-db/'` **deliberately keeps last night's staged copy**, so
+  `--delete-excluded` cannot remove it. Together they mean that if the database stops, its last dump
+  stays in both places and is re-snapshotted every night, **indefinitely, looking exactly like a
+  fresh one**. A restore verification would pass on it a year later.
+  The split is the fix, and it is why the two halves live in different scripts on different machines:
+  `bin/verify-restore.sh` asserts only that a dump EXISTS and is whole - present, ends with
+  pg_dumpall's own `-- PostgreSQL database cluster dump complete`, carries a `CREATE ROLE` - and says
+  nothing about age. `backup.windmill_dump_age` asserts recency, on the server, because that is the
+  only place where "is the container even running" can be answered. **The marker is therefore written
+  by `bin/snapshot-databases.sh` and only on a real dump**, never on a skip: it is the one place that
+  can tell the two apart, since the exit status cannot and neither caller can.
+  It also NOTEs rather than warns when `windmill-db` is down, because a stopped database is
+  `containers.units_active`'s finding and a second WARN would only block the reboot window over
+  something a reboot does not fix.
 
 ## Two defects in one uCore image
 

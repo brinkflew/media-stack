@@ -206,6 +206,38 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+say "Windmill database"
+# ------------------------------------------------------------------------------
+# Asserted for the same reason as the metrics store above, only harder: config/
+# windmill-db is EXCLUDED from the file copy outright, so the single thing that
+# puts a Windmill database into a snapshot is bin/snapshot-databases.sh's
+# pg_dumpall leg. If that leg stopped running, the snapshot would look entirely
+# normal - one directory lighter, in a tree of twenty.
+#
+# WHAT THIS DELIBERATELY DOES NOT ASSERT IS FRESHNESS, and the split is the point.
+# The shadow tree is never deleted between runs and the backup's `protect` filter
+# keeps last night's staged copy - both correct on their own, and together they
+# mean a stopped database leaves a dump that is re-snapshotted every night and
+# looks current for ever. Age can only be judged where it is knowable whether the
+# container is even running, which is the server: backup.windmill_dump_age in
+# bin/verify-host.sh answers that half, and NOTEs rather than warns when the
+# fleet is deliberately down.
+pgdump="$CONFIG/windmill-db/dumpall.sql"
+if [ ! -f "$pgdump" ]; then
+	bad "no cluster dump - config/windmill-db is excluded from the file copy, so nothing else would restore it"
+elif ! tail -3 "$pgdump" | grep -q 'PostgreSQL database cluster dump complete'; then
+	# pg_dumpall's own last line. Its absence means the dump stopped early, which
+	# is what a full disk and a killed exec both look like from here.
+	bad "the cluster dump has no completion marker - it is truncated"
+elif ! grep -q 'CREATE ROLE' "$pgdump"; then
+	# A dump with no roles restores to a cluster nothing can log in to, which is
+	# indistinguishable from a working backup until the day it is needed.
+	bad "the cluster dump carries no roles - a restore would have nothing to connect as"
+else
+	ok "cluster dump, $(wc -c <"$pgdump") bytes, roles included"
+fi
+
+# ------------------------------------------------------------------------------
 say "Exclusions"
 # ------------------------------------------------------------------------------
 # BEFORE the database check, not after, and that ordering is load-bearing.

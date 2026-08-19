@@ -361,6 +361,9 @@ signal read green.
   phone were unmeasured - including the 401 its own config file warns about.
 - **The one job that proves the backups restore was the one job with no record**, and running it
   found the workstation's third copy four days stale.
+- **A Postgres dump outlives its own accuracy**, because the shadow tree is never deleted and the
+  `protect` filter keeps last night's copy - so existence and freshness are asserted by different
+  scripts on different machines.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running

@@ -1285,6 +1285,31 @@ if [ -z "$GREENBOOT" ]; then
 	# gone and everything else still reads green.
 	check_backup_age backup.pre_update_age      "pre-update database snapshot" pre_update_db_at 48 warn
 
+	# THE ONE DATABASE THAT IS NOT A FILE IN config/. windmill-db is Postgres, so
+	# it is excluded from the copy and dumped by pg_dumpall instead - and the dump
+	# has the property none of the others do: it survives its own obsolescence. The
+	# shadow tree is never deleted and the backup's `protect` filter keeps last
+	# night's staged copy, so a stopped database leaves a dump that is
+	# re-snapshotted nightly and looks current for ever. bin/verify-restore.sh
+	# proves the dump EXISTS and is whole; only this marker proves one was taken.
+	#
+	# GUARDED ON THE CONTAINER RUNNING, which is not decoration. check_backup_age
+	# honours the declared severity on its no-marker-ever path, so without the
+	# guard a deliberately stopped fleet warns for ever - and a stopped windmill-db
+	# is containers.units_active's finding, which says it better and says it once.
+	#
+	# 48h, matching the two above: the dump runs twice a night, at 03:00 with the
+	# backup and at ~00:00 ahead of the container update, so one missed run is
+	# slack rather than a signal.
+	if podman ps --format '{{.Names}}' 2>/dev/null | grep -qx windmill-db; then
+		check_backup_age backup.windmill_dump_age "Windmill cluster dump" windmill_dump_at 48 warn
+	else
+		# Empty, so it becomes JSON null - "not measured" stays distinct from a zero
+		# that a dashboard would draw as 1970.
+		fact backup_windmill_dump_at ""
+		note backup.windmill_dump_age "windmill-db is not running, so no cluster dump is expected"
+	fi
+
 	# A BACKUP IS NOT PROVEN UNTIL IT HAS BEEN RESTORED, which this repository has
 	# said in prose since the backups were built and never once measured. Every
 	# leg above records that it RAN; none of them records that what it produced can

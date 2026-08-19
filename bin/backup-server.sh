@@ -449,6 +449,14 @@ if [ -z "$DRY" ]; then
 		# above: name every key that has to survive, because the default is
 		# that it does not.
 		grep -E '^pre_update_db_at=' "$STATE" 2>/dev/null
+		# STRANGER THAN THE ONE ABOVE, AND STILL NECESSARY. This marker is written
+		# by bin/snapshot-databases.sh - which THIS script called at step 3, minutes
+		# ago, in this very run. It has to be named here anyway, because the block
+		# rewrites the file whole and the default is that a key does not survive.
+		# Omit it and the dump reads as having stopped happening at exactly the
+		# moment it happened. It is also written by the 00:00 pre-update run, so the
+		# value can legitimately be older than local_at above.
+		grep -E '^windmill_dump_at=' "$STATE" 2>/dev/null
 		# Same again, from the workstation this time. bin/verify-restore.sh writes
 		# restore_verified_local_at / restore_verified_offsite_at over SSH when a
 		# restore actually verifies, and this 03:00 rewrite would erase it the same

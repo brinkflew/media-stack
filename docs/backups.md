@@ -173,7 +173,7 @@ while restic reports the repository shrinking - a silent, billable divergence. O
 for the same reason: it makes prune fail outright. The append-only key is what closes the gap those
 would have addressed, without breaking prune.
 
-**Five things the backup does that a plain `rsync` does not**, each of which otherwise produces a
+**Six things the backup does that a plain `rsync` does not**, each of which otherwise produces a
 backup that looks complete and is not:
 
 - **Caddy's certificates are asserted present, never assumed.** Under Docker its `/data` was
@@ -198,6 +198,23 @@ backup that looks complete and is not:
   stale ones, because Prometheus never reaps `snapshots/` and `--storage.tsdb.retention.size`
   manages blocks only; a leaked one grows real disk inside the directory `metrics.tsdb_size`
   measures and gets reported as "retention is not being enforced".
+- **Windmill's Postgres is dumped, not copied, and its dump is the only copy of it there is.**
+  `config/windmill-db` is excluded from both rsyncs outright - it is a live PGDATA, and copying it
+  at all breaks the run rather than the database, for the reason the TSDB paragraph below gives
+  about vanishing WAL segments. So `bin/snapshot-databases.sh` runs `pg_dumpall` over the
+  container's unix socket instead, asserts the dump ends with pg_dumpall's own
+  `-- PostgreSQL database cluster dump complete` before keeping it, and writes it **0600 via a
+  `umask` rather than a later `chmod`** - the dump carries `CREATE ROLE ... PASSWORD` and, once
+  Windmill holds a workspace, its secret store, so a window in which it is world-readable is not
+  acceptable. **A stopped `windmill-db` is a skip, not a failure**, because this script also runs as
+  `ExecStartPre=` on `podman-auto-update.service` and a fleet somebody turned off must not stop the
+  nightly container update.
+  - **The dump outlives its own accuracy, which is why two different scripts judge it.** The shadow
+    tree is never deleted and the `protect` filter keeps last night's staged copy - both correct
+    alone - so a database that stopped a month ago still has a dump that is re-snapshotted every
+    night and reads as current. `bin/verify-restore.sh` therefore asserts only that a dump exists
+    and is whole; `backup.windmill_dump_age` asserts recency, on the server, where whether the
+    container is running is knowable at all.
 
 **THE EXCLUDE LIST DID NOT COVER THE TSDB, AND COULD NOT SAY SO.** This is the sharpest instance yet
 of a pattern this repository keeps rediscovering, and it was shipped and caught the same evening:
