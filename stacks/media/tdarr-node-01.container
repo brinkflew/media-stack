@@ -24,6 +24,12 @@
 Description=Tdarr node 01
 After=tdarr-server.service
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # Must stay in lockstep with tdarr-server - see the note there.
 Image=ghcr.io/haveagitgat/tdarr_node:latest

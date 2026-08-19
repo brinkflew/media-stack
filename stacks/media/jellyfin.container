@@ -23,6 +23,12 @@
 [Unit]
 Description=Jellyfin
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 Image=lscr.io/linuxserver/jellyfin:latest
 AutoUpdate=registry
@@ -78,7 +84,7 @@ HealthRetries=3
 # is exactly why the startup check earns its place here.
 HealthStartupCmd=curl -fsS http://localhost:8096/health || exit 1
 HealthStartupInterval=5s
-HealthStartupRetries=60
+HealthStartupRetries=180
 HealthStartupSuccess=1
 Notify=healthy
 
@@ -115,8 +121,8 @@ ExecStartPre=-/var/home-server/bin/render-jellyfin-encoding.py
 
 Restart=always
 RestartSec=5
-# Must clear the startup check's 300s ceiling - see sonarr.container.
-TimeoutStartSec=360
+# Must clear the startup check's 900s ceiling - see sonarr.container.
+TimeoutStartSec=1200
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.

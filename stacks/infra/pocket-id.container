@@ -27,6 +27,27 @@
 [Unit]
 Description=Pocket ID
 
+# A UNIT THAT CANNOT START MUST EVENTUALLY SAY SO. Restart=always with
+# RestartSec=5 spaces attempts ~5s apart, and systemd's shipped ceiling is 5
+# starts in 10s - arithmetically unreachable at that spacing, so no quadlet here
+# could ever exhaust it. Pocket ID restarted 6,224 times between 00:20 and 09:55
+# on 2026-08-19 and never settled: the unit oscillated between failed and
+# activating for nine and a half hours, burning CPU and journal, because nothing
+# told it to stop.
+#
+# THIS IS NOT A DETECTION FIX AND MUST NOT BE SOLD AS ONE. containers.failed_units
+# and containers.units_active both caught that outage within the hour and stayed
+# FAIL throughout. What this buys is a unit that comes to REST in `failed` instead
+# of flickering, which is what makes home_server_unit_state worth reading at all,
+# and an end to an unbounded retry loop nobody was waiting on.
+#
+# 20 attempts in 600s = ~100 seconds of trying before it gives up, so a service
+# waiting on a slow dependency at boot still recovers on its own while a hopeless
+# one stops. Note the consequence: once tripped, `systemctl --user start` refuses
+# until the interval lapses or you run `systemctl --user reset-failed <unit>`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # :v2, and emphatically NOT :v1 - that tag is the 1.x line, so it would be a
 # major DOWNGRADE of the service that gates sign-on for everything here.
@@ -69,6 +90,30 @@ Environment=ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY}
 #   HEALTHCHECK CMD ["/app/pocket-id", "healthcheck"]
 # Same shape as gluetun.container, and the same lesson collect-metrics.py's
 # api_get already carries about images that ship only wget.
+#
+# THAT FIX WAS CORRECT AND IT HAPPENED AGAIN THE NEXT NIGHT, for a different
+# reason with an identical ending. On 2026-08-19 the probe worked; the new image
+# simply had not FINISHED. It logged "Connected to database" and "Found legacy
+# application image that will be re..." at 00:14:51, was still working at
+# 00:20:03, and the 300s startup gate expired underneath it - "Failed with result
+# 'protocol'". Rollback to 2.13.0, which could not open the migrated database,
+# 6,224 restarts, and no sign-on until 09:55. Nine hours thirty-five minutes.
+#
+# So there are two distinct ways to burn this gate - a probe that cannot measure
+# the application, and an application that legitimately needs longer than the
+# budget - and only the first was fixed in August. The gate is now 900s; see
+# sonarr.container for why that number and why only the ten services with a
+# database get it.
+#
+# IF IT HAPPENS AGAIN, THE ROLLBACK IS NOT THE REPAIR - the database is. The
+# restore point is taken by bin/pre-update-snapshot.sh as ExecStartPre= on
+# podman-auto-update.service, ~21 hours newer than the 03:00 backup:
+#   systemctl --user stop pocket-id
+#   cp ~/.cache/home-server/pre-update-db/pocket-id/pocket-id.db \
+#      ${DOCKER_VOLUME_CONFIG}/pocket-id/pocket-id.db
+#   systemctl --user start pocket-id
+# Pulling the NEWER image again also works and is usually faster, because the
+# schema it refuses to downgrade to is the one it wrote itself.
 HealthCmd=/app/pocket-id healthcheck
 HealthInterval=60s
 HealthTimeout=5s
@@ -78,7 +123,7 @@ HealthRetries=3
 # that, so this unit's start time is the head of the sign-on chain at boot.
 HealthStartupCmd=/app/pocket-id healthcheck
 HealthStartupInterval=5s
-HealthStartupRetries=60
+HealthStartupRetries=180
 HealthStartupSuccess=1
 Notify=healthy
 
@@ -86,8 +131,8 @@ Notify=healthy
 EnvironmentFile=/var/home-server/.env
 Restart=always
 RestartSec=5
-# Must clear the startup check's 300s ceiling - see sonarr.container.
-TimeoutStartSec=360
+# Must clear the startup check's 900s ceiling - see sonarr.container.
+TimeoutStartSec=1200
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.

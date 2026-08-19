@@ -31,6 +31,12 @@ After=gluetun.service
 # downloaders follow the VPN up as well as down.
 PartOf=gluetun.service
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # WAS :libtorrentv1 UNTIL 2026-08-19, and the reason it no longer is matters
 # more than the reason it was.

@@ -29,6 +29,12 @@ Description=Home server dashboard
 # outage down with it.
 After=caddy.service
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # Built, not pulled. The unit name is the reference; quadlet wires the
 # dependency so systemd runs the build first.

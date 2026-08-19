@@ -17,6 +17,12 @@
 [Unit]
 Description=Prowlarr
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # :develop, not :latest. Prowlarr was tracking the develop branch before these
 # images were pinned, and quietly moving it to the release branch would be a
@@ -73,7 +79,7 @@ HealthRetries=3
 # the rest - a working rollback matters here more than anywhere.
 HealthStartupCmd=curl -fsS http://localhost:9696/ping || exit 1
 HealthStartupInterval=5s
-HealthStartupRetries=60
+HealthStartupRetries=180
 HealthStartupSuccess=1
 Notify=healthy
 
@@ -81,8 +87,8 @@ Notify=healthy
 EnvironmentFile=/var/home-server/.env
 Restart=always
 RestartSec=5
-# Must clear the startup check's 300s ceiling - see sonarr.container.
-TimeoutStartSec=360
+# Must clear the startup check's 900s ceiling - see sonarr.container.
+TimeoutStartSec=1200
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.

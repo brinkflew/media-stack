@@ -23,6 +23,12 @@
 [Unit]
 Description=Tdarr server
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # Server and node MUST move together - a node refuses to register with a server
 # of a different version. Both track :latest so one auto-update run moves the
@@ -64,7 +70,7 @@ HealthRetries=3
 # See sonarr.container.
 HealthStartupCmd=curl -fsS http://localhost:8266/api/v2/status || exit 1
 HealthStartupInterval=5s
-HealthStartupRetries=60
+HealthStartupRetries=180
 HealthStartupSuccess=1
 Notify=healthy
 
@@ -86,8 +92,8 @@ ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/tdarr/server ${DOCKER_VOL
 ExecStartPre=/usr/bin/cp -a /var/home-server/apps/tdarr/plugins/. ${DOCKER_VOLUME_CONFIG}/tdarr/server/Tdarr/Plugins/Local/
 Restart=always
 RestartSec=5
-# Must clear the startup check's 300s ceiling - see sonarr.container.
-TimeoutStartSec=360
+# Must clear the startup check's 900s ceiling - see sonarr.container.
+TimeoutStartSec=1200
 
 # ------------------------------------------------------------------------------
 # Resource limits - added after this unit took the whole host down

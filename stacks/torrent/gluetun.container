@@ -25,6 +25,12 @@
 Description=Gluetun VPN client
 After=network-online.target
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # :v3 rather than :latest, because this container IS the kill-switch. qBittorrent
 # and JOAL have no network stack of their own - they live in this pod's namespace

@@ -15,6 +15,12 @@
 [Unit]
 Description=DuckDNS updater
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 # NOTE this container defines no HealthCmd, so podman auto-update cannot roll
 # it back on anything subtler than an immediate crash - see stacks/README.md.

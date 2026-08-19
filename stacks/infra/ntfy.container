@@ -32,6 +32,12 @@
 [Unit]
 Description=ntfy push notification server
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 Image=docker.io/binwiederhier/ntfy:v2
 AutoUpdate=registry
@@ -75,7 +81,7 @@ HealthRetries=3
 # end-to-end test is a real alert and a real notification.
 HealthStartupCmd=wget -q -O /dev/null http://127.0.0.1/v1/health || exit 1
 HealthStartupInterval=5s
-HealthStartupRetries=60
+HealthStartupRetries=180
 HealthStartupSuccess=1
 Notify=healthy
 
@@ -92,8 +98,8 @@ ExecStartPre=/var/home-server/bin/render-template.py \
              ${DOCKER_VOLUME_CONFIG}/ntfy/server.yml
 Restart=always
 RestartSec=5
-# Must clear the startup check's 300s ceiling - see sonarr.container.
-TimeoutStartSec=360
+# Must clear the startup check's 900s ceiling - see sonarr.container.
+TimeoutStartSec=1200
 
 # A ceiling, not a tuning knob. ntfy holds subscriptions and a small SQLite
 # cache; it is the smallest server in the stack.

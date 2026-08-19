@@ -24,6 +24,12 @@
 Description=Caddy reverse proxy
 After=tinyauth.service
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 Image=caddy.build
 # `local`, not `registry`: this image is built here, so there is no tag upstream

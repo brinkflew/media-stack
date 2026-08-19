@@ -16,6 +16,12 @@
 [Unit]
 Description=Sonarr
 
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
 [Container]
 Image=lscr.io/linuxserver/sonarr:latest
 AutoUpdate=registry
@@ -65,7 +71,7 @@ HealthRetries=3
 # health_status events out of the journal.
 HealthStartupCmd=curl -fsS http://localhost:8989/ping || exit 1
 HealthStartupInterval=5s
-HealthStartupRetries=60
+HealthStartupRetries=180
 HealthStartupSuccess=1
 # WITHOUT THIS THE ROLLBACK IS DECORATIVE. podman auto-update rolls back only if
 # the unit fails to START, and by default systemd calls a container started the
@@ -94,10 +100,29 @@ ExecStartPre=/usr/bin/cp -a /var/home-server/apps/sonarr/scripts/. ${DOCKER_VOLU
 Restart=always
 RestartSec=5
 # Notify=healthy makes the unit's start block on the healthcheck, and the
-# startup check can run for HealthStartupRetries x HealthStartupInterval = 300s.
+# startup check can run for HealthStartupRetries x HealthStartupInterval = 900s.
 # systemd's default start timeout is 90s, which would kill a slow but perfectly
-# healthy service - so this has to clear 300s with room to spare.
-TimeoutStartSec=360
+# healthy service - so this has to clear 900s with room to spare.
+#
+# 900s AND NOT 300s, AND ONLY ON THE TEN QUADLETS THAT CARRY A DATABASE - bazarr,
+# jellyfin, jellyseerr, ntfy, pocket-id, prowlarr, radarr, sonarr, tdarr-server,
+# tinyauth. The list is not a judgement call: it is what bin/snapshot-databases.sh
+# finds when it walks config/ by magic bytes.
+#
+# THE 300s CEILING BRICKED POCKET ID TWICE. Its new image starts, migrates the
+# schema, and is still migrating when the gate expires. Notify=healthy never
+# fires, podman auto-update rolls the image back - and the OLD image then refuses
+# to open the database the new one has already migrated: "failed to run
+# migrations: database version (20260814120000) is newer than application".
+# Restart=always then loops it. 9.5 hours with no sign-on on 2026-08-18, and
+# 9h35m and 6,224 restarts on 2026-08-19, the night after the first fix landed.
+#
+# THE GATE HAS TO OUTLAST THE MIGRATION, because once it expires the irreversible
+# work is already done and the rollback has stopped being a safety net and become
+# the outage. This budget is free in normal use - a cold start with no migration
+# is ~1s, measured on pocket-id - and exists entirely for the one start after an
+# image bump. The stateless services keep 300s: they have nothing to migrate.
+TimeoutStartSec=1200
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,
 # low enough that a runaway is killed instead of taking the host down.
