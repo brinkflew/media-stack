@@ -431,11 +431,18 @@ say "Quadlets"
 # than as misspelled.
 QUADLET="${QUADLET:-/usr/libexec/podman/quadlet}"
 if [ -x "$QUADLET" ]; then
-	if QUADLET_UNIT_DIRS="$PWD/stacks/common:$PWD/stacks/torrent:$PWD/stacks/media:$PWD/stacks/infra" \
-		"$QUADLET" -dryrun -user >/dev/null 2>&1; then
+	if qout=$(QUADLET_UNIT_DIRS="$PWD/stacks/common:$PWD/stacks/torrent:$PWD/stacks/media:$PWD/stacks/infra" \
+		"$QUADLET" -dryrun -user 2>&1); then
 		ok "$(git ls-files 'stacks/*' | grep -cE '\.(container|network|pod|build)$') units generate"
 	else
+		# SHOW THE ERROR. This said only "quadlet -dryrun failed" until
+		# 2026-08-19, which is useless anywhere the generator disagrees with
+		# this workstation - and that is exactly where it first fired, on a CI
+		# runner whose podman is older than the host's and rejects a directive
+		# that is valid here. A linter that will not say what it found sends
+		# you to reproduce its own run by hand.
 		bad "quadlet -dryrun failed"
+		printf '%s\n' "$qout" | grep -vE '^$' | head -20 | sed 's/^/    /'
 	fi
 else
 	skip "no quadlet generator at $QUADLET"
