@@ -23,6 +23,21 @@ ContainerName=sonarr
 Network=net-arr.network
 Network=net-download.network
 
+# MEASURED ON 2026-08-19, NOT ASSUMED, and the bare form does not work.
+# DropCapability=ALL on its own breaks every LinuxServer image outright:
+# s6-overlay cannot complete its init without these five, and the container
+# never answers. With them it starts clean and still gives up the other nine
+# defaults - NET_RAW, MKNOD, SYS_CHROOT, SETPCAP, SETFCAP, KILL, AUDIT_WRITE,
+# FSETID and NET_BIND_SERVICE. Proven against radarr and against jellyfin,
+# which keeps its GPU through the CDI device with every one of those dropped.
+DropCapability=ALL
+AddCapability=CHOWN
+AddCapability=SETUID
+AddCapability=SETGID
+AddCapability=DAC_OVERRIDE
+AddCapability=FOWNER
+NoNewPrivileges=true
+
 Volume=${DOCKER_VOLUME_CONFIG}/sonarr:/config:Z
 # One mount, not several: downloads/ and library/ must stay on one filesystem so
 # imports can hardlink instead of copying. No :z - see stacks/README.md.

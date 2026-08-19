@@ -30,6 +30,21 @@ AutoUpdate=registry
 ContainerName=flaresolverr
 Network=net-solver.network
 
+# THE CONTAINER WITH THE MOST TO GAIN FROM THIS, and it turns out to need
+# nothing. FlareSolverr exists to run headless Chrome against
+# attacker-controlled indexer pages, which makes it the likeliest thing here to
+# be compromised - and until 2026-08-19 it had no privilege restrictions at all
+# while unpackerr, which only touches the filesystem, had them.
+#
+# Measured, because Chrome's sandbox is exactly the kind of thing that wants
+# capabilities: with --cap-drop=ALL it launches Chromium 148, passes its own
+# browser self-test and answers /health. So nothing is added back.
+#
+# The net-solver isolation remains the real barrier; this narrows what a
+# compromised Chrome can do inside its own namespace.
+DropCapability=ALL
+NoNewPrivileges=true
+
 # Same reason as prowlarr.container: this fetches the indexer pages itself, so
 # resolving them through the ISP would land it on the same blocking page.
 DNS=9.9.9.9

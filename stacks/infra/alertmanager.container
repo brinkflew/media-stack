@@ -39,6 +39,14 @@ AutoUpdate=registry
 ContainerName=alertmanager
 Network=net-metrics.network
 
+# NoNewPrivileges is free here and is measured rather than assumed: nothing in
+# this image needs to gain privileges through a setuid binary. A capability set
+# is the next step and needs the same per-container test - DropCapability=ALL is
+# NOT safe by default, and the two counter-examples are in this repository:
+# caddy exits without NET_BIND_SERVICE, and every LinuxServer image needs five
+# capabilities before s6-overlay will start at all.
+NoNewPrivileges=true
+
 # Container root IS core - see prometheus.container. Alertmanager writes its
 # notification log and silences into /alertmanager.
 User=0

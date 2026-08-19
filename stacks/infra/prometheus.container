@@ -38,6 +38,14 @@ AutoUpdate=registry
 ContainerName=prometheus
 Network=net-metrics.network
 
+# NoNewPrivileges is free here and is measured rather than assumed: nothing in
+# this image needs to gain privileges through a setuid binary. A capability set
+# is the next step and needs the same per-container test - DropCapability=ALL is
+# NOT safe by default, and the two counter-examples are in this repository:
+# caddy exits without NET_BIND_SERVICE, and every LinuxServer image needs five
+# capabilities before s6-overlay will start at all.
+NoNewPrivileges=true
+
 # THE IMAGE RUNS AS nobody, WHICH CANNOT WRITE ITS OWN DATA DIRECTORY HERE.
 # Rootless Podman maps container uid 0 to core (1000), the user that owns
 # config/ - but uid 65534 maps into the subuid range at 165533, which has only
