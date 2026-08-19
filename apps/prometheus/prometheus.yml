@@ -66,3 +66,19 @@ scrape_configs:
   - job_name: node
     static_configs:
       - targets: ['node-exporter:9100']
+
+  # THE LAST HOP, WHICH WAS UNMEASURED UNTIL 2026-08-19. Alertmanager appears
+  # above under `alerting:` and that is a DIFFERENT relationship - it makes it
+  # somewhere to send alerts to, not something to collect from. So the whole
+  # chain past Prometheus was invisible: alertmanager_notifications_failed_total
+  # is exactly the 401-against-the-read-only-mount that alertmanager.yml warns
+  # about in its own comments, and it existed nowhere anything could read it.
+  #
+  # It is also what made the 2026-08-19 outage impossible to reconstruct.
+  # ntfy-alertmanager does not log the webhooks it receives, so after four
+  # critical alerts had been firing for eight and a half hours there was no
+  # record on this machine of whether a single one had been delivered. There is
+  # now.
+  - job_name: alertmanager
+    static_configs:
+      - targets: ['alertmanager:9093']

@@ -55,6 +55,19 @@ route:
       repeat_interval: 4h
       group_wait: 10s
 
+    # The Watchdog, which always fires. Its whole job is to arrive, so it must
+    # NOT be batched with anything and must NOT repeat often enough to be
+    # annoying: once a day, at a priority the bridge renders without a sound.
+    # A day of silence from this topic then means the chain is broken rather
+    # than the stack being quiet - which is the one thing no other rule here
+    # can establish, because every other rule proves itself by firing.
+    - matchers:
+        - severity = "heartbeat"
+      receiver: ntfy
+      repeat_interval: 24h
+      group_wait: 0s
+      group_interval: 24h
+
 receivers:
   - name: ntfy
     webhook_configs:

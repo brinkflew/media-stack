@@ -49,6 +49,15 @@ labels {
 		priority 3
 		tags "warning"
 	}
+
+	# The Watchdog. Priority 2 is ntfy's "low": it lands in the notification
+	# shade without a sound, once a day. Deliberately visible rather than
+	# silent - a heartbeat nobody ever sees cannot be missed when it stops,
+	# and being missed when it stops is its entire purpose.
+	severity "heartbeat" {
+		priority 2
+		tags "green_heart"
+	}
 }
 
 # Being told it stopped is half the value. update-notification replaces the
