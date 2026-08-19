@@ -11,7 +11,8 @@ exist on a fresh host, so it needs creating once:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-for u in /var/home-server/host/systemd/*.service /var/home-server/host/systemd/*.timer; do
+for u in /var/home-server/host/systemd/*.service /var/home-server/host/systemd/*.timer \
+         /var/home-server/host/systemd/*.slice; do
   ln -sf "$u" ~/.config/systemd/user/
 done
 for d in /var/home-server/host/systemd/*.service.d; do
@@ -30,6 +31,17 @@ and `home-server-caddy-build` was added later and never appended - so it was ena
 and absent from the documented setup, which means a rebuild from this file would have produced a
 host where Caddy silently never updated. A glob cannot drift; the `enable` line still can, so it
 names every timer explicitly.
+
+**It globs by EXTENSION, though, and that is its blind spot - `*.slice` was added on 2026-08-19.**
+A glob cannot drift within the extensions it names and is completely blind outside them, so this
+loop was `*.service *.timer` only and `app-agents.slice` would have been invisible to it. That
+failure is worse than the Caddy one it was written for: a `Slice=` naming a slice with no unit file
+does not fail, so systemd instantiates it with defaults and every member starts, stays healthy,
+stays fully observed and is contained by nothing. `agents.slice_limits` is what catches it, by
+reading the limits back out of the cgroup rather than out of the unit file.
+
+**A slice is NOT enabled and must not join the `enable` line.** It carries no `[Install]` section;
+systemd pulls it in because a unit's `Slice=` names it.
 
 **Adding a unit here means adding it to that loop.** Individual files are symlinked, not the
 directory - unlike `~/.config/containers/systemd/{common,torrent,media,infra}`, which point at
@@ -70,6 +82,8 @@ symlinks, so there is no copy step. Only `daemon-reload` is needed.
 | `home-server-metrics` | Collects, every 30 seconds, the numbers no container can honestly measure here: host filesystems (node-exporter's collector reads `/proc/1/mountinfo`, which no rootless container may), host network (`/proc/net` resolves in the reader's namespace), and the cgroup memory detail that separates a container holding cold page cache from one that is actually starved. It writes Prometheus exposition format into node-exporter's textfile directory rather than pushing, because Prometheus pulls - which also buys `node_textfile_mtime_seconds`, dating the file from outside the collector. See `bin/collect-metrics.py`. |
 | `home-server-backup` | Backs up `config/` nightly at 03:00, to `/var/backups/home-server` and then off-site by `restic copy`. This is the backup that actually happens; the workstation's `bin/backup-config.sh` is a third copy taken when someone is home. See `bin/backup-server.sh`. |
 | `home-server-seeding` | Enforces the one part of the seeding policy qBittorrent cannot express: a **72-hour floor** before any torrent may be stopped. Every share limit qBittorrent has is a maximum that triggers an action, so a minimum can only be enforced by withholding those limits - which is all this does. Past 72h a torrent gets ratio 1.5 and a seven-day seeding limit and qBittorrent stops it on whichever lands first; Radarr and Sonarr then delete it and its files, as they already did. It deletes nothing itself, and a stopped timer means nothing is ever reaped rather than things being reaped early. See `bin/apply-seeding-policy.py`. |
+| `home-server-search` | Sweeps for monitored media that is missing and has actually been released, and asks Radarr and Sonarr to search for it. It exists because a back-catalogue title is searched once, at add time, and never again - RSS only carries new uploads, so 94 episodes stayed missing while approved releases sat on a configured indexer. Counted in episodes rather than seasons, because a season query asks for a season PACK and returned nothing. **This row was missing from this table until 2026-08-19**, which is the drift the glob above was written to prevent, arriving in the half of the setup that is still a hand-maintained list. See `bin/search-missing.py`. |
+| `app-agents.slice` | **Not a unit that runs anything - a cgroup ceiling.** Every Windmill container, `conduct` and every phase-runner scope joins it, so the fleet is bounded in aggregate rather than by a sum of per-unit limits it could never have: its runners are `podman run --rm`, so their count is a variable. The `app-` prefix is load-bearing - systemd derives the hierarchy from the dashes, so this nests under `app.slice` where every quadlet already lives, which is the path `bin/collect-metrics.py` resolves against. It has no `[Install]` and is never enabled; a unit's `Slice=` pulls it in. Assert it by its effect - `agents.slice_limits` reads the limits back out of the cgroup, because a `Slice=` naming a slice with no unit file silently gets systemd's defaults. See `host/systemd/app-agents.slice`. |
 | `podman-auto-update.service.d` | **Not a unit of ours - a drop-in over podman's.** It makes the `ExecStartPost=` image prune non-fatal, so a disk reclaim that could be skipped for a night cannot mark the unit that updates eighteen containers as failed. It could and did: on 2026-08-17 and 2026-08-18 `podman auto-update` exited 0, every container updated, and the unit reported failure because the prune hit a leftover build container and exited 125. The condition itself is now measured by `containers.storage_orphans`, which is what makes this a correction and not a silencer. |
 
 ```bash

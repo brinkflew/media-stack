@@ -440,6 +440,45 @@ nothing points at is one nobody reads.
   `containers.units_active`'s finding and a second WARN would only block the reboot window over
   something a reboot does not fix.
 
+- **A `Slice=` naming a slice with no unit file does not fail - systemd instantiates it with
+  defaults, and every signal reads correct.** `host/systemd/app-agents.slice` is the aggregate
+  ceiling the coding-agent fleet runs inside, and the only thing that bounds it: its phase runners
+  are `podman run --rm`, so their count is a variable and no sum of per-unit ceilings can reach it.
+  If the unit file is not symlinked into `~/.config/systemd/user/`, systemd creates the slice
+  anyway, with no limits at all - and every member then starts, stays healthy, stays fully observed
+  by Prometheus and is contained by nothing. **This is the `io`-delegation failure one directive
+  over**, which was inert here for months for the same reason: the directive is accepted and does
+  nothing. `agents.slice_limits` is what closes it, and it reads `memory.max`, `memory.high`,
+  `cpu.max`, `io.weight` and `pids.max` back out of the cgroup rather than out of the unit file -
+  `systemctl --user show` would report what the file SAYS, which is the half that was never in
+  doubt. It asserts they are *set*, not their exact figures, because an exact assertion would be a
+  second copy of the slice in a place nothing reconciles. Unlimited spells itself differently per
+  controller and all five spellings were read off this host: `max`, `max`, `max 100000`,
+  `default 100`, `max`.
+  **The symlink loop in `host/systemd/README.md` globs by EXTENSION, which is its blind spot.** It
+  was `*.service *.timer` and was widened to `*.slice` in the same commit. A glob cannot drift
+  within the extensions it names and is completely blind outside them - and the README's own
+  argument for globbing ("a glob cannot drift") reads as though it covers this, and does not.
+- **The collector's cgroup join was flat, so the first unit ever placed in a slice would have gone
+  dark.** `bin/collect-metrics.py` built one path, `CGROUP + "/" + unit`, where `CGROUP` ends in
+  `app.slice` and `unit` is podman's own `PODMAN_SYSTEMD_UNIT` label. `Slice=app-agents.slice` puts
+  the cgroup one level deeper, `os.path.isdir` misses, and the container is counted in
+  `home_server_container_identity_unresolved` and otherwise dropped. **What is lost is 32 of
+  `windmill-db`'s 43 series** - working set, rss, cache, the inactive/active split,
+  pgscan/pgsteal/refault, both memory ceilings, all four `memory.events`, CPU, PSI for three
+  controllers, `io.stat` per device, pids. The 11 that survive are the ones `podman ps` and
+  `systemctl` answer, so the container looks entirely normal on every other signal.
+  `_unit_cgroup()` resolves it: the flat path first, so nothing that resolves today can move, then
+  **one level** of `*.slice`. One level rather than a walk because systemd derives the hierarchy
+  from the dashes in the name, so the depth is knowable - and because a recursive search would also
+  match the `libpod-payload-<id>` cgroup nested INSIDE the directory being looked for, which is a
+  different set of numbers that would look entirely plausible.
+  **Not `/proc/<pid>/cgroup`, which is the obvious authoritative answer and is wrong here.**
+  `torrent-infra` reports the POD's cgroup, `user@1000.service/user.slice/user-libpod_pod_<id>/...`,
+  which contains its unit name nowhere; the flat join resolves it to `app.slice/torrent-pod.service`,
+  the unit's own cgroup. Switching would have silently changed what the four pod members' numbers
+  mean while every one of them kept reporting.
+
 ## Two defects in one uCore image
 
 - **THE SAME IMAGE ALSO SHIPPED AN UNPARSEABLE `policy.json`, AND THAT IS WHY THE PCP MASK WAS

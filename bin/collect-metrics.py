@@ -118,6 +118,10 @@ MEDIA_TYPES = ("movies", "documentaries", "series", "anime")
 # `cpu memory pids` are - and an undelegated controller is accepted silently and
 # does nothing, which is why host/butane/ucore.bu ships the drop-in. If this path
 # is wrong every container source returns nothing rather than wrong numbers.
+#
+# This is the ROOT, no longer the whole answer: a unit carrying `Slice=` lands in
+# a child of it. _unit_cgroup below is what resolves that, and host/systemd/
+# app-agents.slice is the one that exists today.
 CGROUP = ("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice"
           % (os.getuid(), os.getuid()))
 
@@ -644,6 +648,50 @@ def source_units(m):
           "inactive is their correct resting state.")
 
 
+def _unit_cgroup(unit):
+    """The cgroup directory for `unit`, whichever slice under app.slice holds it.
+
+    THE JOIN WAS A SINGLE os.path.join FOR AS LONG AS EVERY QUADLET SAT DIRECTLY
+    IN app.slice. `Slice=app-agents.slice` puts one a level deeper, and the flat
+    join then misses - which is not a wrong number but no number at all: 32 of
+    windmill-db's 43 series are read out of this directory, and the 11 that
+    survive are the ones podman ps and systemctl answer, so the container looks
+    entirely normal while every memory, cpu, io and PSI series for it is gone.
+    Only home_server_container_identity_unresolved says so.
+
+    The flat path is tried FIRST so nothing that resolves today can move, and
+    the listing below runs only on a miss - which today is never.
+
+    ONE LEVEL, NOT A WALK, and both halves of that are deliberate. systemd
+    derives the hierarchy from the dashes in the name, so app-agents.slice
+    sitting under app.slice is knowable rather than guessed. And a recursive
+    search would also match the libpod-payload-<id> cgroup nested INSIDE the
+    directory being looked for - a different set of numbers that would look
+    entirely plausible. If a slice ever nests deeper than this, the signal is
+    identity_unresolved, which is already exported and already alerted on.
+
+    Not /proc/<pid>/cgroup, which is the obvious authoritative answer and is
+    wrong here: torrent-infra reports the POD's cgroup
+    (user@1000.service/user.slice/user-libpod_pod_<id>/...), which contains the
+    unit name nowhere, where the join below resolves it to torrent-pod.service,
+    the unit's own cgroup. Switching would silently change what the four pod
+    members' numbers mean while every one of them kept reporting.
+    """
+    base = os.path.join(CGROUP, unit)
+    if os.path.isdir(base):
+        return base
+    try:
+        entries = os.listdir(CGROUP)
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.endswith(".slice"):
+            nested = os.path.join(CGROUP, entry, unit)
+            if os.path.isdir(nested):
+                return nested
+    return None
+
+
 def source_containers(m):
     raw = run(["podman", "ps", "--format", "json"], timeout=20)
     if raw is None:
@@ -657,8 +705,8 @@ def source_containers(m):
         if not unit:
             unresolved += 1
             continue
-        base = os.path.join(CGROUP, unit)
-        if not os.path.isdir(base):
+        base = _unit_cgroup(unit)
+        if base is None:
             unresolved += 1
             continue
 

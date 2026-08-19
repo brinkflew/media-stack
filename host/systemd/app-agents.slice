@@ -1,0 +1,57 @@
+# ==============================================================================
+# The aggregate ceiling for the agent fleet
+# ------------------------------------------------------------------------------
+# Per-unit limits are not a mechanism for this, and this repository proves it:
+# twenty-four quadlets declare 34.5 GiB of MemoryMax against 15.5 GiB of RAM and
+# it works, because the unit count is fixed and the peaks do not coincide. The
+# fleet breaks both properties. Its phase runners are `podman run --rm` under
+# transient scopes, so the count is a variable rather than a constant, and a
+# phase peaks exactly when the next one starts. So the ceiling goes one level up
+# and the kernel enforces the sum: every Windmill container, conduct itself and
+# every runner scope joins this slice.
+#
+# THE `app-` PREFIX IS LOAD-BEARING, not decoration. systemd derives the
+# hierarchy from the dashes in the name, so this nests under app.slice, where
+# every quadlet already lives. A top-level `agents.slice` would put these
+# cgroups outside the path bin/collect-metrics.py joins on and cost every member
+# 32 of its 43 series - with nothing but home_server_container_identity_
+# unresolved to say so, and that counter's own help text calls it a broken join.
+#
+# Sized against a measurement rather than against the declared sum. Over the
+# whole history of the metrics store the peak sum of every container's working
+# set was 5,914 MB and the worst MemAvailable was 9,715 MB, so a 4.6 GB hard
+# reservation still leaves about 5 GB at the worst moment anything here has
+# recorded. That window is 4.31 days rather than for ever - revisit it after a
+# full Tdarr queue has run through.
+#
+# CPUQuota AS WELL AS CPUWeight. A weight only bites under contention, and
+# `npm ci` beside a threaded test runner will take all twelve cores the moment
+# they are free. The symptom of relying on the weight alone is a stuttering
+# Jellyfin UI while every directive behaves exactly as documented. 400% is four
+# cores of twelve.
+#
+# ITS FAILURE IS SILENCE, which is the whole reason agents.slice_limits reads
+# these values back out of the cgroup rather than out of this file. A `Slice=`
+# naming a slice with no unit file does NOT fail: systemd instantiates it with
+# defaults, and every member then starts, stays healthy, stays fully observed
+# and is contained by nothing at all. That is the io-delegation failure one
+# directive over, which was inert here for months. Verify, never assume:
+#   cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/\
+#       app-agents.slice/memory.max
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md, whose
+# setup loop globs by extension and had to be widened for this one.
+# ==============================================================================
+
+[Slice]
+MemoryHigh=3584M
+MemoryMax=4608M
+CPUWeight=30
+CPUQuota=400%
+IOWeight=20
+# The one number here with no measurement behind it. Chromium alone runs to
+# hundreds of threads, and when this binds the symptom is `fork: Resource
+# temporarily unavailable` raised by something unrelated, naming neither the
+# slice nor the limit. Measure pids.current during a real gate run before
+# trusting it.
+TasksMax=1536

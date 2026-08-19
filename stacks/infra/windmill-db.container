@@ -145,5 +145,17 @@ TimeoutStartSec=1200
 MemoryHigh=512M
 MemoryMax=768M
 
+# THE AGGREGATE CEILING, and the reason this is not just tidiness: the per-unit
+# numbers above are what stops THIS container taking the host down, and they say
+# nothing about the fleet as a whole. The runners are `podman run --rm`, so
+# their count is a variable and no sum of per-unit ceilings can bound it. The
+# slice is where that is bounded, and the kernel enforces it.
+#
+# It was deliberately absent when this unit shipped, because a `Slice=` naming a
+# slice the collector does not understand costs this container 32 of its 43
+# series - so host/systemd/app-agents.slice and the resolver in
+# bin/collect-metrics.py landed in the same commit as this line.
+Slice=app-agents.slice
+
 [Install]
 WantedBy=default.target

@@ -364,6 +364,12 @@ signal read green.
 - **A Postgres dump outlives its own accuracy**, because the shadow tree is never deleted and the
   `protect` filter keeps last night's copy - so existence and freshness are asserted by different
   scripts on different machines.
+- **A `Slice=` naming a slice with no unit file silently gets systemd's defaults**, so the fleet's
+  one aggregate ceiling can be absent while every member is healthy and fully observed. The
+  `host/systemd/` symlink loop globs by EXTENSION, which is where that comes from.
+- **The collector's cgroup join was flat**, so the first unit ever placed in a slice would have lost
+  32 of its 43 series with nothing but a counter to say so. Not `/proc/<pid>/cgroup` - the pod
+  members resolve somewhere else entirely.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running

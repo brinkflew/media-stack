@@ -169,6 +169,18 @@ table - and a table maintained in a script is the most driftable thing here.
 `home_server_container_identity_unresolved` counts what did not map, because the failure is
 otherwise silent: a container simply missing from every panel.
 
+**The label is only half the join; the other half is the cgroup path, and it is no longer flat.**
+`_unit_cgroup()` tries `app.slice/<unit>` first - so nothing that resolved before a slice existed
+can move - and then one level of `*.slice`, which is where `Slice=app-agents.slice` puts a unit.
+One level rather than a walk, because systemd derives the hierarchy from the dashes in the name so
+the depth is knowable, and because a recursive search would also match the `libpod-payload-<id>`
+cgroup nested inside the directory being looked for. **It is deliberately not `/proc/<pid>/cgroup`**,
+which is authoritative everywhere except the case that matters: a pod member reports the pod's own
+cgroup, containing its unit name nowhere, where the join above resolves `torrent-infra` to
+`torrent-pod.service`. What a miss costs is 32 of a container's 43 series - every cgroup-derived
+number - while the 11 that `podman ps` and `systemctl` answer keep reporting, so nothing else
+notices.
+
 **`/` is deliberately not in the filesystem allowlist.** It is the read-only composefs: 8 MB, zero
 bytes free, 100% full by design and for ever. A panel showing the root filesystem full would read as
 an emergency and mean nothing, and `statvfs` returns -1 for its inode counts.

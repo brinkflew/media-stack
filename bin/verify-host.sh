@@ -1658,6 +1658,57 @@ if [ -z "$GREENBOOT" ]; then
 	fi
 
 	# --------------------------------------------------------------------------
+	# Agents. The containment the coding-agent fleet runs inside.
+	# --------------------------------------------------------------------------
+	# WARN OR NOTE, NEVER FAIL, for the reason the Seeding, Logs and Metrics
+	# sections below all give: bin/reboot-host.sh refuses to act on a host this
+	# battery calls unhealthy, and nothing an agent fleet does wrong is fixed by
+	# a reboot. This whole section is inside `if [ -z "$GREENBOOT" ]`, so the
+	# unattended reboot window never sees it either.
+	say agents "Agents"
+
+	# THE FAILURE THIS EXISTS FOR IS SILENCE. A `Slice=` naming a slice with no
+	# unit file does NOT fail - systemd instantiates it with defaults - so a
+	# symlink that was never made, a host rebuilt from host/systemd/README.md
+	# before its glob was widened, or a tidied ~/.config/systemd/user/ produces a
+	# fleet in which every unit starts, stays healthy, stays fully observed and
+	# is contained by nothing at all. That is the io-delegation failure one
+	# directive over, and it was inert here for months.
+	#
+	# READ BACK OUT OF THE CGROUP, never `systemctl --user show`: that reports
+	# what the unit file SAYS, which is the half that was never in doubt.
+	#
+	# It asserts the limits are SET, not their exact figures. An exact assertion
+	# would be a second copy of app-agents.slice in a place nothing reconciles,
+	# which is the most driftable shape this repository has a name for.
+	agents_slice="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice/app-agents.slice"
+	if [ ! -d "$agents_slice" ]; then
+		# A slice with no running member has no cgroup directory at all, so this
+		# is "nothing to contain yet" rather than a finding. containers.units_active
+		# above is what says a member should be running and is not.
+		fact agents_slice_unlimited ""
+		note agents.slice_limits "app-agents.slice has no running members - nothing to contain yet"
+	else
+		# Unlimited spells itself differently per controller, and all four
+		# spellings were read off this host rather than guessed:
+		#   memory.max  max          cpu.max   max 100000
+		#   io.weight   default 100  pids.max  max
+		unlimited=""
+		[ "$(cat "$agents_slice/memory.max" 2>/dev/null)" != max ] || unlimited="$unlimited MemoryMax"
+		[ "$(cat "$agents_slice/memory.high" 2>/dev/null)" != max ] || unlimited="$unlimited MemoryHigh"
+		[ "$(cat "$agents_slice/cpu.max" 2>/dev/null)" != "max 100000" ] || unlimited="$unlimited CPUQuota"
+		[ "$(cat "$agents_slice/io.weight" 2>/dev/null)" != "default 100" ] || unlimited="$unlimited IOWeight"
+		[ "$(cat "$agents_slice/pids.max" 2>/dev/null)" != max ] || unlimited="$unlimited TasksMax"
+		fact agents_slice_unlimited "$(printf '%s' "$unlimited" | wc -w)" num
+		fact agents_slice_memory_max "$(cat "$agents_slice/memory.max" 2>/dev/null)"
+		if [ -z "$unlimited" ]; then
+			ok agents.slice_limits "app-agents.slice is bounded on all five controls"
+		else
+			warn agents.slice_limits "app-agents.slice reads UNLIMITED for:$unlimited - the fleet is running with systemd's defaults, not host/systemd/app-agents.slice; check the unit is symlinked into ~/.config/systemd/user/ and that the controller is delegated"
+		fi
+	fi
+
+	# --------------------------------------------------------------------------
 	# Seeding policy. Whether the 72h floor is actually being enforced.
 	# --------------------------------------------------------------------------
 	# WARN OR PASS, NEVER FAIL, for the reason the Logs and Metrics sections
