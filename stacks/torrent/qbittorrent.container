@@ -3,7 +3,15 @@
 # ------------------------------------------------------------------------------
 # Lives in gluetun's network namespace and has no address of its own. Anything
 # addressing it - Caddy, the *arr apps' download client settings - must use
-# gluetun:${PORT_QBITTORRENT_WEB}. `qbittorrent:8200` does not resolve.
+# torrent:${PORT_QBITTORRENT_WEB}, the POD name.
+#
+# NOT gluetun:, which this comment said until 2026-08-19 and which is the
+# Compose-era answer: there, network_mode: service:gluetun made gluetun the
+# container attached to net-download. Under Podman the pod's INFRA container
+# holds the network and answers to the pod name, so `gluetun:8200` does not
+# resolve and neither does `qbittorrent:8200`. Getting this wrong is invisible
+# until something actually downloads, because those routes sit behind sign-on
+# and an unauthenticated request never reaches the backend.
 #
 # Requires= rather than only After=: gluetun's Notify=healthy means systemd
 # holds this unit until the tunnel is actually up, not merely until the gluetun
@@ -24,16 +32,58 @@ After=gluetun.service
 PartOf=gluetun.service
 
 [Container]
-# :libtorrentv1, NOT :latest. The pinned image was a libtorrent 1.2 build, and
-# :latest is built against libtorrent 2.0 - which memory-maps torrent data and
-# behaves very differently under disk pressure. This host's media disk loses 45%
-# of its throughput to a second concurrent reader, so a silent libtorrent major
-# upgrade is exactly the change that must not arrive unattended. This tag still
-# follows qBittorrent's own releases: 5.2.0 -> 5.2.3 without crossing that line.
-Image=lscr.io/linuxserver/qbittorrent:libtorrentv1
+# WAS :libtorrentv1 UNTIL 2026-08-19, and the reason it no longer is matters
+# more than the reason it was.
+#
+# The pin was a PERFORMANCE decision and a correct one: libtorrent 2.0
+# memory-maps torrent data, this host's media spindle loses 45% of its
+# throughput to a second concurrent reader, and a silent major upgrade of the
+# disk layer was exactly the change that must not arrive unattended.
+#
+# WHAT CHANGED IS THE COST, not the reasoning. Both tags carry the SAME
+# qBittorrent - 5.2.3 either way - and differ only in the library underneath:
+#
+#   :libtorrentv1   5.2.3_v1.2.20-ls128   libtorrent 1.2.20, published 2025-01-28
+#   :latest         5.2.3_v2.0.14-ls472   libtorrent 2.0.14, published 2026-08-10
+#
+# The 1.2 line has had NO upstream release in the nineteen months since, while
+# 2.0 shipped 2.0.12, 2.0.13 and 2.0.14. So the pin had quietly stopped being a
+# performance decision and become a decision to keep running frozen code whose
+# entire job is parsing untrusted input from arbitrary peers. The LinuxServer
+# image is still rebuilt - the base OS and OpenSSL stay patched - which is
+# precisely what made this invisible: everything looked maintained.
+#
+# THE MMAP OBJECTION IS NOW A SETTING, which is what makes the move safe rather
+# than merely necessary. qBittorrent exposes DiskIOType, and it is set to 2
+# (Posix) on this instance - verified in release-5.2.3,
+# src/base/bittorrent/sessionimpl.cpp, where Posix installs
+# customPosixDiskIOConstructor and no memory mapping happens at all. There is
+# also 3 (SimplePreadPwrite), whose own comment reads "preserve the same
+# behavior as in earlier libtorrent versions"; 2 was chosen as the one that
+# replaces the backend outright rather than tweaking the mmap one.
+#
+# IT LIVES IN THE GITIGNORED CONFIG TREE, so a restore brings back whatever was
+# in the snapshot and Default on a 2.0 build is mmap. That is asserted rather
+# than trusted: bin/apply-seeding-policy.py reads it hourly into the seeding
+# marker and torrent.disk_io_type in bin/verify-host.sh WARNs on anything else.
+# Same class as the Sonarr download-client host a restore reverts to `gluetun`.
+#
+# WHAT THIS GIVES UP, stated plainly: :latest follows qBittorrent's own major,
+# so a 6.0 could arrive unattended where :libtorrentv1 would not have. That is
+# survivable only because the nightly rollback now has a restore point in front
+# of it - see host/systemd/podman-auto-update.service.d/20-snapshot-databases.conf.
+Image=lscr.io/linuxserver/qbittorrent:latest
 AutoUpdate=registry
 ContainerName=qbittorrent
 Pod=torrent.pod
+
+# NoNewPrivileges is free here and is measured rather than assumed: nothing in
+# this image needs to gain privileges through a setuid binary. A capability set
+# is the next step and needs the same per-container test - DropCapability=ALL is
+# NOT safe by default, and the two counter-examples are in this repository:
+# caddy exits without NET_BIND_SERVICE, and every LinuxServer image needs five
+# capabilities before s6-overlay will start at all.
+NoNewPrivileges=true
 
 Volume=${DOCKER_VOLUME_CONFIG}/qbittorrent:/config:Z
 # No :z on the media mount - it is 7TB and relabelling it recursively on every
