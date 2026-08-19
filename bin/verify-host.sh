@@ -1765,16 +1765,30 @@ if [ -z "$GREENBOOT" ]; then
 	# value to drift. The SQL travels as an environment variable for the same
 	# reason it does there: nesting three levels of quoting into one podman
 	# argument is how a check ends up silently measuring nothing.
+	#
+	# DISTINCT, AND DEDUPED AGAIN IN THE SHELL, BECAUSE worker_ping HAS A ROW PER
+	# WORKER *NAME* AND THE NAME IS REGENERATED ON EVERY START. Windmill mints
+	# wk-<group>-<host>-<random> at boot and never deletes the old row, so for
+	# the whole freshness window after a restart - including every nightly
+	# podman-auto-update - a lane has TWO fresh rows. The first version of this
+	# check compared the joined output and duly reported the verify lane as
+	# "drifted to [verify verify]", which is a check firing on the thing working.
+	# /api/health/status has the same shape and read workers_alive:4 with two
+	# containers running.
+	#
+	# So it asserts the SET of tag lists per lane, never the row count. The count
+	# is a property of there being one quadlet file per lane, which
+	# containers.units_active already covers.
 	if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -qx windmill-db; then
 		fact agents_worker_lanes ""
 		note agents.worker_lanes "windmill-db is not running, so the worker lanes cannot be read"
 	else
-		lane_sql="select worker_group || '=' || array_to_string(custom_tags, ',') from worker_ping where ping_at > now() - interval '120 seconds' order by worker_group"
+		lane_sql="select distinct worker_group || '=' || array_to_string(custom_tags, ',') from worker_ping where ping_at > now() - interval '120 seconds' order by 1"
 		lanes=$(podman exec -e LANE_SQL="$lane_sql" windmill-db \
 			sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$LANE_SQL"' 2>/dev/null)
-		lane_n=$(printf '%s' "$lanes" | grep -c . || true)
+		lane_n=$(printf '%s\n' "$lanes" | sed -n 's/=.*//p' | sort -u | grep -c . || true)
 		fact agents_worker_lanes "${lane_n:-0}" num
-		verify_tags=$(printf '%s\n' "$lanes" | sed -n 's/^verify=//p')
+		verify_tags=$(printf '%s\n' "$lanes" | sed -n 's/^verify=//p' | sort -u | paste -sd' ' -)
 		if [ "${lane_n:-0}" -eq 0 ]; then
 			# Distinct from "not running", and the distinction is the finding:
 			# containers.healthy is what says a unit is down, and this says the

@@ -549,6 +549,16 @@ nothing points at is one nobody reads.
   `$DATABASE_URL`, because systemd expands `$VAR` in the generated `ExecStart` from
   `EnvironmentFile=` **only**, and `DATABASE_URL` is assembled in `[Container]`, so it would reach
   podman as the empty string.
+- **`worker_ping` HOLDS A ROW PER WORKER *NAME*, AND THE NAME IS REGENERATED ON EVERY START**, so
+  anything that counts rows over-counts for the whole freshness window after a restart - including
+  every nightly `podman auto-update`. Windmill mints `wk-<group>-<host>-<random>` at boot and never
+  deletes the old row; it only goes stale. Measured immediately after a deliberate restart: two
+  containers running, **four** fresh rows, and `/api/health/status` reporting `workers_alive:4`.
+  `agents.worker_lanes` was written the obvious way and duly reported the verify lane as *"drifted
+  to [verify verify]"* - a check firing on the thing working, which is the failure mode that gets a
+  check switched off. It asserts the **set** of tag lists per lane now, never the count; the count
+  is a property of there being one quadlet file per lane and `containers.units_active` already
+  covers it.
 
 ## Two defects in one uCore image
 

@@ -382,6 +382,8 @@ signal read green.
 - **A Windmill worker serves no HTTP**, so its probe is a `psql` query - the only one here that asks
   a second container whether the first is doing its job. A worker that registers nothing leaves no
   unit failed and no container unhealthy; work just queues.
+- **`worker_ping` keeps a row per worker name and the name changes on every start**, so row counts -
+  including `workers_alive` in Windmill's own health endpoint - over-count after a restart.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running
