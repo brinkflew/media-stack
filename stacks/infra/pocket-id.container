@@ -49,14 +49,26 @@ Environment=APP_URL=${POCKETID_APP_URL}
 Environment=TRUST_PROXY=${NET_SUBNET_INGRESS}
 Environment=ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY}
 
-HealthCmd=curl -fsS http://localhost:1411/healthz || exit 1
+# The image's OWN healthcheck, not curl, and that is not a style preference.
+# 2.14.0 removed curl from its Dockerfile, so this probe - unchanged, and passing
+# for twelve days - silently became a dependency on a binary that no longer
+# existed. It exited 127 against an application that was up and serving: the
+# startup gate below burned all 60 retries, Notify=healthy never fired, systemd
+# killed the unit, and podman-auto-update rolled the image back to 2.13.0 - which
+# could then no longer open the database 2.14.0 had just migrated. Nine and a half
+# hours with no sign-on anywhere in the stack, from a probe that was measuring
+# curl rather than Pocket ID. The image has declared this command all along:
+#   HEALTHCHECK CMD ["/app/pocket-id", "healthcheck"]
+# Same shape as gluetun.container, and the same lesson collect-metrics.py's
+# api_get already carries about images that ship only wget.
+HealthCmd=/app/pocket-id healthcheck
 HealthInterval=60s
 HealthTimeout=5s
 HealthStartPeriod=30s
 HealthRetries=3
 # See sonarr.container. Tinyauth is ordered after this one, and Caddy after
 # that, so this unit's start time is the head of the sign-on chain at boot.
-HealthStartupCmd=curl -fsS http://localhost:1411/healthz || exit 1
+HealthStartupCmd=/app/pocket-id healthcheck
 HealthStartupInterval=5s
 HealthStartupRetries=60
 HealthStartupSuccess=1

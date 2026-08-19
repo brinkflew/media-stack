@@ -1733,11 +1733,54 @@ Conclusions from auditing the running host. Do not rediscover these:
     only if the unit fails to **start**, and systemd otherwise calls a container started the moment
     it runs - so a broken-but-running image passes and nothing is restored. Proven by pointing a
     test unit at a deliberately broken image and watching the journal restore the old one.
+    **What it cannot protect is anything that migrates its datastore on start** - see the entry
+    two below, where this bullet is the direct cause of the longest outage recorded here.
   - **auto-update does not trigger a `.build` unit.** Caddy is `AutoUpdate=local`, which notices a
     new image without producing one, and a `.build` unit only runs when its image is absent - so
     without `home-server-caddy-build.timer` Caddy alone would never update. That unit also needs
     `Pull=newer` in `caddy.build`, because podman build's default pull policy is `missing` and it
     would otherwise reuse a stale local `caddy:2` for ever while succeeding in four seconds.
+- **A ROLLBACK RESTORES THE IMAGE AND CANNOT RESTORE THE DATA, so `Notify=healthy` protects nothing
+  that migrates its datastore on start.** That bullet is the safety net this whole tag-following
+  design rests on, and on **2026-08-19** it was the direct cause of a nine-and-a-half-hour outage of
+  the service gating **every** sign-on here. The sequence is worth having in full, because every
+  step in it is individually correct:
+  - **00:14:50** auto-update pulls Pocket ID **2.14.0**. It starts, **migrates its SQLite schema** to
+    `20260814120000`, logs `Server listening`, registers its cron jobs and completes a SCIM sync -
+    i.e. it is up and serving.
+  - **The startup probe never passes.** 2.14.0 **removed curl from its Dockerfile** (*"remove
+    unnecessary curl dependency from Dockerfile"*, commit `987d1a8`) and the quadlet probed with
+    `curl -fsS http://localhost:1411/healthz`, so it exited **127**. Sixty retries at 5s expire,
+    `Notify=healthy` never fires, systemd kills the unit at **5min 12.9s** -
+    `Failed with result 'protocol'`.
+  - **00:20:03** auto-update does exactly what it is designed to do and re-tags **2.13.0** onto `:v2`.
+  - **00:20:04 onwards** 2.13.0 refuses the migrated database - *"database version (20260814120000)
+    is newer than application version (20260802120000), downgrades are not allowed"* - and exits 1
+    every five seconds. Restart counter **6108** by the time it was found, in a browser, as a 502.
+
+  Four things follow, and the first is the general one:
+
+  - **The rollback is a safety net for STATELESS upgrades only.** Restoring an image cannot
+    un-migrate a database, so for anything with forward-only migrations a rollback converts a failed
+    start into a **permanent** deadlock that no restart clears. Pocket ID, the \*arr apps, Jellyfin
+    and Tdarr all migrate on start. Nothing here detects it and nothing can undo it: the remedy is
+    always to go *forward* to the version matching the schema, never back.
+  - **`ALLOW_DOWNGRADE=true`, which the error message itself suggests, is the WRONG lever.** It does
+    not restore the old version's compatibility - it lets that version destructively rewrite the
+    schema.
+  - **A HEALTH PROBE THAT SHELLS OUT TO `curl` IS AN UNDECLARED DEPENDENCY ON A BINARY THE IMAGE
+    MERELY HAPPENS TO SHIP**, and its absence is indistinguishable from the application being down.
+    This is the **second** time an image dropped curl here - `bin/collect-metrics.py`'s `api_get`
+    already falls back to wget because gluetun and jellyseerr ship only that. **Prefer the image's
+    own declared `HEALTHCHECK`**, which `skopeo inspect --config` reads without pulling. Pocket ID
+    has shipped `CMD ["/app/pocket-id", "healthcheck"]` all along and the quadlet was overriding it
+    with something strictly worse; `gluetun.container` already had the right shape. **Ten other
+    quadlets still probe with `curl` and eight with `wget`.**
+  - **Detection worked, and is not what failed.** `containers.units_active` - added the day before,
+    for the Caddy outage below - reported `quadlet service(s) NOT running: pocket-id.service`
+    `(activating)`, and `CheckFailing` went **critical in Alertmanager at 00:55:02Z** and stayed
+    there. The gap was between the notification and anyone acting on it, which is a different
+    problem from the ones this file usually records.
 - **The nightly prune does not eat the rollback.** The shipped `podman-auto-update.service` runs
   `podman image prune -f` afterwards, but a superseded image keeps its repository digest and is
   therefore not *dangling* - verified: every pre-update image survived. Only `prune -a` would remove
