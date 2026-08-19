@@ -442,7 +442,15 @@ if [ -x "$QUADLET" ]; then
 		# that is valid here. A linter that will not say what it found sends
 		# you to reproduce its own run by hand.
 		bad "quadlet -dryrun failed"
-		printf '%s\n' "$qout" | grep -vE '^$' | head -20 | sed 's/^/    /'
+		# FILTER THE CHATTER BEFORE TRUNCATING, not after. The generator logs
+		# "Loading source unit file" for all 35 units and the real complaint
+		# comes last, so a plain `head` shows nothing but the preamble - and
+		# closing the pipe early makes both grep and printf report a broken
+		# pipe, which then looks like the failure. That is what the first CI
+		# run produced.
+		printf '%s\n' "$qout" \
+			| grep -avE '^$|Loading source unit file' \
+			| tail -20 | sed 's/^/    /'
 	fi
 else
 	skip "no quadlet generator at $QUADLET"
