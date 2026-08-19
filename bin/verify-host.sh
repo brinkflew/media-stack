@@ -1546,7 +1546,7 @@ if [ -z "$GREENBOOT" ]; then
 	done
 
 	# THE PROBE THAT MEASURES ITS OWN TOOLING RATHER THAN THE APPLICATION.
-	# On 2026-08-18 Pocket ID 2.14.0 dropped `curl` from its Dockerfile. The
+	# On 2026-08-19 Pocket ID 2.14.0 dropped `curl` from its Dockerfile. The
 	# quadlet's HealthCmd was `curl -fsS http://localhost:1411/healthz`, so the
 	# probe exited 127 against an application that was up, serving, and had
 	# already completed a SCIM sync. The startup gate burned all 60 retries,

@@ -107,21 +107,24 @@ RestartSec=5
 # 900s AND NOT 300s, AND ONLY ON THE TEN QUADLETS THAT CARRY A DATABASE - bazarr,
 # jellyfin, jellyseerr, ntfy, pocket-id, prowlarr, radarr, sonarr, tdarr-server,
 # tinyauth. The list is not a judgement call: it is what bin/snapshot-databases.sh
-# finds when it walks config/ by magic bytes.
+# finds when it walks config/ by magic bytes. The stateless services keep 300s,
+# because they have nothing to migrate and nothing to deadlock.
 #
-# THE 300s CEILING BRICKED POCKET ID TWICE. Its new image starts, migrates the
-# schema, and is still migrating when the gate expires. Notify=healthy never
-# fires, podman auto-update rolls the image back - and the OLD image then refuses
-# to open the database the new one has already migrated: "failed to run
-# migrations: database version (20260814120000) is newer than application".
-# Restart=always then loops it. 9.5 hours with no sign-on on 2026-08-18, and
-# 9h35m and 6,224 restarts on 2026-08-19, the night after the first fix landed.
+# THIS IS A PRECAUTION, NOT A FIX FOR AN OBSERVED FAILURE, and the distinction
+# matters because the obvious reading of the Pocket ID outage is the wrong one.
+# On 2026-08-19 the gate did expire - but nothing was slow. 2.14.0 migrated and
+# was serving well inside 300s; its probe shelled out to a curl the image had
+# stopped shipping and exited 127, so sixty retries measured nothing sixty times.
+# That is fixed in pocket-id.container by probing the image's own binary.
 #
-# THE GATE HAS TO OUTLAST THE MIGRATION, because once it expires the irreversible
-# work is already done and the rollback has stopped being a safety net and become
-# the outage. This budget is free in normal use - a cold start with no migration
-# is ~1s, measured on pocket-id - and exists entirely for the one start after an
-# image bump. The stateless services keep 300s: they have nothing to migrate.
+# WHAT THE INCIDENT EXPOSED IS THAT THIS NUMBER HAD NEVER BEEN SIZED AGAINST
+# ANYTHING. It was chosen once for start-up latency and copied to twenty units,
+# and for a service that migrates on start the consequence of it expiring is not
+# a restart - it is the deadlock in docs/known-state.md. The migration has
+# already run by then, so podman restores an image that cannot open its own
+# database, and no restart clears it. A cold start with no migration is ~1s
+# measured on pocket-id, so this budget is free in normal use and exists
+# entirely for the one start after an image bump.
 TimeoutStartSec=1200
 
 # A ceiling, not a tuning knob: high enough never to bite in normal use,

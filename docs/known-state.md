@@ -374,6 +374,53 @@ nothing points at is one nobody reads.
   is wrong in both directions at once. The property lives on a **topic** path, where deny-all
   answers 403 to anonymous including for a topic that does not exist. Measured: `/` -> 200,
   `/home-server/json` -> 403, `/verify-host-probe/json` -> 403.
+- **`ContainerRestartLoop` COULD NOT FIRE, AND HAD NEVER BEEN ABLE TO.** It read
+  `home_server_container_restarts_total`, which the collector took from podman's per-container
+  `Restarts` field - and a quadlet **recreates the container on every unit restart**, so the counter
+  resets each time round a loop rather than accumulating. Measured against the one event it was
+  written for: through all 6,224 of Pocket ID's restarts on 2026-08-19 the series read **0**, for
+  nine and a half hours. The rule was `increase(...[1h]) > 5` against a gauge that is structurally
+  pinned at zero. `source_units()` now reads systemd's `NRestarts`, which belongs to the **unit** and
+  therefore outlives the containers it creates, and the rule is `UnitRestartLoop`. The old series is
+  kept, because it does say one thing the new one cannot - a container restarting *without* its unit
+  restarting - but its help text no longer claims to be the restart count. **The general shape: a
+  counter that resets is not a counter, and the reset condition here was the exact condition being
+  measured.**
+- **`Restart=always` AT `RestartSec=5` CANNOT REACH SYSTEMD'S START LIMIT, SO NO UNIT HERE EVER GAVE
+  UP.** The shipped ceiling is 5 starts in 10s; five-second spacing produces at most two, so the
+  limit was arithmetically unreachable on all 23 quadlets and none of them set their own. Pocket ID
+  oscillated between `failed` and `activating` 6,224 times over nine and a half hours rather than
+  coming to rest. **This was NOT a detection failure and must not be recorded as one** -
+  `containers.units_active` and `containers.failed_units` both went FAIL within the hour and stayed
+  there, and `CheckFailing` went critical. What was missing was an end state: `StartLimitIntervalSec=600`
+  with `StartLimitBurst=20` now stops it after ~100 seconds, which is what makes `home_server_unit_state`
+  worth reading, and a slow dependency at boot still gets twenty attempts before it counts.
+- **ALERTMANAGER WAS A DESTINATION AND NEVER A SCRAPE TARGET, SO THE LAST HOP TO THE PHONE WAS
+  UNMEASURED.** It appears in `prometheus.yml` under `alerting:`, which makes it somewhere to *send*
+  alerts - a different relationship from being collected from, and the two look alike enough in that
+  file that nobody noticed. The consequence is precise: `alertmanager_notifications_failed_total` is
+  exactly the 401-against-the-read-only-mount that `alertmanager.yml` warns about **in its own
+  comments**, and it existed nowhere anything could read it. `AlertDeliveryFailing` covers
+  Prometheus -> Alertmanager and was the only hop watched, of four.
+  **It is also why 2026-08-19 cannot be reconstructed.** Four critical alerts fired continuously
+  from 01:00 to 09:30; `ntfy-alertmanager` does not log the webhooks it receives, so there is no
+  record on this host of whether a single page was delivered - and both counters that could have
+  said so were reset by a restart before anyone looked. Now scraped, with `AlertBridgeFailing` and
+  `metrics.alert_bridge`, plus a `Watchdog` that always fires at a 24h repeat so a **silent** phone
+  means a broken chain rather than a quiet stack.
+- **THE ONE JOB THAT PROVES THE BACKUPS RESTORE WAS THE ONE JOB WITH NO RECORD.** Every other leg
+  writes a marker and `verify-host.sh` grades it - `local_at`, `offsite_at`, `offsite_pruned_at`,
+  `offsite_policy_ok_at`, `tsdb_snapshot_at`, `pre_update_db_at`. `bin/verify-restore.sh` wrote
+  nothing, so "nobody has run this since March" and "this ran last night" were the same observable
+  state. CLAUDE.md states the rule in the abstract - an automated job needs a durable record of its
+  last success - and this was the job it had never been applied to. **`RestoreNeverProven` keys on
+  the CHECK and not on the marker's age**, because a staleness rule needs the series to exist and the
+  state that has to be covered is a marker never written at all.
+  **Running it immediately found something.** `bin/verify-restore.sh` with no arguments verifies the
+  WORKSTATION's copy at `~/backups/home-server` - the third copy, written by hand by
+  `bin/backup-config.sh` - and its newest snapshot was **2026-08-15**, four days old and predating
+  ntfy, so it FAILed on a missing `ntfy/auth.db`. Nothing tracks the freshness of that third copy:
+  `offsite_pruned_at` records the workstation's *prune*, and there is no marker for the copy itself.
 
 ## Two defects in one uCore image
 

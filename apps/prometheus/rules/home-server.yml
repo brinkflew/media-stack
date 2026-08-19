@@ -189,7 +189,7 @@ groups:
   - name: battery
     rules:
       - alert: CheckFailing
-        # ONE RULE COVERS ALL 64 CHECKS AND EVERY FUTURE ONE, because a new
+        # ONE RULE COVERS ALL 92 CHECKS AND EVERY FUTURE ONE, because a new
         # check joins home_server_check_status automatically. The id label is
         # stable by charter - bin/verify-host.sh guarantees it and lint-repo.sh
         # asserts uniqueness - while the prose is explicitly not, which is why
@@ -422,7 +422,7 @@ groups:
         # restores the image and cannot un-migrate the database, so
         # bin/pre-update-snapshot.sh runs as ExecStartPre= on
         # podman-auto-update.service at ~00:00 - 21 hours newer than the 03:00
-        # backup, which is the gap Pocket ID fell through on 2026-08-18.
+        # backup, which is the gap Pocket ID fell through on 2026-08-19.
         #
         # THE QUIET FAILURE THIS IS FOR: the drop-in not being wired at all, on
         # a rebuilt host where host/systemd/README.md's symlink loop was not

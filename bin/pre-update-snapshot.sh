@@ -9,7 +9,7 @@
 # the IMAGE and cannot un-migrate the DATABASE, so for every application here
 # that migrates a schema on startup the safety net is itself the failure mode.
 #
-# It is not hypothetical. On the night of 2026-08-18 Pocket ID 2.14.0 started,
+# It is not hypothetical. In the early hours of 2026-08-19 Pocket ID 2.14.0 started,
 # migrated its SQLite schema, and failed its health probe - because the probe
 # shelled out to `curl` and 2.14.0 had stopped shipping it. auto-update did
 # exactly what it is designed to do and rolled the image back to 2.13.0, which

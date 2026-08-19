@@ -424,7 +424,12 @@ say "Quadlets"
 # ------------------------------------------------------------------------------
 # Catches syntax errors, NOT unset variables - systemd expands an unset ${VAR}
 # to an empty string and logs it at info level, so those only surface at runtime.
-QUADLET=/usr/libexec/podman/quadlet
+# Overridable, because this path is packaging-dependent: it is where Fedora and
+# uCore put the standalone generator, and a CI runner on another distribution
+# may not agree. NOT the podman-user-generator path - see CLAUDE.md, the wrong
+# one fails with "No such file or directory" and reads as unavailable rather
+# than as misspelled.
+QUADLET="${QUADLET:-/usr/libexec/podman/quadlet}"
 if [ -x "$QUADLET" ]; then
 	if QUADLET_UNIT_DIRS="$PWD/stacks/common:$PWD/stacks/torrent:$PWD/stacks/media:$PWD/stacks/infra" \
 		"$QUADLET" -dryrun -user >/dev/null 2>&1; then

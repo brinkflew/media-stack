@@ -30,10 +30,10 @@ Description=Pocket ID
 # A UNIT THAT CANNOT START MUST EVENTUALLY SAY SO. Restart=always with
 # RestartSec=5 spaces attempts ~5s apart, and systemd's shipped ceiling is 5
 # starts in 10s - arithmetically unreachable at that spacing, so no quadlet here
-# could ever exhaust it. Pocket ID restarted 6,224 times between 00:20 and 09:55
-# on 2026-08-19 and never settled: the unit oscillated between failed and
-# activating for nine and a half hours, burning CPU and journal, because nothing
-# told it to stop.
+# could ever exhaust it. During the 2026-08-19 outage this unit restarted 6,224
+# times between 00:20 and 09:55 and never settled: it oscillated between failed
+# and activating for nine and a half hours, burning CPU and journal, because
+# nothing told it to stop.
 #
 # THIS IS NOT A DETECTION FIX AND MUST NOT BE SOLD AS ONE. containers.failed_units
 # and containers.units_active both caught that outage within the hour and stayed
@@ -91,29 +91,31 @@ Environment=ENCRYPTION_KEY=${POCKETID_ENCRYPTION_KEY}
 # Same shape as gluetun.container, and the same lesson collect-metrics.py's
 # api_get already carries about images that ship only wget.
 #
-# THAT FIX WAS CORRECT AND IT HAPPENED AGAIN THE NEXT NIGHT, for a different
-# reason with an identical ending. On 2026-08-19 the probe worked; the new image
-# simply had not FINISHED. It logged "Connected to database" and "Found legacy
-# application image that will be re..." at 00:14:51, was still working at
-# 00:20:03, and the 300s startup gate expired underneath it - "Failed with result
-# 'protocol'". Rollback to 2.13.0, which could not open the migrated database,
-# 6,224 restarts, and no sign-on until 09:55. Nine hours thirty-five minutes.
+# THE GATE BELOW IS 900s AND NOT 300s, AND THAT IS A PRECAUTION RATHER THAN A
+# FIX FOR THE ABOVE. Nothing on 2026-08-19 was slow: 2.14.0 migrated, logged
+# `Server listening` and was serving well inside the budget. The probe simply
+# could not measure it, and the fix for that is the line below this comment.
 #
-# So there are two distinct ways to burn this gate - a probe that cannot measure
-# the application, and an application that legitimately needs longer than the
-# budget - and only the first was fixed in August. The gate is now 900s; see
-# sonarr.container for why that number and why only the ten services with a
-# database get it.
+# What the incident DID expose is that the gate protecting a service which
+# migrates on start had never been sized against anything. Every quadlet carried
+# the same 5s x 60, chosen once for start-up latency, and the consequence of it
+# expiring is not "the unit restarts" - it is the deadlock in docs/known-state.md:
+# the migration has already run, so restoring the old image restores something
+# that cannot open its own database, and no restart ever clears it. A cold start
+# with no migration is ~1s here, so the extra budget costs nothing in normal use
+# and exists entirely for the one start after an image bump. See
+# sonarr.container for the list of ten and why only they get it.
 #
-# IF IT HAPPENS AGAIN, THE ROLLBACK IS NOT THE REPAIR - the database is. The
-# restore point is taken by bin/pre-update-snapshot.sh as ExecStartPre= on
+# IF THE DEADLOCK EVER HAPPENS, THE ROLLBACK IS NOT THE REPAIR - the database is,
+# and the way out is FORWARD to the version matching the schema, never back.
+# bin/pre-update-snapshot.sh takes the restore point as ExecStartPre= on
 # podman-auto-update.service, ~21 hours newer than the 03:00 backup:
 #   systemctl --user stop pocket-id
 #   cp ~/.cache/home-server/pre-update-db/pocket-id/pocket-id.db \
 #      ${DOCKER_VOLUME_CONFIG}/pocket-id/pocket-id.db
 #   systemctl --user start pocket-id
-# Pulling the NEWER image again also works and is usually faster, because the
-# schema it refuses to downgrade to is the one it wrote itself.
+# Re-pulling the NEWER image is usually faster and is the same idea: the schema
+# it refuses to downgrade to is the one it wrote itself.
 HealthCmd=/app/pocket-id healthcheck
 HealthInterval=60s
 HealthTimeout=5s

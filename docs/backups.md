@@ -255,3 +255,29 @@ change so it skips WAL recovery entirely - true of a restored snapshot, and it t
 repository, both age private keys and every restic password used to live only there. The server's
 copies are in sops; the rest is why **the age keys and both restic passwords must be in the password
 manager** - off-site backups you cannot decrypt are not backups.
+
+**None of that was recorded anywhere until 2026-08-19, which made it unfalsifiable.** Every other leg
+here writes a marker into `~/.cache/home-server/backup-state` and `bin/verify-host.sh` grades it for
+staleness. `bin/verify-restore.sh` wrote nothing at all - so "this ran last night" and "nobody has
+run it since March" were the same observable state, on the one job whose entire purpose is to turn an
+assumption into a measurement. It now writes `restore_verified_local_at` or
+`restore_verified_offsite_at` over SSH, exactly as `bin/backup-offsite.sh` already does for
+`offsite_pruned_at`, and **only on success** - a failed verification leaves the previous timestamp to
+go stale rather than recording a run that proved nothing.
+
+**Two keys and two ceilings, 30 days and 90.** The local repository sits on the same disk as
+`config/`, so proving it restores says nothing about surviving that disk; a single shared marker
+would let a cheap monthly local run stand in for an off-site copy nobody had ever tested. The
+off-site ceiling is the **longer** of the two only because that verification pulls data back across
+the network and costs egress - it is the more important of the pair, not the less. `RestoreNeverProven`
+alerts on either, and keys on the **check** rather than on the marker's age, because a staleness rule
+needs the series to exist and the state it has to cover is a marker that was never written.
+
+**`--repo local` means the WORKSTATION's copy, and running it for the first time found that copy four
+days stale.** There are three repositories, not two: the server's nightly one at
+`/var/backups/home-server`, the off-site, and the third copy at `~/backups/home-server` that
+`bin/backup-config.sh` writes **by hand from the workstation**. That third copy's newest snapshot was
+2026-08-15, taken before ntfy existed, so the verification failed on a missing `ntfy/auth.db` - the
+alerting accounts, whose loss is invisible until a phone quietly stops authenticating. Nothing tracks
+its freshness: `offsite_pruned_at` records the workstation's *prune*, and there is no marker for the
+copy itself. That gap is named here rather than closed.

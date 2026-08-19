@@ -52,7 +52,7 @@ are load-bearing and several were paid for in outages.
 | `docs/backups.md` | the three copies, the append-only off-site key, and why a backup is not proven until restored |
 | `docs/dashboard.md` | the Vue application, its five sources, and what it may and may not assert |
 | `docs/repo-conventions.md` | `config/` vs `apps/`, how a file reaches a container, ASCII, `bin/lint-repo.sh` |
-| `docs/known-state.md` | the sixty-four conclusions from auditing the running host |
+| `docs/known-state.md` | the seventy-four conclusions from auditing the running host |
 
 **What stays here is what has to be known BEFORE touching anything**: what this is, how a change
 reaches the server, secrets, the commands, and the known-state index below. Everything else is one
@@ -272,7 +272,7 @@ podman run --rm -v "$PWD/apps/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
 
 ## Known state
 
-**The sixty-four conclusions from auditing the running host live in `docs/known-state.md`.** They
+**The seventy-four conclusions from auditing the running host live in `docs/known-state.md`.** They
 moved out of this file on 2026-08-19, when it passed the character budget that decides what is
 loaded into context at all - so the choice was not which paragraphs to keep, it was whether the file
 carrying them stayed loadable. Nothing was rewritten or dropped; the section was lifted whole.
@@ -353,6 +353,14 @@ signal read green.
 - **Caddy was down for 35 minutes and three checks looked straight at it**: a dependency failure is
   `inactive`, not `failed`, and a container that never started is absent rather than unhealthy.
 - `routes.ntfy` asked for `/`, ntfy's public web UI, so it was wrong in both directions at once.
+- **`ContainerRestartLoop` read a counter that resets on every restart**, so it could never fire -
+  0 through all 6,224 of Pocket ID's restarts. Systemd's `NRestarts` is the one that survives.
+- **`Restart=always` at `RestartSec=5` cannot reach systemd's 5-in-10s limit**, so no unit here ever
+  gave up. Detection was never the problem; an end state was.
+- **Alertmanager was a destination and never a scrape target**, so three of the four hops to the
+  phone were unmeasured - including the 401 its own config file warns about.
+- **The one job that proves the backups restore was the one job with no record**, and running it
+  found the workstation's third copy four days stale.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running
@@ -488,7 +496,7 @@ Remaining, in order:
    `bin/collect-metrics.py`, at `metrics.avanserv.com`. See `docs/observability.md`. That closes the other half of
    what a dashboard needs: `status.json` says what is true now, and the store says when it stopped
    being true. **Everything that list named as "still to come" landed the same day**: GPU, sensors
-   and SMART, the application sources over `podman exec`, all 64 checks as `home_server_check_status`
+   and SMART, the application sources over `podman exec`, all 92 checks as `home_server_check_status`
    series, and the TSDB snapshot in both backup scripts. **cAdvisor is the one item that was dropped
    rather than done** - the collector has to read the same cgroup files anyway for the four numbers
    cAdvisor does not export, so a second container would have been a second source for one truth.

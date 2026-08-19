@@ -329,3 +329,37 @@ webhook password on `/etc/alertmanager` - the read-only `apps/` mount, where `Ex
 write it - while the rendered file sat in `/alertmanager`. Every container healthy, both configs
 `SUCCESS`, Prometheus discovering the Alertmanager, and every notification failing with a 401
 recorded nowhere but Alertmanager's own log. **Fire a real alert and look for it at the other end.**
+
+**The chain is four hops and only the first one was watched.** Prometheus -> Alertmanager ->
+ntfy-alertmanager -> ntfy -> phone. `AlertDeliveryFailing` reads
+`prometheus_notifications_errors_total`, which covers Prometheus handing an alert to Alertmanager and
+nothing after it - and the 401 above happens on the *third* hop, where the credential is. The reason
+it went unnoticed is worth stating plainly, because the same shape will recur: **Alertmanager appears
+in `prometheus.yml` under `alerting:`, which makes it a destination rather than a scrape target.** It
+was in that file, it was reachable, it was working - and none of its counters were being collected.
+
+It is also why 2026-08-19 cannot be reconstructed. Four critical alerts fired continuously from 01:00
+to 09:30, and `ntfy-alertmanager` does not log the webhooks it receives - so nothing on this host can
+say whether a single page was delivered, and both counters that could have answered were reset by a
+restart before anyone looked. `AlertBridgeFailing` and `metrics.alert_bridge` close that, and
+`metrics.alert_bridge` deliberately reports a **missing** series as WARN rather than as zero: on a
+host where something is wrong, "the series is absent" is the likeliest state and the one that must
+never read as healthy.
+
+**The `Watchdog` is the only rule here that proves the chain end to end, and it does so by always
+firing.** Every other rule demonstrates the chain works by arriving; none of them can distinguish a
+silent phone that means "nothing is wrong" from a silent phone that means "the notifier is broken".
+The Watchdog is `vector(1)`, routed on `severity: heartbeat` at `repeat_interval: 24h`, rendered by
+the bridge at ntfy priority 2 - visible in the notification shade, no sound, once a day. **Its
+absence is the signal, which makes a human the detector**, and that is genuinely weaker than every
+other rule in the file. The stronger form is an external cron-monitor holding a URL for this host;
+that was not wanted, and the trade is recorded here rather than implied.
+
+**Unit state is collected separately from container state, and the difference is not cosmetic.**
+`source_units()` reads `NRestarts`, `ActiveState` and `SubState` for every quadlet unit, enumerated
+from the generator directory rather than from `podman ps` - because a container that is **gone** has
+no podman row, which is precisely the case worth reporting. `home_server_container_restarts_total`
+still exists and is still collected, but it is not the one to alert on: it comes from podman's
+per-container `Restarts`, which resets whenever the container is recreated, and a quadlet recreates
+on every restart. It read 0 through 6,224 consecutive restarts. `home_server_unit_restarts_total` is
+systemd's own counter, which belongs to the unit and therefore survives.

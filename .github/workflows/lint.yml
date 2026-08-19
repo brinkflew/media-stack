@@ -1,0 +1,74 @@
+# ==============================================================================
+# The gate that does not depend on remembering
+# ------------------------------------------------------------------------------
+# bin/lint-repo.sh has gated ASCII, exec bits, shellcheck, check-id uniqueness,
+# the dashboard's topology and path tables, the sops recipient list and a quadlet
+# dry-run since it was written - and it ran only when someone chose to run it, on
+# a repository whose commits reach the server by `git pull`. A bad quadlet was
+# always one forgotten command away from a failed daemon-reload on the host.
+#
+# EVERY SKIP IS A FAILURE HERE, and that is the one thing this workflow adds
+# beyond "run the script". Each of the linter's eight legs degrades to SKIP when
+# its tool or its input is missing - correct on a workstation, where a missing
+# shellcheck should not block a commit, and useless in CI, where a silent skip
+# looks exactly like a pass. The runner installs everything, so anything that
+# skips here means this workflow has stopped gating something and nobody would
+# otherwise be told.
+# ==============================================================================
+name: lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck and python3 are already on the image; podman is what brings
+      # the quadlet generator, and it is the only reason this step exists.
+      - name: Install the linter's tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck podman
+
+      # The generator lives at a packaging-dependent path. Find it rather than
+      # assuming, and fail loudly if it is not there - the alternative is the
+      # leg quietly skipping, which is the thing this workflow exists to stop.
+      - name: Locate the quadlet generator
+        run: |
+          for c in /usr/libexec/podman/quadlet /usr/lib/podman/quadlet; do
+            if [ -x "$c" ]; then echo "QUADLET=$c" >> "$GITHUB_ENV"; exit 0; fi
+          done
+          echo "no quadlet generator found; searched:" >&2
+          find /usr -name quadlet -type f 2>/dev/null >&2
+          exit 1
+
+      - name: bin/lint-repo.sh
+        run: |
+          set -o pipefail
+          ./bin/lint-repo.sh 2>&1 | tee lint.out
+
+      - name: No leg may have been skipped
+        run: |
+          if grep -q 'SKIP' lint.out; then
+            echo "::error::a lint leg was SKIPPED - this workflow is no longer gating it"
+            grep 'SKIP' lint.out
+            exit 1
+          fi
+          echo "all legs ran"
+
+      # A malformed rules file makes Prometheus' reload FAIL and leaves the old
+      # rules running, so this does not take the stack down - it silently stops
+      # deploying the change, which is worse. Same for Alertmanager's routing.
+      - name: Prometheus rules and Alertmanager routing
+        run: |
+          podman run --rm -v "$PWD/apps/prometheus/rules:/r:ro" --entrypoint sh \
+            quay.io/prometheus/prometheus:v3 -c 'promtool check rules /r/*.yml'
+          podman run --rm -v "$PWD/apps/alertmanager:/a:ro" --entrypoint amtool \
+            quay.io/prometheus/alertmanager:v0 check-config /a/alertmanager.yml
