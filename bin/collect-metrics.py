@@ -1231,6 +1231,16 @@ GREENBOOT_STATES = {"green": 0, "red": 1}
 # labels on one info series, so a new OS version costs one series a month
 # instead of one per sample.
 FACT_INFO_KEYS = ("booted_version", "staged_version", "driver_version")
+# FACTS THIS FILE ALREADY PUBLISHES ITSELF, and the bridge below must not
+# republish. `home_server_` + the fact key is the metric name, so a fact named
+# after an existing series is a DUPLICATE SAMPLE in one exposition file - and
+# the two writers here disagree by construction, because the battery is hourly
+# and source_containers runs every 30 seconds. Prometheus tolerates a duplicate
+# whose value matches and rejects THE WHOLE SCRAPE when it does not, so the
+# failure waits for the first phase that starts and ends between two batteries
+# and then takes every metric on the host down with it. Found by reading the
+# exposition rather than by the check, which stayed green throughout.
+FACT_OWNED_ELSEWHERE = ("containers_ephemeral",)
 
 
 def _epoch(stamp):
@@ -1276,6 +1286,8 @@ def source_status(m):
 
     for key, value in facts.items():
         if key in FACT_INFO_KEYS or key == "greenboot_result":
+            continue
+        if key in FACT_OWNED_ELSEWHERE:
             continue
         if value is None:
             # A null fact is ABSENT, never zero. The substrates fail in opposite
