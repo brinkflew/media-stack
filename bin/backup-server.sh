@@ -427,6 +427,16 @@ if [ -z "$DRY" ]; then
 			grep -E '^offsite_policy_ok_at=' "$STATE" 2>/dev/null
 		fi
 		grep -E '^offsite_pruned_at=' "$STATE" 2>/dev/null
+		# WRITTEN BY A DIFFERENT JOB, CARRIED FORWARD BY THIS ONE. The
+		# pre-update snapshot runs as ExecStartPre= on
+		# podman-auto-update.service at ~00:00; this block rewrites the state
+		# file whole at 03:00. Without this line that marker is erased three
+		# hours after it is written, every night - and backup.pre_update_age
+		# would report the pre-update snapshot as having stopped running while
+		# it was in fact running perfectly. Same shape as the off-site keys
+		# above: name every key that has to survive, because the default is
+		# that it does not.
+		grep -E '^pre_update_db_at=' "$STATE" 2>/dev/null
 	} >"$STATE.tmp"
 	mv "$STATE.tmp" "$STATE"
 fi
