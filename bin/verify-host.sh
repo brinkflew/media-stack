@@ -1199,6 +1199,21 @@ if [ -z "$GREENBOOT" ]; then
 	# otherwise block the unattended reboot window, and a reboot does not fix it.
 	# Without this the step could stop working and nothing would ever say so.
 	check_backup_age backup.tsdb_snapshot_age   "metrics snapshot" tsdb_snapshot_at 48 warn
+	# THE RESTORE POINT THE ROLLBACK CANNOT PROVIDE. podman auto-update restores
+	# the image and cannot un-migrate the database, so bin/pre-update-snapshot.sh
+	# runs as ExecStartPre= on podman-auto-update.service at ~00:00 - 21 hours
+	# newer than the 03:00 backup, which is the gap Pocket ID fell through on
+	# 2026-08-18.
+	#
+	# WARN, not FAIL, and 48h to match the updater's own ceiling. Two different
+	# things make this marker go stale and only one of them is this check's
+	# business: if the UPDATER stopped running, update.podman_run already says so
+	# and says it better, and a second FAIL adds nothing but a blocked reboot. The
+	# case this exists for is the quiet one - the updater running normally while
+	# the drop-in is no longer wired, which happens on a rebuilt host where
+	# host/systemd/README.md's symlink loop was not re-run. Then the protection is
+	# gone and everything else still reads green.
+	check_backup_age backup.pre_update_age      "pre-update database snapshot" pre_update_db_at 48 warn
 
 	# ------------------------------------------------------------------------------
 	say checkout "Checkout"
@@ -1232,6 +1247,79 @@ if [ -z "$GREENBOOT" ]; then
 		ok checkout.matches_origin "checkout matches origin"
 	else
 		warn checkout.matches_origin "checkout is not at origin (local ${local_head:0:7}, origin ${remote_head:0:7})"
+	fi
+
+	# THE ONE PIECE OF REAL CONFIGURATION GIT DOES NOT ACTUALLY OWN.
+	# apps/tdarr/flows/ is "a record, not a deployment": Tdarr has no
+	# import-from-disk mechanism, so the flow that decides what happens to every
+	# file in the library lives in its SQLite database and is edited in a GUI.
+	# The export is tracked so a flow can be reviewed and diffed at all - but
+	# nothing re-exported it, so "re-export after any edit" was a thing to
+	# remember rather than a thing enforced, and the copy in git could become
+	# fiction with no signal anywhere.
+	#
+	# THIS BELONGS HERE RATHER THAN IN bin/lint-repo.sh, and that is not
+	# arbitrary. The linter runs on the workstation and Tdarr runs on the
+	# server, so a leg there would have to skip when it cannot reach Tdarr -
+	# which is exactly the shellcheck failure this repository already has a
+	# name for: a check that silently does nothing looks identical to one that
+	# passes. Section `checkout` because the question is the same one this
+	# section already asks - has reality drifted from what git says.
+	#
+	# THE COLLECTION IS FlowsJSONDB. The singular FlowJSONDB answers 200 with an
+	# EMPTY BODY, so a wrong name reads as "no flows" rather than as an error -
+	# the same shape as the VariablesJSONDB note in docs/media-pipeline.md.
+	#
+	# NORMALISED BEFORE COMPARING, because the editor's export and the database
+	# genuinely differ in ways that mean nothing: every edge in the export
+	# carries `animated` and `type: smoothstep` which the database omits, and
+	# node positions move whenever anyone drags a box. Comparing raw would fire
+	# on cosmetics for ever and teach everyone to ignore it.
+	#
+	# ONLY FLOWS TRACKED IN GIT ARE COMPARED. The database also holds the
+	# five-part destructive community flow, deliberately retained as a rollback,
+	# and an unreferenced "Flow 0" - none of which git claims to own.
+	tdarr_drift="" tdarr_missing="" tdarr_checked=0
+	if podman ps --format '{{.Names}}' 2>/dev/null | grep -qx tdarr-server; then
+		flows_json=$(podman exec tdarr-server curl -sf -X POST \
+			-H 'Content-Type: application/json' \
+			-d '{"data":{"collection":"FlowsJSONDB","mode":"getAll"}}' \
+			http://localhost:8266/api/v2/cruddb 2>/dev/null)
+		if printf '%s' "$flows_json" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1; then
+			for ff in "$repo"/apps/tdarr/flows/*.json; do
+				[ -e "$ff" ] || continue
+				tdarr_checked=$((tdarr_checked + 1))
+				fid=$(jq -r '._id // "?"' "$ff" 2>/dev/null)
+				if ! printf '%s' "$flows_json" | jq -e --slurpfile t "$ff" '
+						def norm: {
+							name, priority,
+							plugins: [ (.flowPlugins // [])[] | del(.position) ],
+							edges:   [ (.flowEdges   // [])[] | del(.animated, .type) ]
+						};
+						($t[0]) as $tracked
+						| (map(select(._id == $tracked._id)) | first) as $running
+						| ($running != null) and (($running | norm) == ($tracked | norm))
+					' >/dev/null 2>&1; then
+					if printf '%s' "$flows_json" | jq -e --arg i "$fid" 'any(._id == $i)' >/dev/null 2>&1; then
+						tdarr_drift="$tdarr_drift $fid"
+					else
+						tdarr_missing="$tdarr_missing $fid"
+					fi
+				fi
+			done
+		fi
+	fi
+	fact tdarr_flows_checked "$tdarr_checked" num
+	if [ "$tdarr_checked" -eq 0 ]; then
+		# BEST-EFFORT, LIKE promote-transcoded.py's Tdarr call. If Tdarr is down
+		# or the API changed, this must say "not measured" - reporting "no
+		# drift" because nothing could be read is the failure this check exists
+		# to prevent, wearing a different hat.
+		note checkout.tdarr_flows "Tdarr flows not compared - tdarr-server unreachable or returned nothing"
+	elif [ -z "$tdarr_drift" ] && [ -z "$tdarr_missing" ]; then
+		ok checkout.tdarr_flows "$tdarr_checked tracked Tdarr flow(s) match the running database"
+	else
+		warn checkout.tdarr_flows "Tdarr flow(s) differ from apps/tdarr/flows/:${tdarr_drift}${tdarr_missing:+ (absent from Tdarr:$tdarr_missing)} - re-export from the flow editor, or the copy in git is fiction"
 	fi
 
 	say containers "Containers"
@@ -1330,6 +1418,72 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 	done
 
+	# THE PROBE THAT MEASURES ITS OWN TOOLING RATHER THAN THE APPLICATION.
+	# On 2026-08-18 Pocket ID 2.14.0 dropped `curl` from its Dockerfile. The
+	# quadlet's HealthCmd was `curl -fsS http://localhost:1411/healthz`, so the
+	# probe exited 127 against an application that was up, serving, and had
+	# already completed a SCIM sync. The startup gate burned all 60 retries,
+	# Notify=healthy never fired, systemd killed the unit, and podman auto-update
+	# rolled the image back to 2.13.0 - which could no longer open the schema
+	# 2.14.0 had just migrated. Nine and a half hours with no sign-on anywhere.
+	#
+	# THE FIX FOR POCKET ID DOES NOT GENERALISE, which is why this check exists
+	# rather than a second round of quadlet edits. Pocket ID could adopt the
+	# healthcheck its image declares; measured on 2026-08-19, EIGHTEEN of the
+	# twenty-three quadlets probe with curl or wget and `podman image inspect`
+	# reports NONE for the declared healthcheck of every one of them. There is
+	# nothing to fall back to, so the dependency cannot be removed - only
+	# watched. Same argument as the nightly off-site delete-probe and
+	# logs.healthcheck_events: prove the property by testing it, because nothing
+	# reports it directly.
+	#
+	# WARN, NEVER FAIL. bin/reboot-host.sh refuses to act on a host this battery
+	# calls unhealthy, and a missing probe binary is not something a reboot
+	# fixes - the same rule the Logs, Metrics and Seeding sections all follow.
+	# Because it is a WARN the generic CheckFailing rule (== 3) cannot carry it,
+	# so apps/prometheus/rules/home-server.yml has ProbeBinaryMissing at == 2.
+	# Adding a WARN and expecting the generic rule to notify is the silent half.
+	#
+	# IT READS PODMAN'S RESOLVED HEALTHCHECK, not the quadlet text: that is what
+	# is actually going to run, it survives a unit being edited without a
+	# daemon-reload, and it needs no parsing of Environment= interpolation.
+	probe_missing=""
+	probe_checked=0
+	while read -r pc; do
+		[ -n "$pc" ] || continue
+		# {{.Config.Healthcheck.Test}} renders as a Go slice - [CMD-SHELL cmd].
+		# Strip the brackets and the CMD/CMD-SHELL prefix, then look at the
+		# words that could be a binary. Anything with a slash or a scheme is
+		# either an absolute path the image ships on purpose (pocket-id,
+		# gluetun) or a URL, and neither is the failure mode being watched for.
+		ptest=$(podman inspect "$pc" --format '{{if .Config.Healthcheck}}{{.Config.Healthcheck.Test}}{{end}}' 2>/dev/null)
+		[ -n "$ptest" ] || continue
+		probe_checked=$((probe_checked + 1))
+		for pw in $(printf '%s' "$ptest" | tr -d '[]' | tr '|;&' '   '); do
+			case "$pw" in
+				CMD|CMD-SHELL|NONE|/*|-*|*=*|*://*|'||'|exit|[0-9]*) continue ;;
+			esac
+			# Only the first word of each pipeline segment is a command, and
+			# `command -v` answers for builtins and PATH alike.
+			podman exec "$pc" command -v "$pw" >/dev/null 2>&1 \
+				|| probe_missing="$probe_missing $pc($pw)"
+			break
+		done
+	done <<-EOF
+		$(podman ps --format '{{.Names}}' 2>/dev/null)
+	EOF
+	fact probe_binary_missing "$(printf '%s' "$probe_missing" | wc -w)" num
+	fact probe_binary_checked "$probe_checked" num
+	if [ "$probe_checked" -eq 0 ]; then
+		# Zero from zero containers proves nothing - the same reason
+		# logs.healthcheck_events refuses to pass on an empty host.
+		note containers.probe_binaries "no container declares a health probe - nothing to check"
+	elif [ -z "$probe_missing" ]; then
+		ok containers.probe_binaries "all $probe_checked health probes can run the binary they invoke"
+	else
+		warn containers.probe_binaries "health probe(s) invoke a binary the image no longer has:$probe_missing - the probe will exit 127 against a healthy application and podman auto-update will roll it back; see the Pocket ID entry in docs/known-state.md"
+	fi
+
 	# --------------------------------------------------------------------------
 	# Seeding policy. Whether the 72h floor is actually being enforced.
 	# --------------------------------------------------------------------------
@@ -1376,6 +1530,56 @@ if [ -z "$GREENBOOT" ]; then
 	fact seeding_last_ok_at "${sd_ok:-}"
 	fact seeding_managed "$(sed -n 's/^managed=//p' "$seeding_state" 2>/dev/null | tail -1)" num
 	fact seeding_holding "$(sed -n 's/^holding=//p' "$seeding_state" 2>/dev/null | tail -1)" num
+
+	# --------------------------------------------------------------------------
+	# Torrent client. Whether the disk IO backend is still the one chosen.
+	# --------------------------------------------------------------------------
+	# WHY THIS EXISTS AT ALL. Until 2026-08-19 qBittorrent was pinned to
+	# :libtorrentv1, because libtorrent 2.0 memory-maps torrent data and this
+	# host's media spindle loses 45% of its throughput to a second concurrent
+	# reader. That pin held qBittorrent 5.2.3 against libtorrent 1.2.20 -
+	# published 2025-01-28, with no upstream release in the nineteen months
+	# since, while the 2.0 line shipped three. A performance decision had
+	# quietly become a decision to run frozen code that parses untrusted input
+	# from arbitrary peers.
+	#
+	# The move to 2.0 is safe only because of a SETTING: DiskIOType=2 (Posix)
+	# selects a non-mmap disk IO backend, which is qBittorrent's own answer to
+	# the exact objection the pin was made for. Verified in release-5.2.3,
+	# src/base/bittorrent/sessionimpl.cpp - Posix installs
+	# customPosixDiskIOConstructor, and the whole switch is inside
+	# #ifdef QBT_USES_LIBTORRENT2.
+	#
+	# AND IT LIVES IN GITIGNORED RUNTIME STATE, which is why it is asserted
+	# rather than trusted. config/qbittorrent/ is not in this repository, so a
+	# restore from backup brings back whatever DiskIOType was in the snapshot -
+	# and Default on a 2.0 build is mmap, silently reinstating the behaviour the
+	# pin spent nineteen months of frozen library avoiding. Exactly the class of
+	# the Sonarr download-client host that a restore reverts to `gluetun`.
+	#
+	# WARN, NEVER FAIL, and only when the client actually reports a 2.x build -
+	# on 1.2 the setting is inert and reads 0, so demanding 2 there would fire
+	# for ever on a correct configuration. The numbers come from the marker
+	# bin/apply-seeding-policy.py writes hourly, so this needs no second
+	# credential and no second connection into the pod.
+	say torrent "Torrent client"
+
+	tor_lt=$(sed -n 's/^libtorrent=//p' "$seeding_state" 2>/dev/null | tail -1)
+	tor_dio=$(sed -n 's/^disk_io_type=//p' "$seeding_state" 2>/dev/null | tail -1)
+	fact torrent_libtorrent "${tor_lt:-}"
+	fact torrent_disk_io_type "${tor_dio:-}" num
+	case "${tor_lt:-}" in
+		"")
+			note torrent.disk_io_type "the torrent client's build has not been read - see seeding.run_age" ;;
+		2.*)
+			if [ "${tor_dio:-}" = 2 ]; then
+				ok torrent.disk_io_type "libtorrent $tor_lt with DiskIOType=Posix - no memory-mapped torrent data"
+			else
+				warn torrent.disk_io_type "libtorrent $tor_lt is running with DiskIOType=${tor_dio:-unset}, not 2 (Posix) - torrent data is memory-mapped, which is what the old :libtorrentv1 pin existed to avoid on this spindle; set it with 'json={\"disk_io_type\":2}' to app/setPreferences and restart the pod"
+			fi ;;
+		*)
+			ok torrent.disk_io_type "libtorrent $tor_lt - DiskIOType is inert before 2.0, nothing to assert" ;;
+	esac
 
 	# --------------------------------------------------------------------------
 	# Search sweep. Whether anything is still asking for what is missing.

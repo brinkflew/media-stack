@@ -216,6 +216,38 @@ groups:
             startup, not slow progress. Read the journal rather than waiting -
             the real error scrolls past between restarts.
 
+      - alert: ProbeBinaryMissing
+        # A SECOND WARN THAT HAS TO NOTIFY, for the same reason OsImageStale
+        # does: CheckFailing is `== 3` and containers.probe_binaries is
+        # deliberately a WARN, because bin/reboot-host.sh refuses to act on an
+        # unhealthy battery and a missing probe binary is not something a
+        # reboot fixes.
+        #
+        # THIS IS THE ONE THAT COSTS SIGN-ON IF IT IS MISSED. Pocket ID 2.14.0
+        # dropped `curl`; its probe exited 127 against a healthy application,
+        # Notify=healthy never fired, and podman auto-update rolled the image
+        # back into a schema it could no longer read - nine and a half hours
+        # with no sign-on anywhere in the stack. Eighteen quadlets still probe
+        # with curl or wget and NONE of those images declares a healthcheck of
+        # its own, so the exposure cannot be removed, only watched.
+        #
+        # 1h rather than 30m, and it is not tuning: the condition only bites at
+        # the nightly update, so an hour of grace costs nothing and keeps a
+        # container restarting mid-pull from firing this.
+        expr: home_server_check_status{id="containers.probe_binaries"} == 2
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "A health probe invokes a binary its image no longer ships"
+          description: >-
+            The probe will exit 127 against an application that is up, and
+            podman auto-update will roll the image back on the next nightly
+            run - into a database the newer image may already have migrated.
+            status.json names the container and the binary:
+            `jq -r '.checks[]|select(.id=="containers.probe_binaries")'
+            /var/lib/home-server/status.json`. Fix it before 00:00.
+
   # ===========================================================================
   # Backups
   # ---------------------------------------------------------------------------
@@ -275,6 +307,35 @@ groups:
             Only the metrics history is at risk, not config/ - hence warning.
             A live TSDB cannot be rsynced, so this snapshot is the only way it
             reaches the backup.
+
+      - alert: PreUpdateSnapshotStale
+        # THE RESTORE POINT THE ROLLBACK CANNOT PROVIDE. podman auto-update
+        # restores the image and cannot un-migrate the database, so
+        # bin/pre-update-snapshot.sh runs as ExecStartPre= on
+        # podman-auto-update.service at ~00:00 - 21 hours newer than the 03:00
+        # backup, which is the gap Pocket ID fell through on 2026-08-18.
+        #
+        # THE QUIET FAILURE THIS IS FOR: the drop-in not being wired at all, on
+        # a rebuilt host where host/systemd/README.md's symlink loop was not
+        # re-run. Then the updater runs normally, every container updates, and
+        # the only protection against a bad rollback is silently absent. If the
+        # UPDATER stopped instead, update.podman_run already says so and says
+        # it better.
+        #
+        # 48h to match the updater's own ceiling in bin/verify-host.sh, so one
+        # missed night reads as stale rather than as broken.
+        expr: time() - home_server_backup_pre_update_db_timestamp_seconds > 172800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No database snapshot has been taken before a container update"
+          description: >-
+            An unattended update can no longer be undone: a rollback restores
+            the image and leaves a migrated schema behind it. Check that
+            ~/.config/systemd/user/podman-auto-update.service.d is symlinked to
+            host/systemd/podman-auto-update.service.d and that
+            bin/pre-update-snapshot.sh runs.
 
   # ===========================================================================
   # Degradation

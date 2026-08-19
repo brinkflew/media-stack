@@ -198,15 +198,46 @@ def enforce_global(port, dry_run, verbose):
     if not drift:
         if verbose:
             print("global: share limits already off, action=stop")
-        return []
+        return [], prefs
     changed = ["%s=%s -> %s" % (k, prefs.get(k), v) for k, v in sorted(drift.items())]
     if dry_run:
         print("global: WOULD correct %s" % ", ".join(changed))
-        return changed
+        return changed, prefs
     payload = json.dumps(drift, separators=(",", ":"))
     qbt(port, "app/setPreferences", data="json=" + payload)
     print("global: corrected %s" % ", ".join(changed))
-    return changed
+    return changed, prefs
+
+
+def client_facts(port, prefs):
+    """The two numbers verify-host.sh needs to prove the disk IO backend.
+
+    REPORTED, NOT ENFORCED, which is the opposite of enforce_global above and
+    deliberate. DiskIOType is only read when a session starts, so writing it
+    here would leave the stored value and the running one disagreeing until the
+    next restart - and a checker that silently repairs the thing it measures
+    can never tell you the repair keeps being needed. verify-host.sh WARNs and
+    names the remedy instead.
+
+    Why it is worth measuring at all: qBittorrent moved from libtorrent 1.2 to
+    2.0 on 2026-08-19. 2.0 memory-maps torrent data by default, and this host's
+    media spindle loses 45% of its throughput to a second concurrent reader -
+    which is what the old :libtorrentv1 pin was avoiding. DiskIOType=2 (Posix)
+    selects a non-mmap disk IO backend and is what makes the move safe. It
+    lives in the gitignored config tree, so a restore brings back the default
+    and nothing here would notice. Same class as the Sonarr download-client
+    host that a restore silently reverts to `gluetun`.
+    """
+    facts = {"disk_io_type": str(prefs.get("disk_io_type", ""))}
+    try:
+        build = qbt_json(port, "app/buildInfo")
+        if isinstance(build, dict):
+            facts["libtorrent"] = str(build.get("libtorrent", ""))
+    except QbtError:
+        # Best-effort: an older qBittorrent without the endpoint must not fail
+        # the run whose actual job is share limits.
+        pass
+    return facts
 
 
 def current_limits(tor):
@@ -233,7 +264,7 @@ def apply_limits(port, hashes, limits, dry_run):
     qbt(port, "torrents/setShareLimits", data=data)
 
 
-def write_marker(started, ok, counts):
+def write_marker(started, ok, counts, facts=None):
     """The durable record of a successful run.
 
     A unit exiting 0 is not one: ExecMainExitTimestamp is runtime state that a
@@ -261,6 +292,13 @@ def write_marker(started, ok, counts):
         "max_ratio": str(MAX_RATIO),
         "max_seed_days": str(MAX_SEED_MINUTES // (24 * 60)),
     }
+    # Carried forward when a run could not read them, for the same reason
+    # last_ok_at is: a failed poll must read as stale, never as "the client
+    # reports the default". An empty disk_io_type would look exactly like
+    # DiskIOType=Default, which is the one value being watched for.
+    for key in ("disk_io_type", "libtorrent"):
+        value = (facts or {}).get(key, "")
+        state[key] = value or previous.get(key, "")
     body = "".join("%s=%s\n" % kv for kv in sorted(state.items()))
     try:
         os.makedirs(os.path.dirname(MARKER), exist_ok=True)
@@ -286,9 +324,11 @@ def main():
     started = time.time()
     port = load_env().get("PORT_QBITTORRENT_WEB", "8200")
     counts = {"managed": 0, "holding": 0, "changed": 0}
+    facts = {}
 
     try:
-        enforce_global(port, args.dry_run, args.verbose)
+        _, prefs = enforce_global(port, args.dry_run, args.verbose)
+        facts = client_facts(port, prefs)
         torrents = qbt_json(port, "torrents/info")
         if not isinstance(torrents, list):
             raise QbtError("torrents/info did not return a list")
@@ -315,7 +355,7 @@ def main():
                 apply_limits(port, hashes, want, args.dry_run)
     except QbtError as exc:
         print("apply-seeding-policy: %s" % exc, file=sys.stderr)
-        write_marker(started, False, counts)
+        write_marker(started, False, counts, facts)
         return 1
 
     verb = "would change" if args.dry_run else "changed"
@@ -323,7 +363,7 @@ def main():
           % (counts["managed"], MIN_SEED_SECONDS // 3600, counts["holding"],
              verb, counts["changed"]))
     if not args.dry_run:
-        write_marker(started, True, counts)
+        write_marker(started, True, counts, facts)
     return 0
 
 
