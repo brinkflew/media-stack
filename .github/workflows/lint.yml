@@ -37,17 +37,31 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck podman
 
-      # The generator lives at a packaging-dependent path. Find it rather than
-      # assuming, and fail loudly if it is not there - the alternative is the
-      # leg quietly skipping, which is the thing this workflow exists to stop.
-      - name: Locate the quadlet generator
+      # RUN THE GENERATOR IN THE PODMAN THE SERVER RUNS, not the one the runner
+      # ships. ubuntu-latest carries podman 4.9, which rejects two things the
+      # host accepts and this repository depends on: `Pod=` in a [Container]
+      # group, added in podman 5.0 and used by the whole torrent pod, and a
+      # PublishPort naming an unexpanded ${PORT_*}, which 5.x tolerates because
+      # the value arrives from EnvironmentFile= at start time. Both failed on
+      # the first run of this workflow and neither is a defect in the quadlets.
+      #
+      # quay.io/podman/stable is podman 5.8.4 - the server's exact version - so
+      # this leg now tests against what actually generates these units. The
+      # repository is mounted at the SAME path it occupies on the runner,
+      # because bin/lint-repo.sh builds QUADLET_UNIT_DIRS from $PWD and the
+      # generator has to resolve those paths inside the container.
+      - name: A quadlet generator that matches the server
         run: |
-          for c in /usr/libexec/podman/quadlet /usr/lib/podman/quadlet; do
-            if [ -x "$c" ]; then echo "QUADLET=$c" >> "$GITHUB_ENV"; exit 0; fi
-          done
-          echo "no quadlet generator found; searched:" >&2
-          find /usr -name quadlet -type f 2>/dev/null >&2
-          exit 1
+          sudo tee /usr/local/bin/quadlet >/dev/null <<'SH'
+          #!/bin/sh
+          exec podman run --rm --network=none \
+            -v "$PWD:$PWD:ro" -w "$PWD" \
+            -e "QUADLET_UNIT_DIRS=$QUADLET_UNIT_DIRS" \
+            --entrypoint /usr/libexec/podman/quadlet \
+            quay.io/podman/stable "$@"
+          SH
+          sudo chmod +x /usr/local/bin/quadlet
+          echo "QUADLET=/usr/local/bin/quadlet" >> "$GITHUB_ENV"
 
       - name: bin/lint-repo.sh
         run: |
