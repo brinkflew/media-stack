@@ -1086,8 +1086,17 @@ if [ -z "$GREENBOOT" ]; then
 			if [ -n "$pau_down" ]; then
 				bad update.rollback "the last update run COULD NOT ROLL BACK:$pau_down - still not active; restore the database from ~/.cache/home-server/pre-update-db/ or pull the newer image again, because the rollback is not the repair"
 			else
+				# DOES NOT SAY WHAT TONIGHT WILL DO, and an earlier draft did.
+				# There are two ways this state is reached and they lead
+				# opposite ways: someone went FORWARD to the newer image, in
+				# which case nothing is re-offered, or the old one was repaired,
+				# in which case it is. Telling them apart means asking the
+				# registry, which is what update.policy_count was moved off for
+				# costing three minutes a run. So state the fact and name the
+				# command instead of guessing - a check that overstates is how a
+				# check stops being read.
 				warn update.rollback "the last update run could not roll back$( \
-					printf ' %s' "$pau_broke") - recovered since, but the image that failed will be offered again tonight"
+					printf ' %s' "$pau_broke") - active again since, so this is history rather than an outage; confirm which image won with 'podman inspect <name> --format {{.ImageName}}'"
 			fi
 		elif [ -n "$pau_back" ]; then
 			warn update.rollback "the last update run rolled back:$( \
