@@ -8,8 +8,9 @@
 #
 # Everything not repeated here is in windmill-worker.container - the two things
 # upstream's compose does that must not be copied, why every start logs one
-# benign unshare ERROR, why the probe is a psql query, why SLEEP_QUEUE is 2000,
-# and why the tag must equal windmill-server's.
+# benign unshare ERROR and the equally benign oom_score_adj WARN, why the probe
+# is a psql query, why SLEEP_QUEUE is 2000, why BASE_INTERNAL_URL is absent, and
+# why the tag must equal windmill-server's.
 #
 # ------------------------------------------------------------------------------
 # THE INVARIANT THIS FILE IS NAMED FOR DOES NOT LIVE IN THIS FILE.
@@ -73,7 +74,6 @@ Environment=WORKER_GROUP=verify
 # THE BOOTSTRAP, NOT THE ENFORCEMENT - see the header.
 Environment=WORKER_TAGS=verify
 Environment=DATABASE_URL=postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME}
-Environment=BASE_INTERNAL_URL=http://windmill-server:8000
 Environment=SLEEP_QUEUE=2000
 Environment=RUST_LOG=info
 

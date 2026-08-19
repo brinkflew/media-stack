@@ -117,10 +117,14 @@ Environment=WORKER_GROUP=default
 # Assembled here rather than carried whole in .env - see windmill-server.container
 # for why the password must contain no whitespace or URL-reserved characters.
 Environment=DATABASE_URL=postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME}
-# WHAT A JOB CALLS BACK ON. The default is http://localhost:8000, and in a
-# worker container NOTHING LISTENS THERE - so any flow step using the wmill
-# client would fail with connection refused, at run time, months from now.
-Environment=BASE_INTERNAL_URL=http://windmill-server:8000
+# NO BASE_INTERNAL_URL, AND IT WAS SET HERE UNTIL THE FIRST START SAID
+# OTHERWISE. It is what a running job calls back on, its default is
+# http://localhost:8000, and nothing listens there in a worker container - so it
+# looked required. The worker itself disagrees, in as many words: "BASE_INTERNAL_URL
+# is now unecessary and ignored unless the mode is 'agent', you can remove it."
+# The mode here is `worker`. Shipping it anyway would be a directive that does
+# not do what its name says plus a WARN on every start, which is the same reason
+# ENABLE_UNSHARE_PID is absent above.
 # THE IDLE-COST KNOB, and this fleet runs continuously by decision. The default
 # is 25ms between queue polls, which for a stack that dispatches a handful of
 # jobs a day is a poll loop against Postgres for ever. Measured on this host:
@@ -182,6 +186,14 @@ TimeoutStartSec=360
 # A ceiling, not a tuning knob. Measured rather than guessed: a worker with no
 # job to run sits at 33-55 MB resident, so this is roughly fifteen times idle -
 # headroom for a dependency resolution, not for growth.
+#
+# THE OTHER WARN EVERY START LOGS IS ALSO BENIGN, AND IS AN IMPROVEMENT: "Could
+# not lower worker oom_score_adj from 200 to 0: Permission denied", followed by
+# "Worker oom_score_adj=200, jobs get 1000". Windmill tries to protect itself
+# from the OOM killer and rootless podman refuses, which leaves a worker and its
+# jobs as the PREFERRED victims inside app-agents.slice. That is the right way
+# round - a cgroup OOM picks by badness within the subtree, and the alternative
+# is the kill landing on windmill-db and costing crash recovery. Do not "fix" it.
 MemoryHigh=512M
 MemoryMax=768M
 
