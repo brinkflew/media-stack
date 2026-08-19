@@ -104,6 +104,16 @@ export const NODES: Node[] = [
   { name: "duckdns", role: "dynamic DNS", networks: ["net-egress"] },
 
   { name: "windmill-db", role: "the control plane's database", networks: ["net-agents"] },
+  {
+    name: "windmill-server",
+    role: "the control plane; conduct polls it, it cannot call out",
+    networks: ["net-agents"],
+    // The bind address is written into the mapping deliberately. bin/lint-repo.sh
+    // compares only the text after the last "->", so it cannot see that this
+    // publish is loopback-only - and this string is what a reader sees, both as
+    // the cell and as the tooltip title.
+    publishes: ["127.0.0.1:8300 -> 8000"],
+  },
 ];
 
 /** Members of a segment, in declaration order. */
@@ -120,7 +130,15 @@ export function nodeByName(name: string): Node | undefined {
   return NODES.find((n) => n.name === name);
 }
 
-/** Every host publish in the stack. Two of them, and that is the point. */
-export const PUBLISHED: { node: string; mapping: string }[] = NODES.flatMap((n) =>
-  (n.publishes ?? []).map((mapping) => ({ node: n.name, mapping })),
+/** Every host publish in the stack. Three of them, and they are not alike: two
+ *  face the LAN and are governed by firewalld, and windmill-server's is bound to
+ *  127.0.0.1, which firewalld never sees. isLoopback is what keeps the UI from
+ *  telling the same story about both kinds. */
+export const PUBLISHED: { node: string; mapping: string; isLoopback: boolean }[] = NODES.flatMap(
+  (n) =>
+    (n.publishes ?? []).map((mapping) => ({
+      node: n.name,
+      mapping,
+      isLoopback: mapping.startsWith("127.0.0.1:"),
+    })),
 );

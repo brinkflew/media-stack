@@ -171,7 +171,26 @@ means the hostname on its own reaches nothing. Alertmanager and the bridge get *
 the bridge's Silence button would require one, and that trade was declined. See `docs/observability.md`.
 
 **Almost nothing publishes a host port.** Caddy reaches each service by name over its network, so
-admin ports were a second path in that sign-on did not cover. **Two publishes remain**, each for
-something that must be spoken to without the proxy: Caddy's 80/443, and Jellyfin for LAN clients.
-Gluetun's used to be a third and is gone with its proxies. **Do not add a `ports:` entry for a
-service Caddy can reach by name.**
+admin ports were a second path in that sign-on did not cover. **Two publishes face the LAN**, each
+for something that must be spoken to without the proxy: Caddy's 80/443, and Jellyfin for LAN
+clients. Gluetun's used to be a third and is gone with its proxies. **Do not add a `ports:` entry
+for a service Caddy can reach by name.**
+
+**There is a third publish and it is a different kind of thing, so the rule above needs its
+carve-out spelled out rather than left to be inferred.** `windmill-server` publishes
+`127.0.0.1:${PORT_WINDMILL_HTTP}:8000` - the first service here reachable only from the host.
+Caddy *can* reach it by name over `net-agents`, so on the rule as written this publish looks like a
+violation. It is not, and the justification is not about Caddy at all: **`conduct` runs on the host
+as a `systemd --user` unit**, because no container may reach the podman socket and forking podman is
+the whole of its job, so it cannot join a bridge and cannot be reached by name from one. The
+alternative was a listener on the bridge gateway plus a firewalld hole, which would have given the
+internet-facing container an RPC that spawns `claude`. The arrow is inverted instead: `conduct`
+polls Windmill, and Windmill has no route to the host.
+
+**A loopback publish is not the same object as a LAN one, in two ways that matter.** firewalld never
+sees it - packets to `127.0.0.1` do not traverse the INPUT chain - so it needs no rule in
+`firewall-stack-ports.service` and gets no protection from one either; `host/butane/ucore.bu` is
+untouched by it, which is worth something on a host where Ignition has already run. And
+`bin/lint-repo.sh` cannot tell the two apart: leg 6 compares only the text after the last `:`, so
+`8000` is all it checks. That is why `topology.ts` writes the bind address into the mapping string -
+it is the only place a reader is shown which kind this is.

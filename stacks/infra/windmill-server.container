@@ -1,0 +1,166 @@
+# ==============================================================================
+# windmill-server: the agent control plane
+# ------------------------------------------------------------------------------
+# What runs the pipeline's state machine. `conduct` - a systemd --user unit on
+# the host, because no container may reach the podman socket and forking podman
+# is the whole of its job - POLLS this over a loopback publish and reports back
+# through the same resume URLs the human gates use. The arrow points INWARD and
+# that is the design: Windmill has no route to the host at all, which is what
+# lets its hostname sit on the public internet behind sign-on while the thing
+# that runs `claude -p` stays unreachable from it.
+#
+# PULLED, NOT BUILT, AND THAT REVERSES AN EARLIER DECISION. The plan specified a
+# .build unit adding curl, so the health probe would depend on something this
+# repository declared rather than on what an image merely happens to ship - the
+# Pocket ID argument, and containers.probe_binaries is the check that exists for
+# it. Measured against the registry with skopeo, that reasoning does not apply
+# here: upstream's own Dockerfile installs curl BY NAME, twice, in its final
+# stage (`... ca-certificates wget curl jq ...` and later `curl procps nodejs
+# awscli`), and Windmill's documented deployment leans on it. Wrapping that in a
+# Dockerfile of ours would move the declaration one file closer without making
+# it more true, and the image is 4.24 GB on disk - 4.6x the largest image this
+# host had - so building would hold two of them and pull 1.4 GB a week.
+#
+# :1.792 IS A FLOATING PATCH TAG, WHICH IS NOT THE USUAL MAJOR-TAG RULE BECAUSE
+# UPSTREAM PUBLISHES NO MAJOR. Verified by digest rather than assumed: there is
+# no `1` tag among the 2,198 published; `1.792` and `1.792.2` are the same
+# digest while `1.792.0` is a different one, so this follows patches and stops
+# at the minor. And `latest` is NOT the newest release - it carries an EMPTY
+# org.opencontainers.image.version label and a revision matching no release tag,
+# so the obvious choice is the wrong one here.
+#
+# So patch fixes arrive unattended and a minor bump is a deliberate commit. For
+# a service that runs sqlx migrations against Postgres at every boot that is the
+# right way round - but it means NOTHING ADVANCES THE MINOR BUT A HUMAN, which
+# is why stacks/README.md carries the row saying so.
+#
+# Image:  https://github.com/windmill-labs/windmill/pkgs/container/windmill
+# See:    https://www.windmill.dev/docs/advanced/self_host
+# ==============================================================================
+
+[Unit]
+Description=Windmill server, the agent control plane
+
+# ORDERING ONLY, NEVER Wants=. windmill-db carries Notify=healthy, so After=
+# means this starts against a database already accepting connections rather than
+# crash-looping against one still running initdb. A Wants= here would start the
+# database at every boot after somebody deliberately stopped the fleet - the
+# trap that had home-server-promote.service pulling tdarr-server up every ten
+# minutes.
+After=windmill-db.service
+
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Container]
+Image=ghcr.io/windmill-labs/windmill:1.792
+AutoUpdate=registry
+ContainerName=windmill-server
+Network=net-agents.network
+
+# NoNewPrivileges is free here and is measured rather than assumed: nothing in
+# this image needs to gain privileges through a setuid binary. A capability set
+# is the next step and needs the same per-container test - DropCapability=ALL is
+# NOT safe by default, and the two counter-examples are in this repository:
+# caddy exits without NET_BIND_SERVICE, and every LinuxServer image needs five
+# capabilities before s6-overlay will start at all.
+NoNewPrivileges=true
+
+# The image creates a `windmill` user and then never sets USER, so it runs as
+# container root - which under rootless podman IS core. The UserNS= reshaping
+# windmill-db needs does not apply: nothing here refuses to run as root.
+User=0
+
+# NO VOLUME, and it is a decision rather than an omission. Upstream's compose
+# mounts a shared worker_logs volume on the server so it can serve logs the
+# workers wrote; with NUM_WORKERS=0 there is nothing to share, and /tmp inside
+# the container is writable. STEP 8 HAS TO REVISIT THIS when the workers arrive.
+# Job results and logs live in Postgres, which is what WINDMILL_JOB_RETENTION_SECS
+# bounds and what bin/snapshot-databases.sh dumps.
+
+# LOOPBACK, AND THE BIND ADDRESS IS THE WHOLE EXPOSURE. A plain PublishPort=
+# would put the agent control plane on the LAN, past Caddy and past sign-on -
+# the shape the access log caught internet scanners walking on the *arr APIs.
+# Bound to 127.0.0.1 it is reachable by `conduct` and by nothing else: firewalld
+# never enters the picture, so host/butane/ucore.bu needs no change and neither
+# does host.firewalld's allowlist in bin/verify-host.sh.
+#
+# THIS IS THE FIRST SERVICE HERE REACHABLE ONLY FROM THE HOST. Note that
+# docs/networking.md says not to publish a port for a service Caddy can reach by
+# name, and Caddy CAN reach this one over net-agents. The carve-out is written
+# down there: the publish exists for `conduct`, which is on the host and cannot
+# join a bridge, and giving it an inbound route from one is the thing this whole
+# design refuses.
+PublishPort=127.0.0.1:${PORT_WINDMILL_HTTP}:8000
+
+Environment=TZ=${TIMEZONE}
+# MODE=server IS WHAT DISABLES THE WORKERS. NUM_WORKERS=0 is belt and braces -
+# upstream's own compose omits it - and is written out so that nobody reads the
+# absence of a worker count as an oversight.
+Environment=MODE=server
+Environment=NUM_WORKERS=0
+# Assembled here rather than carried whole in .env, so the password stays one
+# value in one place. .env.sample forbids whitespace and URL-reserved characters
+# in it for exactly this line: quadlet splits Environment= on whitespace and
+# truncates the rest in silence, and an @ or : here breaks the URI parse with an
+# error naming the host rather than the credential.
+Environment=DATABASE_URL=postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME}
+# What Windmill puts in the links it generates, including the resume URLs that
+# travel to the phone. It has to be the public name even though nothing answers
+# there until the Caddy site block lands.
+Environment=BASE_URL=https://agents.${DOMAIN}
+# WITHOUT THIS THE DATABASE GROWS FOR EVER - every run is stored in Postgres, on
+# the disk that also carries config/, /var/backups and the metrics store.
+Environment=JOB_RETENTION_SECS=${WINDMILL_JOB_RETENTION_SECS}
+Environment=RUST_LOG=info
+
+# /api/health/status IS THE ENDPOINT THAT LOOKS RIGHT AND CANNOT BE USED BARE.
+# Measured against a throwaway container before this file named it: it answers
+# HTTP 200 with {"status":"degraded", ..., "workers_alive":0}, so `curl -fsS`
+# alone PASSES on a degraded server. Worse, "degraded" is the permanent and
+# correct answer for MODE=server with no workers, so a probe grepping for
+# "healthy" would never pass at all and Notify=healthy would never fire.
+#
+# The body carries three signals and only two of them belong to this unit.
+# database_healthy is the one worth asserting: together with the request
+# succeeding it proves the HTTP stack is serving AND Postgres is reachable.
+# workers_alive is deliberately ignored - a worker outage is the worker unit's
+# finding, the same way a stopped database is containers.units_active's.
+HealthCmd=curl -fsS http://127.0.0.1:8000/api/health/status | grep -q '"database_healthy":true' || exit 1
+HealthInterval=60s
+HealthTimeout=10s
+HealthStartPeriod=30s
+HealthRetries=3
+HealthStartupCmd=curl -fsS http://127.0.0.1:8000/api/health/status | grep -q '"database_healthy":true' || exit 1
+HealthStartupInterval=5s
+# 180 AND NOT 60 - the database class, see sonarr.container. It ran every sqlx
+# migration in under ten seconds against an empty database and produced 160
+# tables, but a future minor bump gets no second chance at that guess.
+HealthStartupRetries=180
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+Restart=always
+RestartSec=5
+# Must clear the startup check's 900s ceiling - see sonarr.container.
+TimeoutStartSec=1200
+
+# A ceiling, not a tuning knob: high enough never to bite in normal use, low
+# enough that a runaway is killed instead of taking the host down. Measured
+# rather than guessed - a server with no workers sat at 190 MB resident - and
+# the headroom is for the request path rather than for growth.
+MemoryHigh=768M
+MemoryMax=1G
+
+# The aggregate ceiling - see host/systemd/app-agents.slice. The budget is real
+# now: 4608M for the slice, of which windmill-db already holds 768M and this
+# holds 1G, leaving about 2.8G for two workers and conduct.
+Slice=app-agents.slice
+
+[Install]
+WantedBy=default.target

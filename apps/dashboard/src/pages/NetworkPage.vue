@@ -199,9 +199,15 @@ const tunnel = computed(() => {
               v-bind="
                 tip.bind(`port-${p.node}-${p.mapping}`, {
                   title: p.mapping,
-                  lines: [p.node, 'the only way in that does not go through a bridge'],
-                  caveat:
-                    'firewalld governs this separately. A publish with no matching rule is a closed port on a container that looks perfectly healthy.',
+                  lines: [
+                    p.node,
+                    p.isLoopback
+                      ? 'bound to 127.0.0.1, so it is not a way in at all - only a process on the host can reach it'
+                      : 'the only way in that does not go through a bridge',
+                  ],
+                  caveat: p.isLoopback
+                    ? 'firewalld does NOT govern this one. A loopback publish never reaches the INPUT chain, which is why it needs no rule and gets no protection from one either.'
+                    : 'firewalld governs this separately. A publish with no matching rule is a closed port on a container that looks perfectly healthy.',
                 })
               "
             >
