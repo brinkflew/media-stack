@@ -102,6 +102,8 @@ export const NODES: Node[] = [
   { name: "ntfy", role: "the phone", networks: ["net-metrics"] },
 
   { name: "duckdns", role: "dynamic DNS", networks: ["net-egress"] },
+
+  { name: "windmill-db", role: "the control plane's database", networks: ["net-agents"] },
 ];
 
 /** Members of a segment, in declaration order. */

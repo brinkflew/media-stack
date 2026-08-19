@@ -51,7 +51,12 @@ total = 0
 # vanish under compaction between listdir and open, and each one raises OSError
 # and increments "unreadable" - a count that would then fluctuate nightly and
 # mean nothing. It is snapshotted properly by its own admin API instead.
-SKIP_DIRS = {"prometheus"}
+#
+# windmill-db is the same argument reaching the same conclusion by a different
+# route: it is Postgres, so nothing under it can EVER hold a SQLite header, and
+# its files vanish under checkpoint rather than compaction. It is snapshotted by
+# pg_dumpall instead - the only consistent copy of a running Postgres there is.
+SKIP_DIRS = {"prometheus", "windmill-db"}
 
 for root, dirs, files in os.walk(config):
     # Caddy's directories are root-owned and unreadable to this user; the

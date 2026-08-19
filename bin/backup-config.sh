@@ -81,6 +81,12 @@ export RESTIC_REPOSITORY="$REPO" RESTIC_PASSWORD_FILE="$PWFILE"
 # with no handler on the rsync at all, so rsync's exit 24 when Prometheus
 # deletes a WAL segment mid-transfer would kill the run outright. The `protect`
 # filter stops --delete-excluded removing last night's staged copy.
+#
+# /windmill-db/ is the same trap and is excluded for the same reason - Postgres
+# checkpoints delete WAL segments exactly as Prometheus compactions do. THE TWO
+# EXCLUSION LISTS HAVE TO STAY IDENTICAL: bin/verify-restore.sh asserts against
+# both repositories, so a pattern added to one and not the other makes the
+# off-site copy differ from the local one in a way only a restore would show.
 mkdir -p "$STAGING/config"
 echo "==> mirroring $REMOTE:$REMOTE_CONFIG"
 rsync -a --delete --delete-excluded --info=stats1 \
@@ -91,6 +97,7 @@ rsync -a --delete --delete-excluded --info=stats1 \
   --exclude='*/logs/' \
   --exclude='lockfile' --exclude='*.lock' --exclude='*.pid' \
   --filter='protect /prometheus/' --exclude='/prometheus/' \
+  --filter='protect /windmill-db/' --exclude='/windmill-db/' \
   "$REMOTE:$REMOTE_CONFIG/" "$STAGING/config/"
 # caddy/ used to be excluded here and re-extracted with `docker exec caddy tar`,
 # because under Docker its subdirectories were root-owned and unreadable to this

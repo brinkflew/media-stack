@@ -1,0 +1,149 @@
+# ==============================================================================
+# windmill-db: Postgres for the coding-agent control plane
+# ------------------------------------------------------------------------------
+# THE FIRST DATABASE CONTAINER IN THIS STACK, which is most of why this file is
+# long. Ten other stateful services embed SQLite, so bin/snapshot-databases.sh
+# finds them by walking config/ for a magic number and nothing here has ever
+# needed a dump. A live PGDATA is the opposite: it cannot be copied while it
+# runs, and merely LEAVING IT in the tree the backup walks breaks the backup
+# rather than the database. Postgres deletes WAL segments at every checkpoint,
+# rsync exits 24 when a file it has enumerated vanishes, and that line in
+# bin/backup-server.sh ends in `|| die` - so one routine checkpoint inside the
+# backup window would abort the run BEFORE the *arr databases, Caddy's private
+# keys and both restic legs. It is excluded there and in bin/backup-config.sh,
+# exactly as /prometheus/ is and for the same reason.
+#
+# :17 IS A SAFETY INTERLOCK, NOT JUST THE USUAL MAJOR-TAG TIDINESS. Where
+# upstream publishes a major tag stacks/README.md says to use it, and Postgres
+# does. Here the pin is load-bearing: Postgres refuses to start against a data
+# directory written by a different major version, so a floating tag would one
+# night pull 18 and fail. Notify=healthy below means auto-update would roll that
+# back - the point is that it would have to, which makes this the one image here
+# where an unpinned major is a guaranteed outage rather than a risk of one.
+#
+# WHY UserNS= AND NOT User=0, WHICH IS WHAT EVERY OTHER UNIT HERE USES.
+# prometheus.container states the general rule: an image running as a non-zero
+# uid maps into core's subuid range and cannot write a core-owned directory, so
+# run it as container root, which IS core. That fix does not exist for this
+# image - the postgres binary refuses to run as root at all, by design and with
+# no override. So the mapping is reshaped instead. keep-id:uid=999,gid=999 makes
+# core appear inside the container as 999, the uid the entrypoint drops to, and
+# the data directory comes out owned by core on the host like every one of its
+# twenty siblings in config/.
+#
+# That uniformity is worth an unusual directive. bin/backup-config.sh records
+# the one directory that used to be root-owned and unreadable to this user
+# under Docker - rsync exited 23 on EVERY run because of it - and that the
+# special case was deleted when the migration made container root equal core.
+# A subuid-owned tree in config/ would put it straight back.
+#
+# Image:  https://hub.docker.com/_/postgres
+# See:    https://www.postgresql.org/docs/17/
+# ==============================================================================
+
+[Unit]
+Description=Windmill database
+
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Container]
+Image=docker.io/library/postgres:17
+AutoUpdate=registry
+ContainerName=windmill-db
+Network=net-agents.network
+
+# NoNewPrivileges is free here and is measured rather than assumed: nothing in
+# this image needs to gain privileges through a setuid binary. A capability set
+# is the next step and needs the same per-container test - DropCapability=ALL is
+# NOT safe by default, and the two counter-examples are in this repository:
+# caddy exits without NET_BIND_SERVICE, and every LinuxServer image needs five
+# capabilities before s6-overlay will start at all.
+NoNewPrivileges=true
+
+# See the header: User=0 is unavailable to this image and only to this image.
+# Verified rather than assumed - with this line the data directory is 1000:1000
+# on the host and `id` inside the container reads uid=999(postgres).
+UserNS=keep-id:uid=999,gid=999
+
+# Per-service writable state, so :Z and not :z - stacks/README.md. Postgres
+# chmods this to 0700 itself on first start.
+Volume=${DOCKER_VOLUME_CONFIG}/windmill-db:/var/lib/postgresql/data:Z
+
+# NO PublishPort, and net-agents.network is where the invariant is written down:
+# the whole of what a compromised Windmill worker can reach is postgres and the
+# server. A published port would add the LAN to that list.
+
+Environment=TZ=${TIMEZONE}
+Environment=POSTGRES_USER=${WINDMILL_DB_USER}
+Environment=POSTGRES_PASSWORD=${WINDMILL_DB_PASSWORD}
+Environment=POSTGRES_DB=${WINDMILL_DB_NAME}
+# DECIDED AT CREATION OR NEVER: checksums can only be turned on by initdb, so
+# the alternative later is a dump and a restore. This disk has no redundancy and
+# carries config/, /var/backups and the metrics store; corruption that announces
+# itself is worth roughly 2% of write CPU.
+Environment=POSTGRES_INITDB_ARGS=--data-checksums
+
+# SIGTERM to postgres is a SMART shutdown - it waits for every client to
+# disconnect, and Windmill's server and workers hold theirs open. The default
+# would therefore hang to the stop timeout, get SIGKILLed, and do crash recovery
+# on EVERY restart, including each nightly auto-update. SIGINT is the fast
+# shutdown. The image declares this itself; it is restated here for the reason
+# containers.probe_binaries exists - an undeclared dependency on what an image
+# merely happens to ship is what took Pocket ID down for 9.5 hours.
+StopSignal=SIGINT
+
+# Postgres puts parallel-query segments in /dev/shm, and podman's default 64M is
+# where "could not resize shared memory segment" comes from. tmpfs pages are
+# charged to this unit's cgroup, so MemoryMax below still bounds it.
+ShmSize=256m
+
+# -h 127.0.0.1 IS THE LOAD-BEARING FLAG. During initdb the entrypoint runs a
+# temporary server with listen_addresses empty - the log says "listening on
+# Unix socket" and nothing else - so a socket probe reports healthy in the
+# MIDDLE of initialisation, Notify=healthy fires, and dependents start against
+# a server the entrypoint is about to shut down and replace. Over TCP that
+# window does not exist. -U and -d authenticate nothing, because pg_isready
+# never completes a handshake; they are there because without them the server
+# logs `FATAL: role "postgres" does not exist` once a minute for the life of
+# the container. Measured, not guessed: five probes without them produced five
+# lines, five with them produced none.
+HealthCmd=pg_isready -q -h 127.0.0.1 -U ${WINDMILL_DB_USER} -d ${WINDMILL_DB_NAME} || exit 1
+HealthInterval=60s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+HealthStartupCmd=pg_isready -q -h 127.0.0.1 -U ${WINDMILL_DB_USER} -d ${WINDMILL_DB_NAME} || exit 1
+HealthStartupInterval=5s
+# 180 AND NOT 60 - the database class, see sonarr.container. Note that the rule
+# there derives the list as "what bin/snapshot-databases.sh finds when it walks
+# config/ by magic bytes". This is the eleventh member and the first one that
+# walk can never find, so that sentence no longer derives the whole list.
+HealthStartupRetries=180
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+# Podman does not create a missing bind-mount source directory; Docker did. With
+# Restart=always the difference is a silent 5-second retry loop rather than a
+# visible failure - the Tdarr units reached restart 126 before anyone looked.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CONFIG}/windmill-db
+Restart=always
+RestartSec=5
+# Must clear the startup check's 900s ceiling - see sonarr.container.
+TimeoutStartSec=1200
+
+# A ceiling, not a tuning knob: high enough never to bite in normal use, low
+# enough that a runaway is killed instead of taking the host down. Sized like
+# Prometheus - shared_buffers is 128M by default and Windmill opens tens of
+# connections, not hundreds. An OOM kill here is worse than elsewhere: it takes
+# the postmaster with it and costs crash recovery on the way back up.
+MemoryHigh=512M
+MemoryMax=768M
+
+[Install]
+WantedBy=default.target

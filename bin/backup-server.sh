@@ -108,6 +108,17 @@ command -v restic >/dev/null || die "restic is not on PATH - see host/RUNBOOK.md
 # every night onto the disk this job deliberately throttles itself against.
 # Verified rather than assumed: with --exclude alone the staged directory is
 # deleted, and with the filter it survives.
+#
+# /windmill-db/ IS THE SAME TRAP A SECOND TIME, and it arrived with the first
+# database CONTAINER in this stack. Postgres deletes WAL segments at every
+# checkpoint exactly as Prometheus does, so the same vanished-file exit 24 hits
+# the same `|| die`. None of the patterns above covers it either: its WAL is a
+# directory called `pg_wal/` and its lock is `postmaster.pid`, which `*.pid`
+# would match - but only after rsync had already descended into the tree it must
+# not read at all. It is re-added by bin/snapshot-databases.sh as a pg_dumpall,
+# which is the only consistent copy of a running Postgres there is; the same
+# `protect` argument applies, since without it --delete-excluded removes last
+# night's dump before this night's is written.
 say "staging $CONFIG"
 mkdir -p "$STAGING/config" || die "cannot create $STAGING"
 rsync -a --delete --delete-excluded --info=stats1 \
@@ -118,6 +129,7 @@ rsync -a --delete --delete-excluded --info=stats1 \
 	--exclude='*/logs/' \
 	--exclude='lockfile' --exclude='*.lock' --exclude='*.pid' \
 	--filter='protect /prometheus/' --exclude='/prometheus/' \
+	--filter='protect /windmill-db/' --exclude='/windmill-db/' \
 	"$CONFIG/" "$STAGING/config/" || die "rsync failed"
 
 # ------------------------------------------------------------------------------
