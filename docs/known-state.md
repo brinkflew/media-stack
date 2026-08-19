@@ -792,9 +792,18 @@ answering; four had never served a single query and were deleted.
   ended in 2004. Sex and the City was added 2026-08-18 18:50 and had 0 of 94 episodes; an
   interactive search on S01E01 returned **three releases, all three approved**, Remux / Bluray /
   WEB-DL 1080p at 5-21 seeders. The releases were there the whole time and nothing asked twice.
-  `bin/search-missing.py` on `home-server-search.timer` is the fix, and it searches **by season**
-  rather than by episode - one query instead of thirteen, against a Prowlarr that was already
-  answering Sonarr with `429 TooManyRequests`.
+  `bin/search-missing.py` on `home-server-search.timer` is the fix.
+- **AND IT SEARCHED BY SEASON, WHICH WAS THE OBVIOUS ECONOMY AND RETURNED NOTHING.** One query
+  instead of thirteen, against a Prowlarr that was already answering Sonarr with
+  `429 TooManyRequests` - written as the first rule, and disproved by the first live run. All six
+  seasons came back `Season search completed. 0 reports downloaded`, having processed 4 to 10
+  releases each, **because a season query asks an indexer for a season PACK** and these trackers
+  index a 1998 series one episode at a time. The identical episodes searched individually queued
+  all twelve of season one inside the hour. Measured cost of doing it the working way: 12 episodes
+  x 8 indexers = 96 queries in about seven minutes, **zero 429s and zero indexers backing off** -
+  against the ~770 a day RSS sync already does unattended. **A cheaper query that returns nothing
+  is not cheaper**, and the per-run cap is counted in episodes because an episode is what costs a
+  query.
 - **A STALLED DOWNLOAD BLOCKS EVERY ALTERNATIVE RELEASE, AND REPORTS ITSELF AS `downloading`.**
   Kaamelott: The First Chapter had sat at 5.5 GB remaining of a 29.8 GB remux since 2026-08-14,
   "stalled with no connections". Because the queued item already meets cutoff, Radarr refused all

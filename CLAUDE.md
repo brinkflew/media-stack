@@ -1772,7 +1772,9 @@ signal read green.
   and the "scores ~50" claim above was wrong for as long as the profile existed.
 - **A back-catalogue title is searched once, at add time, and never again.** RSS only carries new
   uploads, so 94 episodes stayed missing while three approved releases sat on a configured indexer.
-  `bin/search-missing.py` is the fix, and it searches by season rather than by episode.
+  `bin/search-missing.py` is the fix.
+- **Searching by season was the obvious economy and returned nothing**, because a season query asks
+  for a season PACK. Disproved by the first live run; the cap is counted in episodes now.
 - **A stalled download blocks every alternative release and reports itself as `downloading`.** One
   refused all 49 candidates for a film with `already meets cutoff`, six of them at score 870.
 - The ISP resolver returns a blocking page for several indexer domains, which is why prowlarr and

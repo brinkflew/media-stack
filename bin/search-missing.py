@@ -44,10 +44,21 @@
 #      carries its own last-searched stamp and is left alone for a week.
 #
 #   4. NEVER FIRE MORE THAN A HANDFUL PER RUN. A newly added 94-episode series
-#      would otherwise put ninety-four searches across nine indexers into one
+#      would otherwise put ninety-four searches across every indexer into one
 #      burst. Prowlarr was already returning `429 TooManyRequests` to Sonarr
 #      before this script existed; a reconciler that makes discovery WORSE
-#      would be indistinguishable from one that helps.
+#      would be indistinguishable from one that helps. So a series drains over
+#      several nights instead, which is the correct trade for something nobody
+#      is waiting on minute by minute.
+#
+# IT SEARCHES BY EPISODE, AND THE FIRST VERSION SEARCHED BY SEASON. That was
+# the obvious economy - one query instead of thirteen - and the first live run
+# disproved it. All six seasons of Sex and the City came back
+# `Season search completed. 0 reports downloaded`, processing 4 to 10 releases
+# each, because a season query asks for a season PACK and these trackers index
+# this show one episode at a time. The identical set of episodes searched
+# individually queued all twelve of season one within the hour. A cheaper query
+# that returns nothing is not cheaper.
 #
 # IT NAMES A STALL, IT DOES NOT CLEAR ONE. A download stuck at "no connections"
 # blocks every alternative release for that item, so it is the single most
@@ -92,11 +103,16 @@ SONARR = ("sonarr", 8989)
 # with an argument next to it rather than a variable in .env.
 RESEARCH_SECONDS = 7 * 24 * 3600
 
-# The per-run ceiling, counted across both applications. Twelve is one search
-# every few minutes if the applications spread them out, and it drains a
-# six-season series in one run while never approaching the rate at which
-# Prowlarr started answering 429.
-DEFAULT_LIMIT = 12
+# The per-run ceiling, counted across both applications in ITEMS - one film or
+# one episode, because each is its own query against every indexer.
+#
+# MEASURED RATHER THAN GUESSED, on 2026-08-19: twelve episodes against eight
+# active indexers is 96 queries, took about seven minutes, and produced zero
+# 429s and zero indexers backing off. Twenty-four a day is 192 queries, which is
+# a fraction of what RSS sync already does unattended - eight indexers every
+# fifteen minutes is nearer 770 - so this is a small addition to a load the
+# stack already carries, not a new one.
+DEFAULT_LIMIT = 24
 
 # How long a queue item may sit before it is called stalled rather than slow.
 # A 30 GB remux legitimately takes many hours; five days at "no connections"
@@ -258,12 +274,15 @@ def radarr_plan(key, state, now, verbose):
 
 
 def sonarr_plan(key, state, now, verbose):
-    """Which seasons to search.
+    """Which episodes to search, grouped by season only to batch the call.
 
-    BY SEASON, NOT BY EPISODE, and that is the difference between one query and
-    thirteen. Sonarr's SeasonSearch asks each indexer once and matches every
-    episode plus any season pack against the answer; EpisodeSearch would put
-    Sex and the City's 94 episodes across 9 indexers into a single burst.
+    BY EPISODE, NOT BY SEASON, and that is the opposite of what this function
+    did first. A season query asks an indexer for a season PACK; these trackers
+    index an older series one episode at a time, so all six seasons of Sex and
+    the City returned `0 reports downloaded` while the same episodes searched
+    individually queued twelve of twelve. The grouping survives only as a way to
+    send one command per season instead of one per episode - Sonarr issues the
+    indexer queries either way, so the grouping saves API calls and nothing else.
     """
     wanted = api(SONARR, key,
                  "wanted/missing?page=1&pageSize=1000&includeSeries=true"
@@ -284,25 +303,22 @@ def sonarr_plan(key, state, now, verbose):
         if when is not None and when <= now:
             aired.append(ep)
 
-    seasons = {}
-    for ep in aired:
-        seasons.setdefault((ep["seriesId"], ep["seasonNumber"]), []).append(ep)
-
     due = []
-    for (series_id, season), episodes in sorted(seasons.items()):
-        title = (episodes[0].get("series") or {}).get("title", "?")
-        if any(ep["id"] in in_flight for ep in episodes):
+    for ep in aired:
+        title = (ep.get("series") or {}).get("title", "?")
+        label = "%s S%02dE%02d" % (title[:44], ep.get("seasonNumber", 0),
+                                  ep.get("episodeNumber", 0))
+        if ep["id"] in in_flight:
             if verbose:
-                print("skip  in queue     %s S%02d" % (title[:50], season))
+                print("skip  in queue     %s" % label)
             continue
-        last = int(state.get("item_season_%d_%d" % (series_id, season), 0) or 0)
+        last = int(state.get("item_episode_%d" % ep["id"], 0) or 0)
         if now - last < RESEARCH_SECONDS:
             if verbose:
-                print("skip  searched %2dd  %s S%02d"
-                      % ((now - last) / 86400, title[:50], season))
+                print("skip  searched %2dd  %s" % ((now - last) / 86400, label))
             continue
-        due.append({"seriesId": series_id, "season": season,
-                    "title": title, "episodes": len(episodes)})
+        due.append({"id": ep["id"], "seriesId": ep["seriesId"],
+                    "season": ep.get("seasonNumber", 0), "label": label})
     return {
         "missing": len(missing),
         "searchable": len(aired),
@@ -372,9 +388,19 @@ def main():
     facts = {"last_ok_at": state.get("last_ok_at", "")}
     # Every previous item stamp is carried forward; only the ones searched this
     # run are rewritten. Dropping them would re-search everything every tick.
+    #
+    # A stamp older than twice the re-search interval is dropped instead, which
+    # is what stops this file growing for ever as items are grabbed, deleted or
+    # renamed. It cannot cause an early re-search: anything that old is already
+    # past due, so the two branches agree.
     for key, value in state.items():
-        if key.startswith("item_"):
-            facts[key] = value
+        if not key.startswith(("item_movie_", "item_episode_")):
+            continue
+        try:
+            if now - int(value) < 2 * RESEARCH_SECONDS:
+                facts[key] = value
+        except (TypeError, ValueError):
+            continue
 
     radarr_key = env.get("RADARR_API_KEY", "")
     sonarr_key = env.get("SONARR_API_KEY", "")
@@ -387,23 +413,23 @@ def main():
         radarr = radarr_plan(radarr_key, state, now, args.verbose)
         sonarr = sonarr_plan(sonarr_key, state, now, args.verbose)
 
-        # THE CAP IS SHARED, and films are taken first only because they are the
-        # cheaper half: one command covers all of them, where each season is its
-        # own. Neither can starve the other for long, since anything not reached
-        # this run is still due tomorrow.
+        # THE CAP IS SHARED AND COUNTED IN ITEMS - one film or one episode -
+        # because each is its own query against every indexer, which is the only
+        # cost that matters here. Films are taken first because there are few of
+        # them and a whole series would otherwise starve them for days; anything
+        # not reached this run is still due tomorrow.
         budget = max(0, args.limit)
         movies = radarr["due"][:budget]
         budget -= len(movies)
-        seasons = sonarr["due"][:budget]
+        episodes = sonarr["due"][:budget]
 
         for movie in movies:
-            print("%-7s movie   %s (%s)"
+            print("%-7s movie    %s (%s)"
                   % ("WOULD" if args.dry_run else "search",
                      movie.get("title", "?"), movie.get("year", "?")))
-        for season in seasons:
-            print("%-7s season  %s S%02d (%d episodes)"
-                  % ("WOULD" if args.dry_run else "search",
-                     season["title"], season["season"], season["episodes"]))
+        for ep in episodes:
+            print("%-7s episode  %s"
+                  % ("WOULD" if args.dry_run else "search", ep["label"]))
 
         stalls = (stalled_items(radarr["queue"], now)
                   + stalled_items(sonarr["queue"], now))
@@ -420,12 +446,18 @@ def main():
                      "movieIds": [m["id"] for m in movies]})
                 for movie in movies:
                     facts["item_movie_%d" % movie["id"]] = now
-            for season in seasons:
+            # One command per season rather than per episode. Sonarr issues the
+            # same indexer queries either way; this only keeps the API chatter
+            # proportional to seasons instead of to episodes.
+            batches = {}
+            for ep in episodes:
+                batches.setdefault((ep["seriesId"], ep["season"]), []).append(ep)
+            for (_series_id, _season), group in sorted(batches.items()):
                 api(SONARR, sonarr_key, "command",
-                    {"name": "SeasonSearch", "seriesId": season["seriesId"],
-                     "seasonNumber": season["season"]})
-                facts["item_season_%d_%d"
-                      % (season["seriesId"], season["season"])] = now
+                    {"name": "EpisodeSearch",
+                     "episodeIds": [ep["id"] for ep in group]})
+                for ep in group:
+                    facts["item_episode_%d" % ep["id"]] = now
     except ArrError as exc:
         print("search-missing: %s" % exc, file=sys.stderr)
         write_marker(started, False, facts)
@@ -437,8 +469,8 @@ def main():
         "movies_due": len(radarr["due"]),
         "episodes_missing": sonarr["missing"],
         "episodes_searchable": sonarr["searchable"],
-        "seasons_due": len(sonarr["due"]),
-        "searched": len(movies) + len(seasons),
+        "episodes_due": len(sonarr["due"]),
+        "searched": len(movies) + len(episodes),
         "stalled": len(stalls),
     })
 
@@ -451,7 +483,7 @@ def main():
           % (radarr["searchable"], radarr["missing"],
              sonarr["searchable"], sonarr["missing"],
              "would search" if args.dry_run else "searched",
-             len(movies) + len(seasons), len(stalls)))
+             len(movies) + len(episodes), len(stalls)))
     if not args.dry_run:
         write_marker(started, True, facts)
     return 0
