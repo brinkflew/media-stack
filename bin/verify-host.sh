@@ -1743,6 +1743,52 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 	fi
 
+	# THE ONE-VERIFY-LANE INVARIANT IS A ROW IN POSTGRES, NOT A LINE IN GIT.
+	# stacks/infra/windmill-worker-verify.container carries WORKER_TAGS=verify,
+	# and that is a BOOTSTRAP: Windmill keeps worker-group configuration in its
+	# `config` table - it ships worker__default, worker__native and
+	# worker__reports already seeded - and workers watch that table and HOT
+	# RELOAD it. Create a worker__verify row from the UI and it wins, at run
+	# time, with no restart, and `git diff` shows nothing at all.
+	#
+	# So this reads the tags back out of the database, which is the same
+	# argument agents.slice_limits makes one level up: read the state out of the
+	# thing that enforces it, never out of the file that requests it.
+	#
+	# IT IS DELIBERATELY NOT THE WORKERS' HEALTH PROBE. Those assert liveness
+	# only, because a probe that failed on a tag change would mark the unit
+	# unhealthy and then, on the next auto-update, fail its start and roll back
+	# an image that was never the problem.
+	#
+	# The superuser name comes out of the container rather than out of .env -
+	# the bin/snapshot-databases.sh idiom, so there is no second copy of the
+	# value to drift. The SQL travels as an environment variable for the same
+	# reason it does there: nesting three levels of quoting into one podman
+	# argument is how a check ends up silently measuring nothing.
+	if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -qx windmill-db; then
+		fact agents_worker_lanes ""
+		note agents.worker_lanes "windmill-db is not running, so the worker lanes cannot be read"
+	else
+		lane_sql="select worker_group || '=' || array_to_string(custom_tags, ',') from worker_ping where ping_at > now() - interval '120 seconds' order by worker_group"
+		lanes=$(podman exec -e LANE_SQL="$lane_sql" windmill-db \
+			sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$LANE_SQL"' 2>/dev/null)
+		lane_n=$(printf '%s' "$lanes" | grep -c . || true)
+		fact agents_worker_lanes "${lane_n:-0}" num
+		verify_tags=$(printf '%s\n' "$lanes" | sed -n 's/^verify=//p')
+		if [ "${lane_n:-0}" -eq 0 ]; then
+			# Distinct from "not running", and the distinction is the finding:
+			# containers.healthy is what says a unit is down, and this says the
+			# units are up and nothing is taking jobs.
+			note agents.worker_lanes "no Windmill worker has pinged in the last two minutes - nothing is taking jobs"
+		elif [ "$verify_tags" = verify ]; then
+			ok agents.worker_lanes "$lane_n worker lane(s) alive, and the verify lane still listens to verify alone"
+		elif [ -z "$verify_tags" ]; then
+			warn agents.worker_lanes "no worker is in the verify group - lanes read [$lanes] - so a verify job queues for ever, or runs in the default lane beside a second one"
+		else
+			warn agents.worker_lanes "the verify lane has drifted to [$verify_tags] - that is Windmill's config table overriding WORKER_TAGS in the quadlet, it is not in git, and one verify at a time is no longer enforced"
+		fi
+	fi
+
 	# --------------------------------------------------------------------------
 	# Seeding policy. Whether the 72h floor is actually being enforced.
 	# --------------------------------------------------------------------------
@@ -2297,11 +2343,23 @@ if [ -z "$GREENBOOT" ]; then
 	# The first symptom of an unbounded label is the unit being killed at
 	# MemoryMax, not a slow dashboard, so it is worth seeing it climb.
 	#
-	# 4000 IS DERIVED FROM A MEASUREMENT, not picked. Steady state on
-	# 2026-08-15, with every source running, is 2896 - node-exporter's own, the
-	# collector's ~1050 through the textfile, and Prometheus' self-scrape. That
-	# leaves about 38% headroom for the things that legitimately grow - another
-	# container, another indexer, another filesystem.
+	# 4500 IS DERIVED FROM A MEASUREMENT, not picked, and it has been raised
+	# once. The original was 4000 against a steady state of 2896 on 2026-08-15 -
+	# node-exporter's own, the collector's ~1050 through the textfile, and
+	# Prometheus' self-scrape - which left about 38% headroom for the things
+	# that legitimately grow.
+	#
+	# THE AGENT FLEET SPENT THAT HEADROOM. A container is 41-45 series measured
+	# (windmill-db 41, windmill-server 45), so the store went from 2896 to 3924
+	# over four days of new units, and step 8's two Windmill workers plus one
+	# check were a further ~91 - landing near 4015 against a ceiling of 4000.
+	# Deploying into a permanent WARN is not a budget, so the ceiling moved with
+	# the reason written down rather than the finding being silenced.
+	#
+	# 4500 IS DELIBERATELY TIGHT - about ten more containers. The failure this
+	# exists to catch is a label carrying a path, an id or an address, which
+	# arrives in the hundreds rather than the dozens, so a generous ceiling
+	# would not catch it any later but would hide ordinary growth for years.
 	#
 	# READ THE LIVE COUNT, NOT THIS ONE, WHEN RE-DERIVING IT. This check reads
 	# head series, which counts every series in the head block whether or not it
@@ -2316,10 +2374,10 @@ if [ -z "$GREENBOOT" ]; then
 	series=${series%%.*}
 	if [ -z "$series" ]; then
 		warn metrics.series_count "the active series count could not be read"
-	elif [ "$series" -le 4000 ]; then
+	elif [ "$series" -le 4500 ]; then
 		ok metrics.series_count "$series active series"
 	else
-		warn metrics.series_count "$series active series, over the 4000 budget - look for a label carrying a path, a title, an id or an address"
+		warn metrics.series_count "$series active series, over the 4500 budget - look for a label carrying a path, a title, an id or an address"
 	fi
 	fact metrics_series "${series:-}" num
 

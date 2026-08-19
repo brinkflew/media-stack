@@ -76,10 +76,15 @@ User=0
 
 # NO VOLUME, and it is a decision rather than an omission. Upstream's compose
 # mounts a shared worker_logs volume on the server so it can serve logs the
-# workers wrote; with NUM_WORKERS=0 there is nothing to share, and /tmp inside
-# the container is writable. STEP 8 HAS TO REVISIT THIS when the workers arrive.
-# Job results and logs live in Postgres, which is what WINDMILL_JOB_RETENTION_SECS
-# bounds and what bin/snapshot-databases.sh dumps.
+# workers wrote. REVISITED WHEN THE WORKERS LANDED and the answer did not
+# change: container stdout is already the journal, which is this stack's log
+# store, declared and bounded at 90 days - so the volume buys a second copy of
+# something already kept, in a tree three containers write, for one UI page.
+# Quadlet passes --rm, so the unshared copy cannot outlive a container. Job
+# results and logs live in Postgres, which is what WINDMILL_JOB_RETENTION_SECS
+# bounds and what bin/snapshot-databases.sh dumps. The workers DO get a volume,
+# and it is the dependency cache rather than the logs - see
+# windmill-worker.container for why that one is not optional.
 
 # LOOPBACK, AND THE BIND ADDRESS IS THE WHOLE EXPOSURE. A plain PublishPort=
 # would put the agent control plane on the LAN, past Caddy and past sign-on -

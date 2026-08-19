@@ -105,6 +105,12 @@ export const PATHS: Path[] = [
     why: "serverIP=tdarr-server; the node asks for work" },
   { from: "gluetun", to: "qbittorrent", source: "git",
     why: "pushes the forwarded port on every reconnect, over the shared loopback" },
+  { from: "windmill-server", to: "windmill-db", source: "git",
+    why: "DATABASE_URL; it also runs every sqlx migration at boot, which is why the workers order behind it" },
+  { from: "windmill-worker", to: "windmill-db", source: "git",
+    why: "a worker takes jobs from the queue in Postgres, not from the server - there is no edge to windmill-server at all" },
+  { from: "windmill-worker-verify", to: "windmill-db", source: "git",
+    why: "the same queue, filtered to one tag. Its lane is a row in worker_ping, which is also its health probe" },
 
   // --- declared in an apps/ config file ------------------------------------
   { from: "prometheus", to: "node-exporter", source: "git",

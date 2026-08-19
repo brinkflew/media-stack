@@ -1,0 +1,196 @@
+# ==============================================================================
+# windmill-worker: the default lane of the agent control plane
+# ------------------------------------------------------------------------------
+# ONE OF TWO WORKERS, AND THE SPLIT IS THE CONCURRENCY DESIGN. This one takes
+# everything; windmill-worker-verify takes only jobs tagged `verify`. There is
+# exactly one container per lane, each with NUM_WORKERS=1, so "one task and one
+# verify at a time" is a property of the file count rather than of a setting
+# somebody has to remember - which matters because a verify is what wakes the
+# GPU and the media stack is the tenant with a household waiting on it.
+#
+# NOTHING MODEL-AUTHORED RUNS IN HERE. A Windmill worker runs the pipeline's own
+# flow steps - poll, dispatch, wait for an approval. The coding agent runs one
+# layer down, in a conduct-runner container with --cap-drop=ALL, --read-only and
+# a network of its own. That is why job isolation is off at instance level and
+# why the two settings below are not a loss.
+#
+# TWO THINGS IN UPSTREAM'S OWN docker-compose.yml MUST NOT BE COPIED HERE, and
+# both look harmless in a diff:
+#
+#   privileged: true          - no.
+#   FAVOR_UNSHARE_PID=true    - no, and the error names neither the setting nor
+#                               the cause. Measured in this image: `unshare
+#                               --user` succeeds and `unshare --pid --fork`
+#                               returns "Operation not permitted", because
+#                               NoNewPrivileges plus rootless podman's
+#                               capability set allows a nested user namespace
+#                               and not a PID one. The fix would be
+#                               CAP_SYS_ADMIN, which trades away most of the
+#                               containment this design rests on in order to
+#                               sandbox jobs that are not the threat.
+#
+# SO EVERY START LOGS ONE ERROR LINE AND IT IS BENIGN - "unshare test command
+# failed ... Unshare isolation will NOT be available". The worker probes for the
+# capability at boot whatever the settings say. The instance setting
+# job_isolation is "none" (see the plan's first-run section), so nothing is
+# silently running less isolated than it claims. ENABLE_UNSHARE_PID=false was
+# tried here and does NOT suppress the probe, so it is deliberately absent: a
+# directive that does not do what its name says is worse than none.
+#
+# Image:  https://github.com/windmill-labs/windmill/pkgs/container/windmill
+# See:    https://www.windmill.dev/docs/core_concepts/worker_groups
+# ==============================================================================
+
+[Unit]
+Description=Windmill worker, the default lane
+
+# ORDERING ONLY, NEVER Wants= - see windmill-server.container. windmill-db is
+# obvious; windmill-server is here because IT is what runs the sqlx migrations,
+# and it carries Notify=healthy, so ordering behind it means a worker never
+# comes up against a half-migrated schema on a patch bump. Ordering does not
+# start either of them, which is the whole point: stopping the fleet stays
+# stopped.
+After=windmill-db.service windmill-server.service
+
+# See pocket-id.container: Restart=always at RestartSec=5 can never reach
+# systemd's shipped 5-in-10s ceiling, so a hopeless unit loops for ever instead
+# of coming to rest in `failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Container]
+# THIS TAG MUST EQUAL windmill-server's. THREE FILES, ONE NUMBER. Mixed versions
+# would be two binaries with different schema expectations against one database.
+# stacks/README.md carries the row explaining why a human has to advance it.
+Image=ghcr.io/windmill-labs/windmill:1.792
+AutoUpdate=registry
+ContainerName=windmill-worker
+Network=net-agents.network
+
+# NoNewPrivileges is free here and is measured rather than assumed - and it is
+# also half of why the unshare probe above fails, which is stated so that the
+# two facts are never separated.
+NoNewPrivileges=true
+
+# The image creates a `windmill` user and then never sets USER, so it runs as
+# container root - which under rootless podman IS core. See windmill-db for the
+# one image on this host where that is unavailable.
+User=0
+
+# WITHOUT THIS A WORKER NAMES ITSELF AFTER THE CONTAINER ID. Measured: the
+# worker row reads worker_instance=8d5e7c9b35f8 and worker=wk-verify-8d5e7c9b35f8-OSLFz,
+# a fresh random string on every restart - unreadable in the UI and useless to
+# key anything on. With this it is the unit's own name.
+HostName=windmill-worker
+
+# THE DEPENDENCY CACHE, AND IT IS NOT OPTIONAL THE WAY IT LOOKS. The image sets
+# UV_PYTHON_PREFERENCE=only-managed with UV_PYTHON_INSTALL_DIR under this path,
+# plus UV_CACHE_DIR, GOCACHE, RUSTUP_HOME and CARGO_HOME - so the first Python
+# job DOWNLOADS A CPYTHON here. Quadlet passes --rm, so without a volume the
+# nightly podman-auto-update throws all of it away and the next job fetches it
+# again, for ever.
+#
+# ONE DIRECTORY SHARED BY BOTH LANES, hence :z and not :Z - the same shape as
+# tdarr-server and tdarr-node-01 sharing /temp, and what upstream does across
+# three replicas. It is in cache/ rather than config/ because .env.sample
+# already defines that tree as regenerable and outside every backup.
+Volume=${DOCKER_VOLUME_CACHE}/windmill-workers:/tmp/windmill/cache:z
+
+# NO LOG VOLUME, and it is a decision. Upstream mounts worker_logs on the server
+# AND the workers so the server can render worker logs in its own UI. Container
+# stdout is already the journal, which is this stack's log store, declared and
+# bounded at 90 days - so the volume would buy a second copy of something
+# already kept, in a shared writable tree, for one page. --rm bounds the
+# unshared copy to a single container lifetime.
+
+# NO PublishPort. A worker in fact starts an HTTP server on a RANDOM port bound
+# to 127.0.0.1 ("server started on port=42881 and addr=127.0.0.1"), which is
+# unreachable, unpredictable, and the reason the probe below is not an HTTP one.
+
+Environment=TZ=${TIMEZONE}
+Environment=MODE=worker
+Environment=NUM_WORKERS=1
+# The group is what decides which tags this worker takes. `default` has a
+# seeded row in the config table listing the twenty language tags; see
+# windmill-worker-verify.container for why that row matters more than it looks.
+Environment=WORKER_GROUP=default
+# Assembled here rather than carried whole in .env - see windmill-server.container
+# for why the password must contain no whitespace or URL-reserved characters.
+Environment=DATABASE_URL=postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME}
+# WHAT A JOB CALLS BACK ON. The default is http://localhost:8000, and in a
+# worker container NOTHING LISTENS THERE - so any flow step using the wmill
+# client would fail with connection refused, at run time, months from now.
+Environment=BASE_INTERNAL_URL=http://windmill-server:8000
+# THE IDLE-COST KNOB, and this fleet runs continuously by decision. The default
+# is 25ms between queue polls, which for a stack that dispatches a handful of
+# jobs a day is a poll loop against Postgres for ever. Measured on this host:
+# 2.41% of a core at the default, 0.35% at 2000ms - below windmill-server's own
+# idle. The trade is up to two seconds before a job starts, against phases
+# measured in minutes to hours.
+Environment=SLEEP_QUEUE=2000
+Environment=RUST_LOG=info
+
+# A WORKER SERVES NO HTTP, SO THE PROBE ASKS THE DATABASE - and this is the only
+# health probe on this host that asks a SECOND container whether the first one
+# is doing its job.
+#
+# The alternative was no healthcheck at all, which is where duckdns and
+# unpackerr sit and which stacks/README.md records as accepted rather than
+# overlooked. It is the wrong answer here: this unit follows a floating patch
+# tag and is restarted nightly, so without Notify=healthy podman auto-update's
+# rollback is decorative - and the failure it would miss is the invisible one. A
+# worker that starts, registers nothing and takes no jobs leaves no unit failed,
+# no container unhealthy and nothing in `podman ps`. Work simply queues.
+#
+# psql IS A DECLARED DEPENDENCY, NOT ONE THE IMAGE HAPPENS TO SHIP. Upstream's
+# final runtime stage installs postgresql-client by name, next to curl. That is
+# the same test windmill-server applied to curl, and it is what keeps this out
+# of the Pocket ID trap in docs/known-state.md.
+#
+# ${WINDMILL_DB_*} AND NEVER $DATABASE_URL. systemd expands $VAR in the
+# ExecStart quadlet generates, from EnvironmentFile= only - and DATABASE_URL is
+# assembled in [Container], so it is not in that file and would expand to the
+# empty string before podman ever saw it. The credential is already on this
+# command line via the Environment= above, so spelling it twice costs nothing.
+#
+# KEYED ON worker_group, WHICH IS UNIQUE PER UNIT. 120s because the heartbeat
+# was measured at roughly six seconds; twenty missed pings is a dead worker and
+# not a busy one.
+HealthCmd=psql postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME} -Atqc "select 1 from worker_ping where worker_group = 'default' and ping_at > now() - interval '120 seconds'" | grep -q 1
+HealthInterval=60s
+HealthTimeout=10s
+HealthStartPeriod=30s
+HealthRetries=3
+HealthStartupCmd=psql postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME} -Atqc "select 1 from worker_ping where worker_group = 'default' and ping_at > now() - interval '120 seconds'" | grep -q 1
+HealthStartupInterval=5s
+# 60, not the database class's 180: a worker registers its first ping about two
+# seconds after start, measured. TimeoutStartSec below must clear 60 x 5s.
+HealthStartupRetries=60
+HealthStartupSuccess=1
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+# Podman does not create a missing bind-mount source directory; Docker did. With
+# Restart=always the difference is a silent 5-second retry loop rather than a
+# visible failure.
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CACHE}/windmill-workers
+Restart=always
+RestartSec=5
+TimeoutStartSec=360
+
+# A ceiling, not a tuning knob. Measured rather than guessed: a worker with no
+# job to run sits at 33-55 MB resident, so this is roughly fifteen times idle -
+# headroom for a dependency resolution, not for growth.
+MemoryHigh=512M
+MemoryMax=768M
+
+# The aggregate ceiling - see host/systemd/app-agents.slice. NOTE FOR STEP 9,
+# because the arithmetic is easy to do wrong: these per-unit numbers do NOT sum
+# to a reservation. With windmill-db and windmill-server both up the WHOLE slice
+# measured 388 MB against its 4608M cap, so a runner is sized against measured
+# headroom, not against what is left after subtracting ceilings.
+Slice=app-agents.slice
+
+[Install]
+WantedBy=default.target

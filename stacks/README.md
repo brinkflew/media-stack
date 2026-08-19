@@ -19,7 +19,7 @@ QUADLET_UNIT_DIRS="$PWD/stacks/common:$PWD/stacks/torrent:$PWD/stacks/media:$PWD
 
 | Directory | Contents |
 |---|---|
-| `common/` | the nine `.network` units, one per trust boundary |
+| `common/` | the ten `.network` units, one per trust boundary |
 | `torrent/` | `torrent.pod` and its three members: gluetun, qBittorrent, JOAL |
 | `media/` | the media applications |
 | `infra/` | ingress, identity, dynamic DNS, the metrics stack and the dashboard |
@@ -97,7 +97,7 @@ and all three were wrong at first guess:
 | `ntfy` | `:v2` | Publishes a rolling major, so it clears the bar the row above sets. |
 | `ntfy-alertmanager` | **`:latest`** | **The one exception, and it is the objection that ruled out VictoriaMetrics.** Accepted on a distinction that holds: VictoriaMetrics would have held every byte of history, and this holds **nothing** - stateless glue with an in-memory cache, so a bad update costs a restart rather than a retention window. Its `HealthCmd=` asserts a **401**, not a 200: the only endpoint is the webhook, so a 401 proves the process is up, the config parsed *and* that auth is on, where accepting any response would go green against a bridge that had lost its credentials. |
 | `windmill-db` | `:17` | A **safety interlock**, not tidiness. Postgres refuses to start against a data directory written by a different major, so a floating tag would one night pull 18 and fail. `Notify=healthy` would roll that back - the point is that it would have to. |
-| `windmill-server` | **`:1.792`** | **The second exception, and the only pin here that a human has to advance.** Upstream publishes no rolling major - there is no `1` tag among 2,198 - so the choice was `latest` or a version. `latest` is *not* the newest release: verified against the registry, it carries an **empty** `org.opencontainers.image.version` label and a revision matching no release tag. What `1.792` *is* is a floating **patch** tag (`1.792` and `1.792.2` are one digest, `1.792.0` another), so patch fixes arrive unattended and the minor does not - which is the right way round for a service that runs `sqlx` migrations at every boot. **Nothing advances the minor but a person reading this row**, so bump it deliberately and read Windmill's changelog for the migration when you do. |
+| `windmill-server` | **`:1.792`** | **The second exception, and the only pin here that a human has to advance.** Upstream publishes no rolling major - there is no `1` tag among 2,198 - so the choice was `latest` or a version. `latest` is *not* the newest release: verified against the registry, it carries an **empty** `org.opencontainers.image.version` label and a revision matching no release tag. What `1.792` *is* is a floating **patch** tag (`1.792` and `1.792.2` are one digest, `1.792.0` another), so patch fixes arrive unattended and the minor does not - which is the right way round for a service that runs `sqlx` migrations at every boot. **Nothing advances the minor but a person reading this row**, so bump it deliberately and read Windmill's changelog for the migration when you do - and note it is **three files, one number**: `windmill-server`, `windmill-worker` and `windmill-worker-verify` all name this tag, and a half-done bump is two binaries with different schema expectations against one database. |
 
 **`Notify=healthy` is what makes the rollback real, and without it the rollback is decorative.**
 `podman auto-update` restores the previous image only if the unit fails to **start**, and by default

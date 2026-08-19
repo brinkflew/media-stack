@@ -115,6 +115,15 @@ export const NODES: Node[] = [
     // the cell and as the tooltip title.
     publishes: ["127.0.0.1:8300 -> 8000"],
   },
+  { name: "windmill-worker", role: "the default lane; takes every job tag", networks: ["net-agents"] },
+  {
+    name: "windmill-worker-verify",
+    // One container, one worker, one tag - which is how "one verify at a time"
+    // is enforced. The tag itself is a row in Postgres, not a line in the unit
+    // file; agents.worker_lanes is what watches it.
+    role: "the serialised lane; only jobs tagged verify",
+    networks: ["net-agents"],
+  },
 ];
 
 /** Members of a segment, in declaration order. */

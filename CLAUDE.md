@@ -324,7 +324,7 @@ signal read green.
   needs its own timer because auto-update does not trigger one.
 - **A rollback restores the image and cannot un-migrate a database.** The 9.5-hour Pocket ID outage,
   and why a health probe shelling out to `curl` is an undeclared dependency on a binary the image
-  merely happens to ship. **Eighteen of the twenty-three quadlets still probe that way, and NONE of
+  merely happens to ship. **Eighteen of the twenty-seven quadlets still probe that way, and NONE of
   those eighteen images declares a healthcheck of its own** - so Pocket ID's fix cannot be copied
   across, and `containers.probe_binaries` watches the dependency instead. This line said "ten" until
   2026-08-19, when it was counted.
@@ -376,6 +376,12 @@ signal read green.
   every line, so the empty case has to short-circuit or it PASSes at zero.
 - **Do not give a phase runner a unit label to "fix" the skip** - the dashboard's worst-five
   availability strip would then carry dead runners for thirty days each.
+- **A Windmill worker's tags hot-reload from a row in Postgres**, so `WORKER_TAGS=` in the quadlet is
+  a bootstrap the UI overrides at run time with nothing in `git diff`. `agents.worker_lanes` reads
+  them back out of the database.
+- **A Windmill worker serves no HTTP**, so its probe is a `psql` query - the only one here that asks
+  a second container whether the first is doing its job. A worker that registers nothing leaves no
+  unit failed and no container unhealthy; work just queues.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running
@@ -515,7 +521,10 @@ Remaining, in order:
    series, and the TSDB snapshot in both backup scripts. **cAdvisor is the one item that was dropped
    rather than done** - the collector has to read the same cgroup files anyway for the four numbers
    cAdvisor does not export, so a second container would have been a second source for one truth.
-   The steady-state cardinality is 2,896 series against the 4,000 the check budgets for.
+   The steady-state cardinality was 2,896 series against the 4,000 the check budgeted for.
+   **Both halves of that have moved**: the agent-fleet units took it to ~4,015, so the budget was
+   re-derived to 4,500 on 2026-08-19. A container is 41-45 series, measured, which is what makes
+   "one more service" a number rather than a shrug.
 
    **The notification path is done too, 2026-08-15**, which closes this item. Prometheus rules ->
    Alertmanager -> ntfy-alertmanager -> ntfy -> phone, 17 rules in five groups, at

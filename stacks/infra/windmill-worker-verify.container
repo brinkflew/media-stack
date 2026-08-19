@@ -1,0 +1,106 @@
+# ==============================================================================
+# windmill-worker-verify: the serialised lane
+# ------------------------------------------------------------------------------
+# THE SECOND OF TWO WORKERS. It takes only jobs tagged `verify`, and there is
+# one container running one worker, so a verify is serialised by construction.
+# That is the point: a verify is what starts a gate run, and a gate run is what
+# competes with Tdarr for the encoder and with Jellyfin for memory.
+#
+# Everything not repeated here is in windmill-worker.container - the two things
+# upstream's compose does that must not be copied, why every start logs one
+# benign unshare ERROR, why the probe is a psql query, why SLEEP_QUEUE is 2000,
+# and why the tag must equal windmill-server's.
+#
+# ------------------------------------------------------------------------------
+# THE INVARIANT THIS FILE IS NAMED FOR DOES NOT LIVE IN THIS FILE.
+# ------------------------------------------------------------------------------
+# One file enforces one container. IT DOES NOT ENFORCE WHICH TAGS THAT CONTAINER
+# LISTENS TO. Windmill keeps worker-group configuration in the `config` table -
+# it ships with worker__default, worker__native and worker__reports already
+# seeded, each carrying an explicit worker_tags array - and workers watch that
+# table for changes and HOT-RELOAD them. So WORKER_TAGS below is the value used
+# only while the `verify` group has no row of its own. Create one from the UI
+# and it wins, at run time, with no restart, and `git diff` shows nothing.
+#
+# Verified rather than assumed, with a throwaway worker before this file
+# existed: with WORKER_TAGS=verify and no worker__verify row, the worker
+# registers custom_tags={verify} and NO row is auto-created. So the bootstrap
+# works today and would be silently superseded tomorrow.
+#
+# agents.worker_lanes in bin/verify-host.sh is what makes that observable: it
+# reads custom_tags back out of the database hourly, which is the only place the
+# truth is. This is the same argument agents.slice_limits makes one level up -
+# read the state back out of the thing that enforces it, never out of the file
+# that requests it.
+#
+# TWO MORE THINGS ABOUT TAGS, BOTH FOR LATER AND BOTH MEASURED NOW:
+#   - `verify` is NOT in global_settings.custom_tags, which reads ["chromium"].
+#     That list is Windmill's "Assignable Tags" - what the UI offers on a flow
+#     step - so routing a step to this lane needs the tag added there. A worker
+#     advertising the tag does not add itself.
+#   - WORKER_GROUP is `verify` rather than `default` with a tag override
+#     precisely so there is no seeded row to fight with, and so the health probe
+#     can name one container without a LIKE.
+#
+# Image:  https://github.com/windmill-labs/windmill/pkgs/container/windmill
+# See:    https://www.windmill.dev/docs/core_concepts/worker_groups
+# ==============================================================================
+
+[Unit]
+Description=Windmill worker, the serialised verify lane
+After=windmill-db.service windmill-server.service
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Container]
+# THREE FILES, ONE NUMBER - see windmill-worker.container.
+Image=ghcr.io/windmill-labs/windmill:1.792
+AutoUpdate=registry
+ContainerName=windmill-worker-verify
+Network=net-agents.network
+NoNewPrivileges=true
+User=0
+HostName=windmill-worker-verify
+
+# The same cache directory as the default lane, deliberately: :z because it is
+# shared, and one CPython download rather than two.
+Volume=${DOCKER_VOLUME_CACHE}/windmill-workers:/tmp/windmill/cache:z
+
+Environment=TZ=${TIMEZONE}
+Environment=MODE=worker
+Environment=NUM_WORKERS=1
+Environment=WORKER_GROUP=verify
+# THE BOOTSTRAP, NOT THE ENFORCEMENT - see the header.
+Environment=WORKER_TAGS=verify
+Environment=DATABASE_URL=postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME}
+Environment=BASE_INTERNAL_URL=http://windmill-server:8000
+Environment=SLEEP_QUEUE=2000
+Environment=RUST_LOG=info
+
+HealthCmd=psql postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME} -Atqc "select 1 from worker_ping where worker_group = 'verify' and ping_at > now() - interval '120 seconds'" | grep -q 1
+HealthInterval=60s
+HealthTimeout=10s
+HealthStartPeriod=30s
+HealthRetries=3
+HealthStartupCmd=psql postgres://${WINDMILL_DB_USER}:${WINDMILL_DB_PASSWORD}@windmill-db:5432/${WINDMILL_DB_NAME} -Atqc "select 1 from worker_ping where worker_group = 'verify' and ping_at > now() - interval '120 seconds'" | grep -q 1
+HealthStartupInterval=5s
+HealthStartupRetries=60
+HealthStartupSuccess=1
+# NOTE WHAT THIS PROBE DOES NOT ASSERT: that the tags are still `verify`. It is
+# deliberately liveness only. Asserting the tags here would mean a UI experiment
+# marks the unit unhealthy and, on the next auto-update, fails its start and
+# triggers a rollback of an image that was never the problem.
+Notify=healthy
+
+[Service]
+EnvironmentFile=/var/home-server/.env
+ExecStartPre=/usr/bin/mkdir -p ${DOCKER_VOLUME_CACHE}/windmill-workers
+Restart=always
+RestartSec=5
+TimeoutStartSec=360
+MemoryHigh=512M
+MemoryMax=768M
+Slice=app-agents.slice
+
+[Install]
+WantedBy=default.target

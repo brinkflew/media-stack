@@ -517,6 +517,38 @@ nothing points at is one nobody reads.
   and the next runner would evict another. The strip's own sizing comment says "twenty containers",
   which is the assumption that quietly stops holding. Runners must stay absent from
   `home_server_container_running` entirely, which is what the skip in `source_containers` guarantees.
+- **A WINDMILL WORKER'S TAGS ARE UNVERSIONED STATE THAT HOT-RELOADS, so the one-verify-lane
+  invariant does not live in the file named after it.** `windmill-worker-verify.container` carries
+  `WORKER_TAGS=verify`, and that is a **bootstrap**: Windmill keeps worker-group configuration in
+  its `config` table - which ships with `worker__default`, `worker__native` and `worker__reports`
+  already seeded, each holding an explicit `worker_tags` array - and workers watch that table and
+  reload from it. Create a `worker__verify` row from the UI and it **wins, at run time, with no
+  restart, and `git diff` shows nothing**. Measured with a throwaway worker before either unit
+  shipped: with no such row, `WORKER_TAGS=verify` produces `custom_tags={verify}` and no row is
+  auto-created - so the bootstrap works today and would be silently superseded tomorrow. One file
+  enforces one container; it does not enforce what that container listens to. `agents.worker_lanes`
+  reads `custom_tags` back out of the database hourly, which is the same argument
+  `agents.slice_limits` makes one level up. Note also that **advertising a tag is not the same as
+  being able to select it**: `global_settings.custom_tags` is Windmill's "Assignable Tags" and reads
+  `["chromium"]`, so routing a flow step to this lane needs the tag added there too.
+- **A WINDMILL WORKER SERVES NO HTTP, so the probe every other unit here uses does not exist - and
+  the failure it would have to catch is invisible to every other reader.** `windmill --help`, read
+  out of the image, documents `PORT` as the "**server**/indexer/MCP" port and `METRICS_ADDR` as EE
+  only; the binary contains no `healthz` route. A worker does start an HTTP server, on a **random**
+  port bound to `127.0.0.1` - measured at 42881 - which is unreachable and unpredictable. The
+  tempting answer is no healthcheck at all, where `duckdns` and `unpackerr` sit. It is the wrong one
+  here: these units follow a floating **patch** tag and are restarted nightly, so without
+  `Notify=healthy` the auto-update rollback is decorative, and what it would miss is a worker that
+  starts, registers nothing and takes no jobs - **no unit failed, no container unhealthy, nothing in
+  `podman ps`, and work simply queues**. So the probe is a `psql` query asserting a fresh row in
+  `worker_ping`, which makes it the only health probe on this host that asks a **second** container
+  whether the first one is doing its job. `psql` is safe to depend on for the reason `curl` was in
+  `windmill-server`: upstream installs `postgresql-client` **by name** in its final runtime stage.
+  Two things it deliberately does not do - it does not assert the tags (that would fail a start
+  after a UI change and roll back an image that was never the problem), and it does not use
+  `$DATABASE_URL`, because systemd expands `$VAR` in the generated `ExecStart` from
+  `EnvironmentFile=` **only**, and `DATABASE_URL` is assembled in `[Container]`, so it would reach
+  podman as the empty string.
 
 ## Two defects in one uCore image
 

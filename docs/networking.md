@@ -26,7 +26,7 @@ other by container name (`http://sonarr:8989`), but only where they share a netw
 | `net-egress` | duckdns |
 | `net-metrics` | caddy, prometheus, node-exporter, alertmanager, ntfy-alertmanager, ntfy |
 | `net-dashboard` | caddy, dashboard |
-| `net-agents` | caddy, windmill-db, windmill-server |
+| `net-agents` | caddy, windmill-db, windmill-server, windmill-worker, windmill-worker-verify |
 
 Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individually** - a shared
 "proxy" network holding everything with a UI would re-flatten the topology and buy nothing. It is
