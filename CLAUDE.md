@@ -619,7 +619,7 @@ seconds; and **resolution**, so you are told when it stops. The first two are wh
 channel is still being read in six months - the same argument this file already makes about
 `journalctl -p err`. `repeat_interval` is **12h for warnings, 4h for critical**.
 
-**`CheckFailing` covers all 159 check ids and every future one - but only at FAIL.** Its expression
+**`CheckFailing` covers all 196 check ids and every future one - but only at FAIL.** Its expression
 is `home_server_check_status == 3`, so **a check that is deliberately WARN never notifies**, and
 several here are WARN precisely because they must not block a reboot. Usually that is right: a WARN
 belongs in the MOTD and the dashboard, not on a phone. Where it is not - `deploy.image_digest`,
