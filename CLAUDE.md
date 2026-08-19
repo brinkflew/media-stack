@@ -370,6 +370,12 @@ signal read green.
 - **The collector's cgroup join was flat**, so the first unit ever placed in a slice would have lost
   32 of its 43 series with nothing but a counter to say so. Not `/proc/<pid>/cgroup` - the pod
   members resolve somewhere else entirely.
+- **"A container" meant "a quadlet" in six readers at once.** One throwaway `podman run --rm` made
+  `identity_unresolved` read 1, inflated two counts, and minted network series under an unbounded
+  label. The skips key on the PRESENCE of `io.home-server.ephemeral`, and `grep -vxF ""` matches
+  every line, so the empty case has to short-circuit or it PASSes at zero.
+- **Do not give a phase runner a unit label to "fix" the skip** - the dashboard's worst-five
+  availability strip would then carry dead runners for thirty days each.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running

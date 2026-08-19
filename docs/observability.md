@@ -181,6 +181,17 @@ cgroup, containing its unit name nowhere, where the join above resolves `torrent
 number - while the 11 that `podman ps` and `systemctl` answer keep reporting, so nothing else
 notices.
 
+**Containers carrying `io.home-server.ephemeral` are skipped by both container sources, and they are
+counted.** `conduct` starts its phase runners and their datastores with `podman run --rm`: no unit
+label, a lifetime of minutes, and a name carrying a worktree id. `source_containers` skips them
+because `home_server_container_identity_unresolved` otherwise reads non-zero as a matter of routine,
+which is the opposite of what its help text promises and which the Services page renders as a
+banner. `source_container_network` skips them because it has no unit check at all and would
+otherwise mint two counter series per runner under an unbounded label - against a store that keeps
+400 days, while `metrics.series_count` grades only live head series and so cannot see it.
+`home_server_containers_ephemeral` is what stops that skip becoming the next silent one, and it is
+what `agents.runners_leaked` reads. **The discriminator is the label's presence, never its value.**
+
 **`/` is deliberately not in the filesystem allowlist.** It is the read-only composefs: 8 MB, zero
 bytes free, 100% full by design and for ever. A panel showing the root filesystem full would read as
 an emergency and mean nothing, and `statvfs` returns -1 for its inode counts.

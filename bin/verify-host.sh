@@ -1559,10 +1559,33 @@ if [ -z "$GREENBOOT" ]; then
 		bad containers.units_active "quadlet service(s) NOT running:$expected_inactive"
 	fi
 
-	running=$(podman ps --format '{{.Names}}' 2>/dev/null | wc -l)
+	# THE CONTAINERS THAT ARE NOT PART OF THE STACK. conduct starts its phase
+	# runners and their datastores with `podman run --rm`, so they are not
+	# quadlets, they live for minutes, and they must not be measured as though
+	# they were services. Listed ONCE here and subtracted at the three sites
+	# below, because podman has no "not this label" filter.
+	#
+	# `grep -vxF "$eph"` IS ONLY CORRECT WHEN $eph IS NON-EMPTY. A multi-line -F
+	# pattern is a set of fixed strings, which is exactly right - but an EMPTY
+	# pattern matches every line, so without the guard the normal case (no fleet
+	# running, which is every day until conduct ships) would filter out all
+	# twenty-five containers and PASS with "0 containers up, none unhealthy".
+	# The failure only appears when nothing is wrong, which is the worst
+	# possible time for it to appear.
+	eph=$(podman ps --filter label=io.home-server.ephemeral --format '{{.Names}}' 2>/dev/null)
+	managed() { if [ -z "$eph" ]; then cat; else grep -vxF "$eph"; fi; }
+	eph_n=$(printf '%s' "$eph" | grep -c . || true)
+	fact containers_ephemeral "${eph_n:-0}" num
+
+	running=$(podman ps --format '{{.Names}}' 2>/dev/null | managed | wc -l)
 	fact containers_running "${running:-}" num
-	unhealthy=$(podman ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | paste -sd' ' -)
-	if [ -z "$unhealthy" ]; then ok containers.healthy "$running containers up, none unhealthy"
+	# THE ONLY FAIL IN THE SET, WHICH IS WHY IT IS FILTERED AND NOT JUST TRUSTED
+	# TO --no-healthcheck. Every ephemeral container conduct starts carries that
+	# flag, so none of them has a health state to report - but a flag lives in
+	# another repository, and a FAIL here blocks bin/reboot-host.sh and so an OS
+	# security update. That is the one blast radius worth spending a filter on.
+	unhealthy=$(podman ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | managed | paste -sd' ' -)
+	if [ -z "$unhealthy" ]; then ok containers.healthy "$running containers up, none unhealthy${eph_n:+, $eph_n ephemeral}"
 	else bad containers.healthy "unhealthy: $unhealthy"; fi
 
 	# duckdns, unpackerr and the pod's infra container define no healthcheck.
@@ -1642,8 +1665,13 @@ if [ -z "$GREENBOOT" ]; then
 		esac
 		podman exec "$pc" sh -c "$pprobe" >/dev/null 2>&1 \
 			|| probe_missing="$probe_missing $pc($pcmd)"
+	# `managed` for the same reason, plus one of its own: the name comes from
+	# podman ps and the `podman exec` above runs seconds later, so a --rm
+	# container that exits in between fails the exec and is recorded as a probe
+	# whose binary is missing. That WARN pages, latches for an hour, and names a
+	# container nobody can inspect.
 	done <<-EOF
-		$(podman ps --format '{{.Names}}' 2>/dev/null)
+		$(podman ps --format '{{.Names}}' 2>/dev/null | managed)
 	EOF
 	fact probe_binary_missing "$(printf '%s' "$probe_missing" | wc -w)" num
 	fact probe_binary_checked "$probe_checked" num

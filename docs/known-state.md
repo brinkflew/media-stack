@@ -479,6 +479,45 @@ nothing points at is one nobody reads.
   the unit's own cgroup. Switching would have silently changed what the four pod members' numbers
   mean while every one of them kept reporting.
 
+- **"A container" meant "a quadlet" everywhere, and six readers each assumed it away differently.**
+  `conduct` starts its phase runners and their datastores with `podman run --rm`: no
+  `PODMAN_SYSTEMD_UNIT`, a lifetime of minutes, and a name carrying a worktree id. Measured with one
+  throwaway busybox on `net-agents`, against the code as it stood: `home_server_container_identity_
+  unresolved` went 0 -> 1 (a counter whose help text says that means the join has broken, and which
+  the Services page renders as *"N container(s) could not be mapped to a systemd unit, so they are
+  absent from this table"*); `home_server_containers` went 25 -> 26; `containers.healthy` reported
+  *"26 containers up"*; and two `home_server_container_network_*` series appeared labelled with the
+  throwaway's name. **The `container` label had exactly twenty-five values and had never grown.**
+  The skips are keyed on the PRESENCE of `io.home-server.ephemeral`, never its value: a bare
+  `--label io.home-server.ephemeral` yields `""`, and a truthiness test would read that as "not
+  ephemeral" and silently restore all of it. `podman ps --filter label=<key>` matches on presence
+  too, so the shell and the Python agree without either restating the rule.
+  **The two collector skips look identical and are different bugs.** `source_containers` already
+  emitted nothing for an unlabelled container, so its damage was purely the lying counter;
+  `source_container_network` has no unit check at all, so its damage is real cardinality - and
+  retention here is **400 days** while `metrics.series_count` grades `prometheus_tsdb_head_series`,
+  live series only, compacted out after about two hours. **The budget check cannot see persisted
+  churn**; only `metrics.tsdb_size`, at its 18 GB ceiling, would ever notice.
+- **Three of those seven readers are closed by a flag rather than by code, and that is the better
+  fix.** `containers.healthy`, `containers.probe_binaries` and `logs.healthcheck_events` all read
+  the health *state* of whatever `podman ps` returns, and only misbehave when a container inherits a
+  `HEALTHCHECK` from its base image - which the fleet's datastores plausibly do and nobody controls.
+  `--no-healthcheck` on every `podman run` `conduct` issues closes all three at the source, where
+  three defensive filters would each have to stay correct for ever. **`containers.healthy` is
+  filtered as well anyway**, because it is the only one of the seven whose failure is a FAIL rather
+  than a WARN, and a FAIL blocks `bin/reboot-host.sh` and therefore an OS security update.
+  **`grep -vxF ""` matches every line**, so the subtraction has to short-circuit when nothing is
+  ephemeral - otherwise the normal case filters out all twenty-five containers and PASSes with
+  *"0 containers up, none unhealthy"*. The failure appears only when nothing is wrong.
+- **DO NOT "FIX" THE SKIP BY GIVING A RUNNER A UNIT LABEL.** This is the trap the skips create and
+  it is invisible for thirty days. `apps/dashboard/src/pages/SystemPage.vue` renders the **worst
+  five** containers by 30-day availability, sorted ascending on
+  `avg_over_time(home_server_container_running[1h])`. A runner that lived twenty minutes and emitted
+  that series would score about 0% for its day, **evicting a real row from the strip for a month** -
+  and the next runner would evict another. The strip's own sizing comment says "twenty containers",
+  which is the assumption that quietly stops holding. Runners must stay absent from
+  `home_server_container_running` entirely, which is what the skip in `source_containers` guarantees.
+
 ## Two defects in one uCore image
 
 - **THE SAME IMAGE ALSO SHIPPED AN UNPARSEABLE `policy.json`, AND THAT IS WHY THE PCP MASK WAS

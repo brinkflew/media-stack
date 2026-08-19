@@ -475,6 +475,17 @@ def source_container_network(m):
     pairs = 0
     unmapped = 0
     for c in containers:
+        # THE CARDINALITY HALF, and a different bug from the one in
+        # source_containers even though the fix looks identical. This source has
+        # no unit check at all, so it measures a phase runner and mints two
+        # counter series labelled with its name - and that name carries a
+        # worktree id. The header above already argues the case against itself:
+        # "Container and network names change only when stacks/ does" stops
+        # being true the moment conduct runs. Retention is 400 days and
+        # metrics.series_count grades HEAD series only, so the churn would
+        # accumulate on disk entirely unobserved.
+        if _is_ephemeral(c):
+            continue
         # A container reporting no networks of its own is a pod member: it
         # shares the infra container's namespace, so its /proc/<pid>/net/dev is
         # literally the SAME counter. Reading all four members would report the
@@ -567,6 +578,23 @@ def source_container_network(m):
 # maintained in a script is the most driftable thing this repository could own.
 # home_server_container_identity_unresolved counts what did not map, because the
 # failure would otherwise be silent: a container simply missing from every panel.
+
+# THE ONE CONTAINER CLASS THAT IS NOT A QUADLET. conduct starts its phase
+# runners and their datastores with `podman run --rm`, so they carry no
+# PODMAN_SYSTEMD_UNIT, they live for minutes, and their names contain a worktree
+# id. Every reader in this file was written when a container meant a quadlet.
+#
+# PRESENCE, NEVER THE VALUE. `--label io.home-server.ephemeral` with no `=1`
+# yields "", which a truthiness test reads as "not ephemeral" - so a typo in the
+# runner invocation would silently restore both failures below. `podman ps
+# --filter label=<key>` matches on presence too, so bin/verify-host.sh and this
+# file agree without either restating the rule.
+EPHEMERAL_LABEL = "io.home-server.ephemeral"
+
+
+def _is_ephemeral(c):
+    return EPHEMERAL_LABEL in (c.get("Labels") or {})
+
 
 HEALTH_STATES = {"healthy": 0, "starting": 1, "unhealthy": 2}
 
@@ -668,7 +696,8 @@ def _unit_cgroup(unit):
     search would also match the libpod-payload-<id> cgroup nested INSIDE the
     directory being looked for - a different set of numbers that would look
     entirely plausible. If a slice ever nests deeper than this, the signal is
-    identity_unresolved, which is already exported and already alerted on.
+    identity_unresolved, which is exported - though no rule fires on it, so
+    the Services page banner is the surface that would actually be seen.
 
     Not /proc/<pid>/cgroup, which is the obvious authoritative answer and is
     wrong here: torrent-infra reports the POD's cgroup
@@ -699,7 +728,18 @@ def source_containers(m):
     containers = json.loads(raw)
 
     unresolved = 0
+    ephemeral = 0
     for c in containers:
+        # SKIPPED BEFORE unresolved, NOT AFTER, and the order is the whole
+        # point. An ephemeral container emits no series either way - the `not
+        # unit` branch below already returns before any m.add - so the damage
+        # was never a wrong number, it was a counter documented as "the join has
+        # broken" reading non-zero as a matter of routine, and a banner on the
+        # Services page saying containers are missing from the table whenever a
+        # phase runs. Measured: one throwaway container took it from 0 to 1.
+        if _is_ephemeral(c):
+            ephemeral += 1
+            continue
         name = (c.get("Names") or ["?"])[0]
         unit = (c.get("Labels") or {}).get("PODMAN_SYSTEMD_UNIT", "")
         if not unit:
@@ -758,8 +798,22 @@ def source_containers(m):
           "Containers that could not be mapped to a cgroup. Non-zero means the "
           "PODMAN_SYSTEMD_UNIT join has broken and some containers are missing "
           "from every panel.")
-    m.add("home_server_containers", len(containers), None,
-          "Containers podman reports.")
+    # MANAGED CONTAINERS, which is a change of meaning under an existing name -
+    # a no-op today, because the two numbers are identical until a fleet
+    # container runs, and named here rather than discovered in a graph later.
+    m.add("home_server_containers", len(containers) - ephemeral, None,
+          "Containers podman reports, EXCLUDING the ephemeral ones conduct "
+          "starts. Those are counted by home_server_containers_ephemeral.")
+    # A SKIP THAT COUNTS NOTHING IS THE SILENT FAILURE THIS FILE IS WRITTEN
+    # AGAINST. identity_unresolved exists for exactly that reason, so taking
+    # runners out of it without putting them anywhere would trade one blind spot
+    # for another. It is also what agents.runners_leaked reads: a leaked runner
+    # is a container with this label that outlived its transient scope.
+    m.add("home_server_containers_ephemeral", ephemeral, None,
+          "Containers carrying io.home-server.ephemeral - conduct's phase "
+          "runners and their datastores. Deliberately absent from every other "
+          "container series: they live for minutes and their names carry a "
+          "worktree id, so a label would be unbounded.")
 
 
 def _started_at(c):
