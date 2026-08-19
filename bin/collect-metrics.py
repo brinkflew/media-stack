@@ -572,6 +572,78 @@ HEALTH_STATES = {"healthy": 0, "starting": 1, "unhealthy": 2}
 PSI_LEVELS = {"some": "waiting", "full": "stalled"}
 
 
+# systemd's own view of the quadlet units. UNIT_STATES maps ActiveState onto a
+# number the same way HEALTH_STATES does for container health: 0 is the good
+# case, and everything else is ordered roughly by how much it wants attention.
+UNIT_STATES = {"active": 0, "activating": 1, "failed": 2, "deactivating": 3,
+               "inactive": 4, "reloading": 5}
+
+GENERATOR = "/run/user/%d/systemd/generator" % os.getuid()
+
+
+def source_units(m):
+    """Unit-level state, which is the half podman cannot see.
+
+    THIS EXISTS BECAUSE home_server_container_restarts_total IS ALWAYS ZERO.
+    That series reads podman's per-container Restarts field, which is reset
+    whenever the container is RECREATED - and a quadlet recreates on every
+    restart, so the number can only ever climb inside a single container's life
+    and a restart loop resets it to 0 each time round. Pocket ID restarted 6,224
+    times between 00:20 and 09:55 on 2026-08-19 and that gauge read 0 for the
+    whole outage, which made ContainerRestartLoop - the one rule named for
+    exactly this failure - unable to fire even in principle.
+
+    systemd's NRestarts is the counter that survives, because the unit outlives
+    the containers it creates. It resets on a clean start, which is wanted: the
+    question is "is this looping now", not "has it ever looped".
+
+    ENUMERATED FROM THE GENERATOR DIRECTORY, NOT FROM `podman ps`. A container
+    that is gone has no podman row, and a container that is gone is precisely
+    the case worth reporting - deriving the unit list from running containers
+    would make this source blindest at the moment it matters most.
+    """
+    try:
+        names = sorted(f for f in os.listdir(GENERATOR) if f.endswith(".service"))
+    except OSError:
+        raise RuntimeError("no quadlet generator directory at %s" % GENERATOR)
+    if not names:
+        raise RuntimeError("no quadlet units in %s" % GENERATOR)
+
+    raw = run(["systemctl", "--user", "show"] + names
+              + ["-p", "Id", "-p", "NRestarts", "-p", "ActiveState",
+                 "-p", "SubState", "-p", "SourcePath"], timeout=20)
+    if raw is None:
+        raise RuntimeError("systemctl show failed")
+
+    unhealthy = 0
+    for chunk in raw.split("\n\n"):
+        rec = dict(line.split("=", 1) for line in chunk.splitlines() if "=" in line)
+        unit = rec.get("Id")
+        if not unit:
+            continue
+        # .container and .pod units stay up; .build and .network units are
+        # oneshot and are INACTIVE when all is well, so the kind label is what
+        # stops a rule reading a healthy network unit as a dead service.
+        kind = os.path.splitext(rec.get("SourcePath", ""))[1].lstrip(".") or "unknown"
+        labels = {"unit": unit, "kind": kind}
+        state = rec.get("ActiveState", "")
+        m.add("home_server_unit_restarts_total",
+              int(rec.get("NRestarts") or 0), labels,
+              "systemd's NRestarts for a quadlet unit. Unlike the container "
+              "counter this survives the container being recreated, so a "
+              "restart loop is visible here and nowhere else.", "counter")
+        m.add("home_server_unit_state", UNIT_STATES.get(state, 9), labels,
+              "0 active, 1 activating, 2 failed, 3 deactivating, 4 inactive, "
+              "5 reloading, 9 unrecognised.")
+        if kind in ("container", "pod") and state != "active":
+            unhealthy += 1
+
+    m.add("home_server_units_not_active", unhealthy, None,
+          "Long-running quadlet units (.container and .pod) that are not "
+          "active. Oneshot .build and .network units are excluded, because "
+          "inactive is their correct resting state.")
+
+
 def source_containers(m):
     raw = run(["podman", "ps", "--format", "json"], timeout=20)
     if raw is None:
@@ -601,9 +673,18 @@ def source_containers(m):
         m.add("home_server_container_running",
               1 if c.get("State") == "running" else 0, labels,
               "1 when the container is running.")
+        # KEPT, AND NOT THE ONE TO ALERT ON - see source_units above. A quadlet
+        # recreates the container on every restart, so this resets each time
+        # round a restart loop and reads 0 throughout the exact event it looks
+        # like it would catch. home_server_unit_restarts_total is the counter
+        # that survives. This one still says something the other cannot: a
+        # container restarting WITHOUT its unit restarting, which is podman's
+        # own doing rather than systemd's.
         m.add("home_server_container_restarts_total", c.get("Restarts", 0),
-              labels, "Restart count as podman reports it. Resets when the "
-              "container is recreated, which auto-update does nightly.",
+              labels, "Restarts as podman reports them, for THIS container "
+              "object only - reset whenever the container is recreated, which "
+              "a quadlet does on every unit restart. Always 0 during a restart "
+              "loop; use home_server_unit_restarts_total for that.",
               "counter")
         m.add("container_start_time_seconds", _started_at(c), labels,
               "Unix timestamp the container started.")
@@ -2361,6 +2442,7 @@ def _attention_rows(m, doc):
 SOURCES = (
     ("filesystems", source_filesystems, False, None),
     ("network", source_network, False, None),
+    ("units", source_units, False, None),
     ("containers", source_containers, False, None),
     ("container_network", source_container_network, False, None),
     ("gpu", source_gpu, False, None),

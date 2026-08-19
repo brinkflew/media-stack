@@ -1036,6 +1036,50 @@ if [ -z "$GREENBOOT" ]; then
 	fi
 	check_timer_run update.podman_run "container update" 86400 podman-auto-update.service --user
 
+	# A FAILED ROLLBACK AND A BURPED PRUNE ARE THE SAME FINDING TODAY, and they
+	# could not be further apart. update.podman_run reports "exit 125" for both:
+	# for the housekeeping error above, which leaves a correctly updated stack
+	# running, and for 2026-08-19, where the rollback of pocket-id.service failed
+	# and there was no sign-on anywhere in the stack for nine and a half hours.
+	# Two nights of the trivial one had already taught the reader what "exit 125"
+	# means before the serious one arrived wearing exactly the same words.
+	#
+	# SCOPED TO THE LAST INVOCATION, not a time window. The unit runs nightly, so
+	# a rollback three weeks ago is history rather than a finding, and grepping a
+	# window would keep reporting it until the window slid past.
+	#
+	# Two distinct signals, and the ORDER MATTERS because the worse one is the
+	# rarer one: `during rollback` is podman failing to restore the previous
+	# image, which is the state that leaves a service down. The report's own
+	# UPDATED column is the softer signal - a rollback that WORKED. MATCH BOTH
+	# WORDS THERE: this podman writes `failed` in that column, not the `rolled
+	# back` the documentation shows, and a matcher for the documented spelling
+	# alone would have read the 2026-08-19 run as a clean night.
+	pau_inv=$(systemctl --user show podman-auto-update.service -p InvocationID --value 2>/dev/null)
+	if [ -z "$pau_inv" ]; then
+		note update.rollback "podman-auto-update has no recorded invocation yet"
+	else
+		pau_log=$(journalctl --user "_SYSTEMD_INVOCATION_ID=$pau_inv" -o cat --no-pager 2>/dev/null)
+		pau_broke=$(printf '%s\n' "$pau_log" \
+			| sed -n 's/.*restarting unit \([^ ]*\) during rollback.*/\1/p' | sort -u | paste -sd' ' -)
+		pau_back=$(printf '%s\n' "$pau_log" \
+			| sed -nE 's/^ *([a-z0-9-]+\.service) .*(rolled back|failed)$/\1/p' | sort -u | paste -sd' ' -)
+		fact update_rollback_failed "${pau_broke:-}"
+		fact update_rolled_back "${pau_back:-}"
+		if [ -n "$pau_broke" ]; then
+			# The image is restored and the database is NOT - see
+			# stacks/infra/pocket-id.container for the repair, which is the
+			# pre-update snapshot and not the rollback.
+			bad update.rollback "the last update run COULD NOT ROLL BACK:$( \
+				printf ' %s' "$pau_broke") - that service is down; restore its database from ~/.cache/home-server/pre-update-db/ or pull the newer image again"
+		elif [ -n "$pau_back" ]; then
+			warn update.rollback "the last update run rolled back:$( \
+				printf ' %s' "$pau_back") - the new image would not go healthy, so an upstream release cannot run here"
+		else
+			ok update.rollback "the last update run rolled nothing back"
+		fi
+	fi
+
 	# Caddy is built here, and `local` policy notices a new image without ever
 	# producing one - so if this timer stops, Caddy silently stops updating while
 	# every other service carries on.
@@ -1957,6 +2001,29 @@ if [ -z "$GREENBOOT" ]; then
 		warn metrics.alert_delivery "$notify_err alert deliveries failed in the last hour - alerts are being evaluated and dropped"
 	fi
 	fact metrics_notify_errors "${notify_err:-}" num
+
+	# THE HOP AFTER THAT ONE. metrics.alert_delivery above measures Prometheus
+	# handing an alert to Alertmanager; this measures Alertmanager handing it to
+	# the ntfy bridge, which is where the credential lives and therefore where a
+	# 401 happens. Until 2026-08-19 nothing measured it at all, for a reason
+	# worth keeping: Alertmanager appears in prometheus.yml under `alerting:`,
+	# which makes it a destination rather than a scrape target, so its counters
+	# existed and were collected by nobody.
+	#
+	# NOT MEASURED IS ITS OWN ANSWER HERE, deliberately. A zero would claim the
+	# bridge is fine, and the state this is most likely to be in on a host where
+	# something is wrong is "the series is missing", which is the one reading
+	# that must not be reported as healthy.
+	bridge_err=$(promq 'increase(alertmanager_notifications_failed_total{integration="webhook"}[1h])')
+	bridge_err=${bridge_err%%.*}
+	if [ -z "${bridge_err:-}" ]; then
+		warn metrics.alert_bridge "the Alertmanager->ntfy counters are not being collected - the last hop to the phone is unmeasured"
+	elif [ "$bridge_err" -eq 0 ]; then
+		ok metrics.alert_bridge "no ntfy bridge delivery failures in the last hour"
+	else
+		bad metrics.alert_bridge "$bridge_err notification(s) failed on the Alertmanager->ntfy hop in the last hour - alerts are grouped and then dropped, so nothing reaches the phone"
+	fi
+	fact metrics_bridge_errors "${bridge_err:-}" num
 
 	# node-exporter's namespace-scoped collectors must stay off. /proc/net is a
 	# symlink to self/net, so it resolves in the READER's network namespace and

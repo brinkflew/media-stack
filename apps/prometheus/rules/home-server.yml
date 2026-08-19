@@ -105,6 +105,56 @@ groups:
             ntfy-alertmanager, then ntfy - in that order, it is the direction
             the alert travels.
 
+      - alert: AlertBridgeFailing
+        # THE HOP THAT NOTHING WATCHED. AlertDeliveryFailing above covers
+        # Prometheus -> Alertmanager, and the chain is four hops long:
+        # Prometheus -> Alertmanager -> ntfy-alertmanager -> ntfy -> phone.
+        # Everything past the first hop was unmeasured, and the failure mode is
+        # documented right there in apps/alertmanager/alertmanager.yml: a
+        # password_file naming the read-only mount, where "every container stays
+        # healthy, both configs validate, Prometheus is happy, and each
+        # notification fails with a 401 that only appears in Alertmanager's own
+        # log". This is that 401, as a series.
+        #
+        # It also covers the case that made the 2026-08-19 outage impossible to
+        # reconstruct afterwards: ntfy-alertmanager does not log a webhook it
+        # receives, so its journal cannot say whether a page was delivered. This
+        # can.
+        expr: increase(alertmanager_notifications_failed_total{integration="webhook"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Alertmanager cannot reach the ntfy bridge"
+          description: >-
+            Alerts are grouped and then dropped on the last hop, so nothing in
+            this file reaches the phone. Most likely the rendered credential at
+            /alertmanager/webhook.pw - a 401 shows only in Alertmanager's log.
+
+      - alert: Watchdog
+        # A DEAD MAN'S SWITCH, and the only thing here that can prove the chain
+        # end to end. Every other rule proves itself by firing; none of them can
+        # prove that a SILENT phone means a healthy stack rather than a broken
+        # notifier. This one always fires, so its arrival each day is the proof
+        # and its absence is the finding.
+        #
+        # BE HONEST ABOUT WHAT IT COSTS AND WHAT IT CANNOT DO. It is delivered
+        # through the same path it is testing, so it cannot alert on its own
+        # failure - a human noticing it stopped is the detector, which is weaker
+        # than every other rule here. The external alternative is a third-party
+        # cron-monitor holding a URL for this host, and that was not wanted.
+        # priority 2 in the bridge: it appears in the notification shade without
+        # a sound, once a day.
+        expr: vector(1)
+        labels:
+          severity: heartbeat
+        annotations:
+          summary: "Alerting is alive"
+          description: >-
+            Sent once a day through the whole chain. If this stops arriving,
+            the chain is broken - not the stack quiet. Check alertmanager, then
+            ntfy-alertmanager, then ntfy, in that order.
+
       - alert: CollectorClientUnavailable
         # AN APPLICATION THE COLLECTOR CANNOT POLL AT ALL, which is a different
         # thing from one that answered with nothing - and the reason this rule
@@ -204,17 +254,30 @@ groups:
             --format '{{ "{{" }}json .State.Health{{ "}}" }}'` keeps the last
             five results with their output.
 
-      - alert: ContainerRestartLoop
-        expr: increase(home_server_container_restarts_total[1h]) > 5
+      - alert: UnitRestartLoop
+        # THIS RULE COULD NOT FIRE FOR AS LONG AS IT EXISTED. It read
+        # home_server_container_restarts_total, which is podman's per-container
+        # Restarts field - and a quadlet RECREATES the container on every
+        # restart, so the counter resets each time round the loop. It read 0
+        # through all 6,224 of pocket-id's restarts on 2026-08-19, during the
+        # nine and a half hours it was built to catch.
+        #
+        # home_server_unit_restarts_total is systemd's NRestarts, which belongs
+        # to the unit rather than the container and therefore survives. Keyed on
+        # kind so the oneshot .build and .network units cannot contribute.
+        expr: >-
+          increase(home_server_unit_restarts_total{kind=~"container|pod"}[1h]) > 5
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.container }} has restarted repeatedly"
+          summary: "{{ $labels.unit }} has restarted repeatedly"
           description: >-
             A unit stuck restarting is usually Restart=always plus a failure at
             startup, not slow progress. Read the journal rather than waiting -
-            the real error scrolls past between restarts.
+            the real error scrolls past between restarts. Since 2026-08-19 the
+            unit gives up after ~100s and lands in `failed`; if it is still
+            looping, something is restarting it from outside.
 
       - alert: ProbeBinaryMissing
         # A SECOND WARN THAT HAS TO NOTIFY, for the same reason OsImageStale
