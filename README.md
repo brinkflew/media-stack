@@ -17,6 +17,7 @@ device you already carry.
 | `host/RUNBOOK.md` | the migration procedure, and the restore and rollback paths |
 | `secrets/` | every credential, encrypted with sops+age |
 | `bin/` | deploy, backup and maintenance scripts |
+| `docs/` | conclusions from auditing the running host, so they are not rediscovered |
 
 One rule holds the two halves apart: **unit definitions live in `stacks/`, and the files those units
 deploy live in `apps/`.**
@@ -32,8 +33,8 @@ maintain.
 Certificates are issued per hostname on demand over DNS-01, so adding a service is a DNS record and
 a block in the Caddyfile, and a hostname nobody has configured simply fails the TLS handshake.
 
-`CLAUDE.md` is the real documentation: architecture, the reasoning behind each decision, and the
-things that were learned the hard way and should not be rediscovered.
+`CLAUDE.md` is the real documentation: architecture, and the reasoning behind each decision. The
+things learned the hard way are indexed there and written out in `docs/known-state.md`.
 
 ## Direction
 
