@@ -16,11 +16,34 @@ Description=Jellyseerr
 After=jellyfin.service radarr.service sonarr.service
 
 [Container]
-Image=docker.io/fallenbagel/jellyseerr:latest
+# :2, not :latest, since 2026-08-19 - and it is the ONLY image here that could
+# make that move. The doctrine is already written down in CLAUDE.md, where
+# VictoriaMetrics was rejected as the metrics store precisely because it
+# publishes no rolling major tag; eleven images here were tracking :latest in
+# spite of it.
+#
+# Checked against each registry rather than assumed, and the answer was mostly
+# no: flaresolverr, tdarr, tdarr_node and joal publish full version pins and
+# :latest with nothing in between, ntfy-alertmanager publishes only :latest,
+# and LinuxServer ships :latest as its stable channel alongside pins like
+# 10.10.7ubu2404-ls88 - so for those the choice is a moving tag or a pin that
+# nothing maintains, which is the trap digest pinning already fell into here.
+#
+# Which is why the rollback matters more than the tag: see
+# host/systemd/podman-auto-update.service.d/20-snapshot-databases.conf.
+Image=docker.io/fallenbagel/jellyseerr:2
 AutoUpdate=registry
 ContainerName=jellyseerr
 Network=net-arr.network
 Network=net-media.network
+
+# NoNewPrivileges is free here and is measured rather than assumed: nothing in
+# this image needs to gain privileges through a setuid binary. A capability set
+# is the next step and needs the same per-container test - DropCapability=ALL is
+# NOT safe by default, and the two counter-examples are in this repository:
+# caddy exits without NET_BIND_SERVICE, and every LinuxServer image needs five
+# capabilities before s6-overlay will start at all.
+NoNewPrivileges=true
 
 Volume=${DOCKER_VOLUME_CONFIG}/jellyseerr:/app/config:Z
 
