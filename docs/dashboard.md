@@ -185,7 +185,7 @@ check.
 **`via` is derived, not declared, because the intersection is often larger than one.** caddy and
 sonarr share `net-arr` **and** `net-download`; caddy and jellyseerr share `net-arr` and `net-media`.
 Which one podman's DNS resolves at connect time is observable nowhere, so a hand-written `via` would
-be a claim nothing supports. Six of the 38 edges are ambiguous this way, and the drawing renders them
+be a claim nothing supports. Six of the 39 edges are ambiguous this way, and the drawing renders them
 as ambiguous.
 
 **Two terminals, not one.** `wan` is inbound and `internet` is outbound, and collapsing them into a

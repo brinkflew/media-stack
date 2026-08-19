@@ -83,7 +83,7 @@ every time someone rediscovers it. Three things settled it:
 - **It is not perceptible.** 5x on a number that starts at 12 ms is still under a tenth of a second,
   and nobody browsing has ever noticed. The measurement is real; the complaint was theoretical.
 - **A blanket override is unavailable.** `*.avanserv.com` serves a DIFFERENT machine, so the
-  override cannot be `avanserv.com` -> `192.168.0.100`; it has to enumerate the twelve hostnames
+  override cannot be `avanserv.com` -> `192.168.0.100`; it has to enumerate the fifteen hostnames
   Caddy answers for. That is a second list of the Caddyfile's site blocks, maintained by hand, in a
   place nothing validates - the most driftable shape this repository has a name for.
 - **Both places to put it are worse than the problem.** On the router it is unversioned state this

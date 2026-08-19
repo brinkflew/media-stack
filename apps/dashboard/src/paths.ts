@@ -91,6 +91,8 @@ export const PATHS: Path[] = [
     why: "/api/alerts on home.{$DOMAIN}, GET and HEAD only" },
   { from: "caddy", to: "dashboard", source: "git",
     why: "home.{$DOMAIN}: this page, and status.json as a file" },
+  { from: "caddy", to: "windmill-server", source: "git",
+    why: "agents.{$DOMAIN}, behind sign-on - the only route into the control plane" },
 
   // --- declared in stacks/, as an Environment= hostname ---------------------
   { from: "tinyauth", to: "pocket-id", source: "git",

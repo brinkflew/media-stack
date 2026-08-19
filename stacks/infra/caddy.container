@@ -51,6 +51,12 @@ Network=net-metrics.network
 # static file server. Caddy has to be on it because it is the only way in, and
 # the dashboard is deliberately NOT on net-metrics - see that network's unit.
 Network=net-dashboard.network
+# The eighth, for agents.${DOMAIN}. Note what joining it does NOT do: net-agents
+# holds windmill-db as well as the server, and this proxy has no block naming
+# the database - reachability is not a route. What makes the database safe is
+# that nothing outside asks for it, and that is asserted rather than assumed,
+# by the forbidden-edge checks that probe by IP from a throwaway container.
+Network=net-agents.network
 
 # NET_BIND_SERVICE IS THE ONE THAT CANNOT GO, and it was measured rather than
 # reasoned about: with DropCapability=ALL alone the container cannot bind 80 and

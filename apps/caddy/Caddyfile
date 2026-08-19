@@ -2,7 +2,7 @@
 # Caddy: reverse proxy and TLS terminator
 # ------------------------------------------------------------------------------
 # One site block per hostname, proxying to a container by name. Caddy joins each
-# of the six segments it needs individually, so a name only resolves where the
+# of the eight segments it needs individually, so a name only resolves where the
 # two of them share a network.
 #
 # Adding a service is two steps: a CNAME to the dynamic-DNS name, and a block
@@ -193,6 +193,57 @@ torrent.{$DOMAIN} {
 fakerr.{$DOMAIN} {
 	import protected
 	reverse_proxy torrent:{$PORT_JOAL_WEB}
+}
+
+# ------------------------------------------------------------------------------
+# The agent control plane
+# ------------------------------------------------------------------------------
+# Windmill drives the coding-agent pipeline. It is behind sign-on like every
+# other admin surface here, and the cost of that is deliberate: a Pocket ID
+# outage blocks approvals, which is the correct direction. An autonomous agent
+# whose gatekeeper is down should fail closed.
+#
+# 8000, NOT ${PORT_WINDMILL_HTTP}. That variable is 8300, the HOST loopback port
+# `conduct` polls; inside the container Windmill listens on a fixed 8000. From a
+# container on net-agents, :8000 answers and :8300 is refused. So it is written
+# out like sonarr:8989 rather than parameterised, and caddy.container therefore
+# needs no Environment= line for it.
+#
+# THIS BLOCK CARRIES NO PATH GUARD, AND AN EARLIER DRAFT OF THE PLAN SPECIFIED
+# ONE: a 403 on /api/w/*/jobs_u/* except resume and cancel, as a second layer
+# for the case where forward_auth fails open. It was dropped after reading
+# Windmill's own OpenAPI document, and the reasoning is worth keeping because
+# the guard reads so plausibly.
+#
+#   - `jobs_u` is not a small family of webhook endpoints. It is 26 paths, 19 of
+#     which the frontend calls: get, get_logs, getupdate, getupdate_sse, queue,
+#     completed, get_flow*, get_args, dispatch_events, resume, cancel. It is the
+#     UI's entire read path, so 403ing it breaks the application - and the guard
+#     runs AFTER forward_auth passes, so it would refuse authenticated users too.
+#   - The `_u` suffix means no SESSION required, not no CREDENTIAL required. The
+#     document's global security block is bearerAuth or cookieAuth and exactly
+#     one path overrides it. The session-free ones carry an HMAC signature in the
+#     path; a bogus one returns 400, not 401 - the route exists and rejects it.
+#   - There is no authenticated resume endpoint at all. jobs/resume_urls only
+#     MINTS the signed URLs. So 403ing jobs_u/resume makes approval impossible.
+#
+# What replaces the second layer is Windmill's own session auth, which is what
+# that document says every non-signature route already requires. The residual
+# risk is real and is NOT an ingress problem: a signed jobs_u/resume URL sent to
+# ntfy would be a bearer token in a channel deliberately outside sign-on. What
+# travels must be the UI's approval page. See docs/agents.md.
+#
+# flush_interval -1 IS LOAD-BEARING, and confirmed rather than inferred: the
+# frontend calls jobs_u/getupdate_sse, so a running job's console is server-sent
+# events - exactly ntfy's case, where default buffering shows a blank pane for
+# the whole run.
+# ------------------------------------------------------------------------------
+
+agents.{$DOMAIN} {
+	import protected
+	reverse_proxy windmill-server:8000 {
+		flush_interval -1
+	}
 }
 
 # ------------------------------------------------------------------------------

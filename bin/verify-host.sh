@@ -2382,7 +2382,7 @@ if [ -z "$GREENBOOT" ]; then
 		# request never reaches it. qBittorrent was crash-looping behind a
 		# healthy-looking 302 once already. The dashboard's own health check is
 		# what covers the container.
-		for h in watch request id auth home sonarr radarr prowlarr tdarr torrent ntfy; do
+		for h in watch request id auth home sonarr radarr prowlarr tdarr torrent ntfy agents; do
 			# NTFY SERVES ITS WEB UI AT / TO ANYONE, so the refusal this battery
 			# wants to see is not on that path. Asked for "/", ntfy answers 200
 			# whether it is deny-all or wide open - so the check could only ever

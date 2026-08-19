@@ -26,6 +26,7 @@ other by container name (`http://sonarr:8989`), but only where they share a netw
 | `net-egress` | duckdns |
 | `net-metrics` | caddy, prometheus, node-exporter, alertmanager, ntfy-alertmanager, ntfy |
 | `net-dashboard` | caddy, dashboard |
+| `net-agents` | caddy, windmill-db, windmill-server |
 
 Each has its own `NET_SUBNET_*` variable. **Caddy joins every segment individually** - a shared
 "proxy" network holding everything with a UI would re-flatten the topology and buy nothing. It is
@@ -52,13 +53,14 @@ eight, and no exporter holds a credential outside the segment that already holds
 **Isolation is not free under Podman, and this is the single most important difference from the
 Compose stack.** Docker put every bridge in `DOCKER-ISOLATION-STAGE-2` and dropped traffic between
 them, which is what made "no shared network means no route" true. **Netavark does not.** Created
-plain, these seven networks were fully routable to one another - measured, not assumed: a container
+plain, the seven networks that existed then were fully routable to one another - measured, not
+assumed: a container
 on `net-solver` reached Sonarr on `net-arr` by IP, and so did `net-media`, `net-egress` and
 `net-transcode`. The topology looked segmented and was flat.
 
 Every `.network` unit therefore carries `Options=isolate=true`. **Do not remove it, and do not add a
 network without it.** It constrains bridges rather than membership, so Caddy still reaches each of
-the five segments it joins.
+the eight segments it joins.
 
 Verify a forbidden edge **by IP, from a throwaway container on the source network**, never by name
 resolution: a container has one address per network it joins, a name proves only one of them, and
@@ -164,7 +166,12 @@ Two things about this that are easy to get wrong, both learned the hard way:
   "couldn't process the response from your passkey".
 
 `watch`, `request` and `ntfy` are the only routes not behind sign-on: each authenticates its own
-users, and their clients have no browser in which to complete a passkey prompt. **`ntfy` is the one
+users, and their clients have no browser in which to complete a passkey prompt. **`agents` is
+deliberately not a fourth**, and the reason is the inverse of theirs: the resume URLs that approve an
+agent's work travel by ntfy, which is *already* outside sign-on, so an unauthenticated approval path
+would make the ntfy credential sufficient to merge. The cost is that a Pocket ID outage blocks
+approvals - which is the correct direction, since an autonomous agent whose gatekeeper is down
+should fail closed. **`ntfy` is the one
 that looks wrong and is not** - an alerting endpoint outside sign-on invites the obvious objection,
 but the client is a phone app in exactly the position a TV is, and `auth-default-access: deny-all`
 means the hostname on its own reaches nothing. Alertmanager and the bridge get **no** public route;

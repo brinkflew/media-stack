@@ -68,6 +68,7 @@ export const NODES: Node[] = [
       "net-transcode",
       "net-metrics",
       "net-dashboard",
+      "net-agents",
     ],
     publishes: ["80 -> 80", "443 -> 443"],
   },
