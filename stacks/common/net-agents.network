@@ -1,0 +1,43 @@
+# ==============================================================================
+# net-agents
+# ------------------------------------------------------------------------------
+# The coding-agent control plane: Windmill's server, its database, its two
+# workers, and Caddy. The tenth segment, and the first one that carries a
+# database container rather than a SQLite file inside an application.
+#
+# WHAT IS DELIBERATELY NOT ON IT, because the absences are the design.
+#
+# `conduct` is not here. It is a systemd --user unit on the host and cannot join
+# a bridge at all - no container may reach the podman socket, and conduct exists
+# to fork podman. It reaches the server through a loopback publish instead, and
+# the arrow points INWARD: conduct polls Windmill, Windmill has no route back
+# out to the host. That is what lets this hostname sit on the public internet
+# behind sign-on while the thing that runs `claude -p` is unreachable from it.
+#
+# The phase runners are not here either. Each gets an ephemeral per-worktree
+# network of its own, created and destroyed by conduct, so a runner executing
+# model-authored code has no route to the database holding this workspace's
+# secrets - and none to any other segment on this host.
+#
+# So membership here is the whole of what a compromised Windmill worker can
+# reach, and it is: postgres, and the server.
+#
+# Members: caddy, windmill-db, windmill-server, windmill-worker,
+# windmill-worker-verify.
+# ==============================================================================
+
+[Network]
+NetworkName=net-agents
+Subnet=${NET_SUBNET_AGENTS}
+# Isolation is NOT free under Podman. Docker put every bridge in
+# DOCKER-ISOLATION-STAGE-2 and dropped traffic between them, which is what made
+# "no shared network means no route" true. Netavark does no such thing - see
+# net-metrics.network for the measurement. Do not add a network without this.
+Options=isolate=true
+
+# Without this the Subnet= above expands to an EMPTY STRING rather than failing,
+# and podman rejects it with "Error: invalid CIDR address:" - a message that
+# names neither the variable nor the file that was never read. Every quadlet
+# that interpolates a variable needs it, .network units included.
+[Service]
+EnvironmentFile=/var/home-server/.env

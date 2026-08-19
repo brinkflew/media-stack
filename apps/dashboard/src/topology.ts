@@ -52,6 +52,7 @@ export const NETWORKS: NetworkSegment[] = [
   { id: "net-media", purpose: "playback", subnetVar: "NET_SUBNET_MEDIA" },
   { id: "net-transcode", purpose: "the encoder", subnetVar: "NET_SUBNET_TRANSCODE" },
   { id: "net-metrics", purpose: "observability", subnetVar: "NET_SUBNET_METRICS" },
+  { id: "net-agents", purpose: "the coding-agent control plane", subnetVar: "NET_SUBNET_AGENTS" },
   { id: "net-egress", purpose: "dynamic DNS", subnetVar: "NET_SUBNET_EGRESS" },
 ];
 
