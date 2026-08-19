@@ -1,0 +1,31 @@
+# ==============================================================================
+# Sweep for missing media once a day
+# ------------------------------------------------------------------------------
+# DAILY, NOT HOURLY, and the cadence is the point rather than a default. The
+# only event this timer has to notice is "something that was not on a tracker
+# yesterday is on one today", which has a resolution of about a day. An hourly
+# tick would multiply indexer load by 24 to learn the same thing - and Prowlarr
+# was already answering Sonarr with 429 TooManyRequests before this existed, so
+# a sweep that searches harder would make discovery WORSE while looking like it
+# was helping.
+#
+# The script caps itself as well, at a dozen searches a run, and leaves any one
+# item alone for a week. The three limits are deliberately redundant: this is
+# load aimed at other people's trackers.
+#
+# 04:30 puts it after the 03:00 backup and before the 05:00-09:00 Sunday reboot
+# window, so a sweep never overlaps either. Persistent=true so a day missed
+# while the machine was off runs once at boot.
+# ==============================================================================
+
+[Unit]
+Description=Search again for missing media, daily
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+AccuracySec=5min
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

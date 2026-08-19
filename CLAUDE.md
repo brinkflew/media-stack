@@ -951,10 +951,13 @@ bin/collect-metrics.py --print | grep container_network   # the per-segment coun
 ./bin/verify-media.sh "/mnt/media/library/transcoded/movies/<film>/<film>.mkv"
 ./bin/verify-media.sh --library movies        # will these drift in a browser?
 podman auto-update --dry-run                  # 17 rows with a policy, not an empty table
-systemctl --user list-timers                  # verify hourly, backup + auto-update nightly
+systemctl --user list-timers                  # verify hourly, backup + auto-update + search nightly
 
 systemctl --user start home-server-backup     # back up now rather than waiting for 03:00
 journalctl --user -u home-server-backup -n 50
+
+./bin/search-missing.py --dry-run --verbose   # what is missing, and what is merely unreleased
+systemctl --user start home-server-search.service   # sweep now rather than waiting for 04:30
 ```
 
 **From the workstation**, because they either need credentials the server does not have or have to
@@ -1382,7 +1385,8 @@ then stop.**
 
 | Setting | Value | Why |
 |---|---|---|
-| `minFormatScore` | 30 | A VO-only release scores ~50, so it is grabbable. |
+| `minFormatScore` | 30 | The floor. **It was unreachable until 2026-08-19**, and this table said otherwise. |
+| `Lang: Original` | **30**, was 10 | The correction. The whole scale is Surround 10, x264 10, x265 20, AV1 30, Original 30 - so at 10 a VO-only release scored 20 against a floor of 30 and **Silent Hill: Revelation 3D returned 124 releases and approved zero**. At 30 an identifiable-VO release clears the bar alone; one with no language information (score 0) still does not. |
 | `Lang: Original + French` | **500** | Dominates every other format, so a French-carrying release always outranks a VO-only one. |
 | `cutoffFormatScore` | **500** | Satisfied *only* by French. Reaching it is what makes Radarr stop searching. |
 | `Rejected: 3D` | **-10000** | `3D`/`SBS`/`OU` in the release title. |
@@ -1760,7 +1764,17 @@ signal read green.
 - Tdarr runs again, both units. **A `Wants=` on a disabled unit silently re-enables it** - use
   `After=` for ordering, never `Wants=`.
 
-### Indexers
+### Indexers, and three ways to find nothing while everything is green
+- **Adding indexers was the wrong answer and was measured rather than argued.** Most of what is
+  "missing" is not released yet, and `isAvailable` reads true for a 2027 film - it means "may Radarr
+  grab this", not "does this exist".
+- **The `[VO]` floor was unreachable and this file asserted the opposite.** 124 releases, 0 approved,
+  and the "scores ~50" claim above was wrong for as long as the profile existed.
+- **A back-catalogue title is searched once, at add time, and never again.** RSS only carries new
+  uploads, so 94 episodes stayed missing while three approved releases sat on a configured indexer.
+  `bin/search-missing.py` is the fix, and it searches by season rather than by episode.
+- **A stalled download blocks every alternative release and reports itself as `downloading`.** One
+  refused all 49 candidates for a film with `already meets cutoff`, six of them at score 870.
 - The ISP resolver returns a blocking page for several indexer domains, which is why prowlarr and
   flaresolverr carry their own `DNS=`.
 - **That override works and is no longer the explanation for a down indexer.** Six zeros were five

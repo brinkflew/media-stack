@@ -21,7 +21,8 @@ systemctl --user daemon-reload
 systemctl --user enable --now home-server-promote.timer home-server-verify.timer \
                               home-server-caddy-build.timer home-server-backup.timer \
                               home-server-reboot.timer home-server-metrics.timer \
-                              home-server-dashboard-build.timer home-server-seeding.timer
+                              home-server-dashboard-build.timer home-server-seeding.timer \
+                              home-server-search.timer
 ```
 
 **The loop is a glob rather than a list on purpose.** It used to name the four files it knew about,

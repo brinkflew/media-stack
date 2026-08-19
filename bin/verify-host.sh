@@ -1378,6 +1378,75 @@ if [ -z "$GREENBOOT" ]; then
 	fact seeding_holding "$(sed -n 's/^holding=//p' "$seeding_state" 2>/dev/null | tail -1)" num
 
 	# --------------------------------------------------------------------------
+	# Search sweep. Whether anything is still asking for what is missing.
+	# --------------------------------------------------------------------------
+	# WARN OR PASS, NEVER FAIL, for the reason the Seeding policy section above
+	# and the Logs and Metrics sections below all give: bin/reboot-host.sh
+	# refuses to act on a host this battery calls unhealthy, and a stalled
+	# search sweep must never hold up an OS security update.
+	#
+	# WHAT THIS IS ACTUALLY WATCHING FOR is the failure that produced the script:
+	# Sonarr and Radarr search for a title once, when it is added, and RSS sync
+	# afterwards only ever sees what an indexer published recently. So a series
+	# that ended in 2004 is never looked for again, and the symptom is
+	# indistinguishable from "no release exists" - 94 episodes were missing while
+	# three approved 1080p releases sat on an indexer that was already
+	# configured. A dead timer here recreates that silently.
+	#
+	# THE TWO COUNTS ARE REPORTED SEPARATELY, and neither is a verdict on its
+	# own. 21 films missing of which 16 are not released yet is HEALTHY; the gap
+	# between them is the only number that says there is work going undone.
+	say search "Search sweep"
+
+	if [ "$(systemctl --user is-enabled home-server-search.timer 2>/dev/null)" = enabled ]; then
+		ok search.timer_enabled "home-server-search.timer enabled"
+	else
+		warn search.timer_enabled "home-server-search.timer is not enabled - nothing ever searches again for a title whose add-time search came up empty"
+	fi
+
+	search_state="${HOME:-/root}/.cache/home-server/search-state"
+	ss_ok=$(sed -n 's/^last_ok_at=//p' "$search_state" 2>/dev/null | tail -1)
+	ss_age=
+	if [ -n "$ss_ok" ]; then
+		ss_epoch=$(date -d "$ss_ok" +%s 2>/dev/null)
+		[ -z "$ss_epoch" ] || ss_age=$(( ( $(date +%s) - ss_epoch ) / 3600 ))
+	fi
+	# 48h against a daily timer, so one missed night reads as a blip rather than
+	# a fault and a real regression surfaces on the second - the same tolerance,
+	# for the same reason, as the nightly off-site delete probe.
+	if [ -n "$ss_age" ] && [ "$ss_age" -le 48 ]; then
+		ok search.run_age "the last sweep was ${ss_age}h ago"
+	elif [ -n "$ss_age" ]; then
+		warn search.run_age "the last sweep was ${ss_age}h ago, limit 48h - missing media is no longer being searched for"
+	elif [ "${uptime_s:-0}" -lt 86400 ]; then
+		ok search.run_age "no sweep in the $((uptime_s / 3600))h since boot - not yet due"
+	else
+		warn search.run_age "the search sweep has no record of a successful run"
+	fi
+
+	# A STALLED DOWNLOAD IS NOT PATIENCE, and it is the most effective way to be
+	# unable to find something that is plentifully available: the item reads
+	# `downloading`, so nothing looks wrong, while every alternative release for
+	# it is refused as "already meets cutoff". One was found sitting at "no
+	# connections" for five days, blocking all 49 candidates for that film.
+	# Clearing it deletes a partial download, so this reports and never acts.
+	ss_stalled=$(sed -n 's/^stalled=//p' "$search_state" 2>/dev/null | tail -1)
+	if [ -z "$ss_stalled" ]; then
+		note search.stalled_queue "no sweep has recorded the queue yet"
+	elif [ "$ss_stalled" -eq 0 ]; then
+		ok search.stalled_queue "no stalled downloads"
+	else
+		warn search.stalled_queue "$ss_stalled stalled download(s) - each one blocks every alternative release for that item; see journalctl --user -u home-server-search"
+	fi
+
+	fact search_last_ok_at "${ss_ok:-}"
+	fact search_movies_missing "$(sed -n 's/^movies_missing=//p' "$search_state" 2>/dev/null | tail -1)" num
+	fact search_movies_searchable "$(sed -n 's/^movies_searchable=//p' "$search_state" 2>/dev/null | tail -1)" num
+	fact search_episodes_missing "$(sed -n 's/^episodes_missing=//p' "$search_state" 2>/dev/null | tail -1)" num
+	fact search_episodes_searchable "$(sed -n 's/^episodes_searchable=//p' "$search_state" 2>/dev/null | tail -1)" num
+	fact search_stalled "${ss_stalled:-}" num
+
+	# --------------------------------------------------------------------------
 	# Logs. The policy, and whether it is actually in force.
 	# --------------------------------------------------------------------------
 	# EVERY CHECK HERE IS WARN OR PASS, NEVER FAIL, and that is a constraint

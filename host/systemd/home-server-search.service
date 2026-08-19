@@ -1,0 +1,36 @@
+# ==============================================================================
+# Ask Sonarr and Radarr to search again for what is missing
+# ------------------------------------------------------------------------------
+# A plain systemd user unit rather than a quadlet, because it runs ON the host:
+# `podman exec` reaches Sonarr and Radarr whatever their network topology, so
+# this grants no container any reachability it did not already have. Same
+# argument as home-server-promote.service and home-server-seeding.service.
+#
+# WHAT IT EXISTS FOR: both applications search for a title exactly once, when it
+# is added. Everything automatic after that is RSS sync, which only ever sees
+# what an indexer published recently - so a film from 2012 or a series that
+# ended in 2004 is never looked for a second time, and one add-time search that
+# lands while indexers are backing off costs the title for ever, silently.
+#
+# It queues search commands and nothing else. Scoring, approval, grabbing and
+# importing all stay with the applications.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Search again for missing films and episodes that are actually released
+Documentation=file:/var/home-server/bin/search-missing.py
+# After= only, NEVER Wants=. A Wants= here would start Sonarr and Radarr every
+# day whether or not they were meant to be running - the trap that had
+# home-server-promote.service pulling tdarr-server up every ten minutes.
+After=sonarr.service radarr.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/home-server/bin/search-missing.py
+# No Restart=. The script queues search commands and nothing else, so a failed
+# run changes nothing and tomorrow's tick retries against fresher data. Retrying
+# through a transient API blip would only add indexer load, which is the one
+# resource this whole script is written to spend carefully.
+SuccessExitStatus=0

@@ -758,3 +758,48 @@ nothing points at is one nobody reads.
   three indexer counts, which is why `home_server_arr_indexers{service=...}` now reports all three.
   **Some gap is correct** - a movies-only indexer belongs in Radarr and not Sonarr - so read the
   three numbers and the log; do not alert on equality.
+
+## Discovery: three ways to find nothing while everything is green
+
+Audited on 2026-08-19, after "Sonarr and Radarr cannot find some of the requested media" and the
+obvious question of whether to add indexers. **None of it was indexer coverage**, and adding
+indexers would have made two of the three worse. The pool was 13 configured, 12 enabled, 9 actually
+answering; four had never served a single query and were deleted.
+
+- **MOST OF WHAT IS "MISSING" IS NOT RELEASED YET, and the field that says so is not the obvious
+  one.** Sixteen of Radarr's twenty-one wanted films were `status=announced` - Avengers: Doomsday,
+  The Legend of Zelda, a 2027 Narnia. **Do not filter on `isAvailable`**: every movie here carries
+  `minimumAvailability: announced`, so `isAvailable` reads **true for all twenty-one**, a film two
+  years from a cinema included. It answers "may Radarr grab this", not "does this exist", and the
+  two coincide only by accident. `status`, plus `digitalRelease`/`physicalRelease` against now, is
+  the honest test. Reporting one total would have read as twenty-one things going wrong; five is
+  the real number, and the gap between the two counts is the only one worth looking at.
+- **THE `[VO]` PROFILE FLOOR WAS UNREACHABLE, AND CLAUDE.md ASSERTED THE OPPOSITE.** That file
+  said "a VO-only release scores ~50, so it is grabbable". Measured against profile 9:
+  `Lang: Original` is worth **10**, not 50, and the whole scale is `Audio: Surround` 10,
+  `Codec: x264` 10, `x265` 20, `AV1` 30, `Lang: Original` 10, `Lang: Original + French` 500.
+  Against `minFormatScore: 30`, **Silent Hill: Revelation 3D returned 124 releases and approved
+  ZERO**; the best-scoring non-3D candidate among them scored 20. Every rejection was profile-side,
+  so more indexers would only have produced more releases to reject. `Lang: Original` is now **30**,
+  which makes the documented intent true rather than loosening the profile: a release with
+  identifiable original-language audio clears the bar alone, one with no language information at all
+  (score 0) still does not. After the change: 2 approved at score 40. **A number quoted in prose is
+  not a measurement** - this one was wrong for as long as the profile existed, and the symptom was
+  indistinguishable from "no release exists".
+- **A BACK-CATALOGUE TITLE IS SEARCHED ONCE, AT ADD TIME, AND NEVER AGAIN.** Neither application has
+  a scheduled missing search; everything automatic afterwards is RSS sync, which only ever sees what
+  an indexer published **recently** - `Reports found: 411, Reports grabbed: 0` against a series that
+  ended in 2004. Sex and the City was added 2026-08-18 18:50 and had 0 of 94 episodes; an
+  interactive search on S01E01 returned **three releases, all three approved**, Remux / Bluray /
+  WEB-DL 1080p at 5-21 seeders. The releases were there the whole time and nothing asked twice.
+  `bin/search-missing.py` on `home-server-search.timer` is the fix, and it searches **by season**
+  rather than by episode - one query instead of thirteen, against a Prowlarr that was already
+  answering Sonarr with `429 TooManyRequests`.
+- **A STALLED DOWNLOAD BLOCKS EVERY ALTERNATIVE RELEASE, AND REPORTS ITSELF AS `downloading`.**
+  Kaamelott: The First Chapter had sat at 5.5 GB remaining of a 29.8 GB remux since 2026-08-14,
+  "stalled with no connections". Because the queued item already meets cutoff, Radarr refused all
+  **49** candidates with `Quality for release in queue already meets cutoff` - including six at
+  score 870 with 48 and 68 seeders. So the most effective way to be unable to find something is to
+  already be failing to download it, and nothing in the queue view says so. `search.stalled_queue`
+  now warns. **It is named and never cleared**: removing the item deletes a partial download, which
+  is a person's decision and not a timer's.
