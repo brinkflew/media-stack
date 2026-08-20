@@ -23,7 +23,15 @@ systemctl --user enable --now home-server-promote.timer home-server-verify.timer
                               home-server-caddy-build.timer home-server-backup.timer \
                               home-server-reboot.timer home-server-metrics.timer \
                               home-server-dashboard-build.timer home-server-seeding.timer \
-                              home-server-search.timer home-server-conduct-runner-build.timer
+                              home-server-search.timer home-server-conduct-runner-build.timer \
+                              home-server-agents-update.timer
+
+# THE ONE UNIT HERE THAT IS A SERVICE RATHER THAN A TIMER, so it is enabled on a
+# line of its own. conduct is long-running - it polls - rather than something a
+# clock starts, and its [Install] is WantedBy=default.target. It needs the
+# checkout below to exist first; without it the unit starts, fails, and retries
+# every 30 seconds for ever.
+systemctl --user enable --now home-server-conduct.service
 
 # ONE-TIME, and only for this one. Enabling a Persistent= timer writes its stamp
 # file straight away, so there is no missed elapse to catch up and it does not
@@ -32,6 +40,36 @@ systemctl --user enable --now home-server-promote.timer home-server-verify.timer
 # without this line the phase runner does not exist until the first Saturday.
 systemctl --user start home-server-conduct-runner-build.service
 ```
+
+**`/var/agents` IS A SECOND CHECKOUT AND IT IS NOT MADE BY ANY OF THIS.** conduct's
+own code lives in `brinkflew/agents`, which is private, and the server has no GitHub
+credential except a read-only deploy key made once by hand. On a fresh host:
+
+```bash
+ssh-keygen -t ed25519 -N '' -C conduct@home-server -f ~/.ssh/agents_deploy
+# add ~/.ssh/agents_deploy.pub to the repo's deploy keys, READ-ONLY, then:
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+    User git
+    IdentityFile ~/.ssh/agents_deploy
+    IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config
+sudo install -d -o core -g core -m 755 /var/agents
+git clone git@github.com:brinkflew/agents.git /var/agents
+```
+
+`IdentitiesOnly yes` is not decoration: without it ssh offers every key it can find
+and GitHub rejects the connection on the first wrong one, which reads as a
+permissions problem rather than as an ordering one. There is no build step and no
+virtualenv - conduct is stdlib-only, so the deploy really is `git pull` and nothing
+else, which is what `home-server-agents-update.timer` does nightly.
+
+**The upskald mirror it clones worktrees from is seeded from a workstation**, into
+`cache/conduct/mirrors/`, because that repository is private too and the host
+deliberately holds no credential for it. Under the fleet root so it inherits
+`container_file_t`; anywhere else under `/var` is `var_t` and every phase fails
+with a permission error naming SELinux nowhere.
 
 **The loop is a glob rather than a list on purpose.** It used to name the four files it knew about,
 and `home-server-caddy-build` was added later and never appended - so it was enabled on the server
@@ -92,6 +130,8 @@ symlinks, so there is no copy step. Only `daemon-reload` is needed.
 | `home-server-seeding` | Enforces the one part of the seeding policy qBittorrent cannot express: a **72-hour floor** before any torrent may be stopped. Every share limit qBittorrent has is a maximum that triggers an action, so a minimum can only be enforced by withholding those limits - which is all this does. Past 72h a torrent gets ratio 1.5 and a seven-day seeding limit and qBittorrent stops it on whichever lands first; Radarr and Sonarr then delete it and its files, as they already did. It deletes nothing itself, and a stopped timer means nothing is ever reaped rather than things being reaped early. See `bin/apply-seeding-policy.py`. |
 | `home-server-search` | Sweeps for monitored media that is missing and has actually been released, and asks Radarr and Sonarr to search for it. It exists because a back-catalogue title is searched once, at add time, and never again - RSS only carries new uploads, so 94 episodes stayed missing while approved releases sat on a configured indexer. Counted in episodes rather than seasons, because a season query asks for a season PACK and returned nothing. **This row was missing from this table until 2026-08-19**, which is the drift the glob above was written to prevent, arriving in the half of the setup that is still a hand-maintained list. See `bin/search-missing.py`. |
 | `app-agents.slice` | **Not a unit that runs anything - a cgroup ceiling.** Every Windmill container, `conduct` and every phase-runner scope joins it, so the fleet is bounded in aggregate rather than by a sum of per-unit limits it could never have: its runners are `podman run --rm`, so their count is a variable. The `app-` prefix is load-bearing - systemd derives the hierarchy from the dashes, so this nests under `app.slice` where every quadlet already lives, which is the path `bin/collect-metrics.py` resolves against. It has no `[Install]` and is never enabled; a unit's `Slice=` pulls it in. Assert it by its effect - `agents.slice_limits` reads the limits back out of the cgroup, because a `Slice=` naming a slice with no unit file silently gets systemd's defaults. See `host/systemd/app-agents.slice`. |
+| `home-server-conduct` | **The orchestrator.** A plain user unit rather than a quadlet because no container here may reach the podman socket - `container_t -> unconfined_t : unix_stream_socket connectto` is DENY under enforcing SELinux - and forking podman is the whole of its job. It runs each phase one tier down, inside `conduct-runner`, under a transient scope in `app-agents.slice` with `--cap-drop=ALL`, `--read-only` and a network of its own. It polls Windmill rather than being called by it, so the control plane has no route to the host at all. `RestartSec=30` rather than the usual 5, because a crash loop here can respawn `claude -p` on the way past and what that burns is the quota shared with your own sessions. See `/var/agents` and `docs/agents.md`. |
+| `home-server-agents-update` | Pulls `/var/agents` nightly at 04:50 and restarts conduct only if it was already running. `--ff-only`, so a checkout that has diverged is refused rather than merged - and `agents.checkout_drift` reports it within the hour. Nothing is built: conduct is stdlib-only, so there is no venv to rebuild and no lockfile to drift. |
 | `podman-auto-update.service.d` | **Not a unit of ours - a drop-in over podman's.** It makes the `ExecStartPost=` image prune non-fatal, so a disk reclaim that could be skipped for a night cannot mark the unit that updates eighteen containers as failed. It could and did: on 2026-08-17 and 2026-08-18 `podman auto-update` exited 0, every container updated, and the unit reported failure because the prune hit a leftover build container and exited 125. The condition itself is now measured by `containers.storage_orphans`, which is what makes this a correction and not a silencer. |
 
 ```bash

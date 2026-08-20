@@ -650,6 +650,58 @@ nothing points at is one nobody reads.
   is fresh**, because a conduct killed mid-phase leaves the flag set for ever and a stale veto is
   the "host silently stops taking OS security updates" failure from a fourth direction.
 
+## The orchestrator, and four assumptions its first live run contradicted
+
+**`Environment=` does not expand `${VAR}` from `EnvironmentFile=`, and the failure is silent.**
+The obvious unit - `EnvironmentFile=/var/home-server/.env` plus
+`Environment=CONDUCT_STATE_DB=${DOCKER_VOLUME_CONFIG}/conduct/conduct.db` - hands the process that
+dollar-sign string verbatim. Measured with a throwaway unit on the host: `$DOCKER_VOLUME_CONFIG`
+read correctly in `ExecStart=` and the interpolated `Environment=` value came through as the literal
+`${DOCKER_VOLUME_CONFIG}/conduct/conduct.db`. Expansion happens in `ExecStart=` and nowhere else.
+
+What makes it worth an entry rather than a fix is which direction it fails in. `os.makedirs` on a
+path beginning `${DOCKER_VOLUME_CONFIG}` does **not** raise - it creates a directory of that literal
+name, in whatever the working directory happens to be. So the state database would have existed, and
+been written, and been outside the tree `bin/snapshot-databases.sh` walks, and nothing anywhere would
+have reported a problem. Units here pass no interpolated `Environment=`; the program reads
+`DOCKER_VOLUME_CONFIG` and `DOCKER_VOLUME_CACHE` itself.
+
+**A detached `podman run` lands outside `app-agents.slice`, and the runner does not.** Read out of
+`/proc/<pid>/cgroup` during a live phase: the phase runner resolves to
+`.../app.slice/app-agents.slice/conduct-check-<id>.scope/libpod-<id>.scope`, because it runs under a
+transient scope with `--cgroups=split`; its three datastores resolved to
+`.../user@1000.service/user.slice/libpod-<id>.scope`, outside the fleet ceiling entirely. They have
+no scope, so they need `--cgroup-parent=app-agents.slice`, and an aggregate limit with three
+unaccounted members underneath it is worth having only if it says so.
+
+That flag has the failure mode this repository already names one directive over: **if the slice is
+not loaded, podman creates a transient slice of that name with no limits at all, silently.** Which
+is why `agents.slice_limits` reads the limits back out of the cgroup and never out of the unit file.
+
+**`--name` is not a DNS alias.** A gate run inside a namespace addresses its datastores by the bare
+names its compose file uses - `db`, `redis`, `mailpit` - and a container started as `<id>-db`
+answers to `<id>-db` and to nothing else. Without `--network-alias` every connection fails on a name
+that does not resolve, in a namespace that never loads the file those names come from. The mirror of
+the `torrent:<port>` lesson: a name proves one address and the unit files look identical either way.
+
+**An environment variable that a config file uses VERBATIM is a different hazard from one it
+derives.** `playwright.config.ts` falls back to a derived `E2E_REDIS_URL` on logical database **1**,
+but uses an environment `REDIS_URL` exactly as given. Passing the dev URL - database 0 - collapses
+the split that isolates the e2e suite from everything else, and every test still passes while doing
+it. The runner passes `/1` explicitly, and `SMTP_HOST`/`SMTP_PORT` are the same family one variable
+over: overriding only the host yields a name that resolves and a port that refuses.
+
+**A safety guard that keys on "is the database on loopback" refuses inside a container namespace.**
+upskald's `api/scripts/seed_demo.py` deliberately uses the narrow `LOCAL_DATABASE_HOSTS`
+(`127.0.0.1`, `::1`, `localhost`) rather than the wider set that admits `db`, and its comment gives
+the reason: *"This runs on the host, where the DSN `provision_database` resolves names a loopback
+address, so it gains nothing from `db`."* **That premise is exactly what a phase runner breaks** -
+the whole gate runs inside the namespace, so `db` is the address. Six tests fail with `assert 1 == 0`
+and the refusal is only in captured stderr. Proved to be environment-specific rather than a broken
+test: `database_is_local` returns `(True, '127.0.0.1')` for the workstation's URL under both sets,
+and `(False, 'db')` under the narrow set for the runner's.
+
+
 ## Two defects in one uCore image
 
 - **THE SAME IMAGE ALSO SHIPPED AN UNPARSEABLE `policy.json`, AND THAT IS WHY THE PCP MASK WAS

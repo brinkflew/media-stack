@@ -331,6 +331,12 @@ WANTED = {
     # authenticating, and the first thing you notice is an alert that never
     # arrived. Nothing else in this file has that shape.
     "ntfy/auth.db":             "the alerting accounts - a phone stops authenticating with no error",
+    # Same shape as ntfy/auth.db above: not precious, but its loss is INVISIBLE.
+    # conduct's leases and its record of what has run are in here, so a restore
+    # without it comes back believing no phase has ever run - it re-runs work
+    # that was already done, and its budget counters start again from zero with
+    # nothing erroring anywhere.
+    "conduct/conduct.db":       "conduct's leases and run history - the fleet silently starts from scratch",
 }
 for rel, what in WANTED.items():
     if any(n == rel or n.endswith("/" + rel) for n in names):

@@ -1,0 +1,49 @@
+# ==============================================================================
+# Pull conduct's own code, the way this repository is pulled
+# ------------------------------------------------------------------------------
+# /var/agents is a git checkout of brinkflew/agents and the deploy is `git pull`
+# and nothing else. There is no build step and no virtualenv to rebuild: conduct
+# is stdlib-only, deliberately, because /usr on this host is read-only, every
+# layered package makes the next rebase slower and able to fail on dependency
+# solving, and there is no uv. bin/collect-metrics.py, bin/search-missing.py and
+# bin/promote-transcoded.py all hold the same line.
+#
+# --ff-only IS THE POINT. A merge here would rewrite a checkout nobody is
+# watching, and a checkout that has diverged from its remote is exactly what
+# agents.checkout_drift exists to report - so this refuses rather than resolves,
+# and the refusal is visible in the hourly battery within the hour.
+#
+# READ-ONLY DEPLOY KEY, ~/.ssh/agents_deploy. It can fetch this one repository
+# and nothing else, which is all a pull deploy needs and is the difference
+# between a compromised host reading conduct and rewriting it. Note the server
+# has no other GitHub credential at all: the upskald mirror under
+# cache/conduct/mirrors/ is seeded from a workstation for that reason.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Update conduct's checkout at /var/agents
+Documentation=file:/var/home-server/docs/agents.md
+ConditionPathExists=/var/agents/.git
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/git -C /var/agents pull --ff-only
+# try-restart, NOT restart: it restarts conduct only if conduct is already
+# running, so this never starts a fleet somebody deliberately stopped. `podman
+# auto-update` makes the same distinction one directory over.
+#
+# A RESTART MID-PHASE IS SAFE BY DESIGN rather than by luck. The phase runs in a
+# transient scope in its own session, so it survives; and if it did not,
+# conduct's reconciler reclaims the lease, the network, the containers and the
+# worktree at startup - which it has to anyway, because the reboot window
+# escalates past its second refusal and kills a live phase on purpose.
+ExecStartPost=/usr/bin/systemctl --user try-restart home-server-conduct.service
+TimeoutStartSec=300
+
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryHigh=128M
+MemoryMax=256M

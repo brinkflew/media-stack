@@ -52,6 +52,7 @@ are load-bearing and several were paid for in outages.
 | `docs/backups.md` | the three copies, the append-only off-site key, and why a backup is not proven until restored |
 | `docs/dashboard.md` | the Vue application, its five sources, and what it may and may not assert |
 | `docs/repo-conventions.md` | `config/` vs `apps/`, how a file reaches a container, ASCII, `bin/lint-repo.sh` |
+| `docs/agents.md` | the three tiers, the marker contract, the phase invocation, and what must never travel to ntfy |
 | `docs/known-state.md` | the seventy-four conclusions from auditing the running host |
 
 **What stays here is what has to be known BEFORE touching anything**: what this is, how a change
@@ -409,6 +410,18 @@ signal read green.
 - **`ActiveState` is `active` for a long-running unit whether busy or idle** - the mirror of the
   oneshot trap one gate over. The phase refusal reads a marker, and believes it only while the
   heartbeat is fresh.
+
+### The orchestrator, and four assumptions its first live run contradicted
+- **`Environment=` does not expand `${VAR}` from `EnvironmentFile=`**, and `os.makedirs` on the
+  resulting literal path succeeds rather than raising - so the state database lands outside the tree
+  the backup walks and nothing says so.
+- A detached `podman run` lands **outside** `app-agents.slice`; only the scope-wrapped runner is in
+  it. `--cgroup-parent` is the fix and its own failure is a limitless transient slice, silently.
+- **`--name` is not a DNS alias**, so a container named `<id>-db` cannot answer to `db`.
+- An environment variable a config uses **verbatim** is a different hazard from one it derives:
+  `REDIS_URL` must name logical database 1, or e2e isolation collapses with every test still passing.
+- A guard keying on "is the database on loopback" refuses inside a namespace, where the address is a
+  service name. Its own comment names the premise a phase runner breaks.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running

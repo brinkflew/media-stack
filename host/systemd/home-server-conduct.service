@@ -1,0 +1,68 @@
+# ==============================================================================
+# conduct, the coding-agent orchestrator
+# ------------------------------------------------------------------------------
+# A plain user unit rather than a quadlet, and that is the architecture rather
+# than a preference. No container on this host may reach the podman socket -
+# container_t -> unconfined_t : unix_stream_socket connectto is DENY under
+# enforcing SELinux, and relabelling cannot fix it because `systemd --user` for
+# uid 1000 runs as unconfined_t - and forking podman is the whole of conduct's
+# job. So it runs where the socket is, and every phase runs one tier down inside
+# conduct-runner with --cap-drop=ALL, --read-only and a network of its own.
+#
+# The same fact inverts the arrow to Windmill. A host-side listener would need
+# either a unix socket (the same denial) or a TCP port on the bridge gateway
+# plus a firewalld hole, and both spend real security to give an
+# internet-facing container an RPC that spawns `claude`. windmill-server
+# publishes on 127.0.0.1 instead and conduct polls it, so Windmill has no route
+# to the host at all.
+#
+# NO Environment= LINES THAT INTERPOLATE, and this is measured rather than
+# assumed. systemd does NOT expand ${VAR} inside an Environment= assignment even
+# when EnvironmentFile= has already supplied VAR - a unit written the obvious way
+# hands the process the literal string "${DOCKER_VOLUME_CONFIG}/conduct/...".
+# That failure is silent rather than loud: os.makedirs on such a path does not
+# raise, it creates a directory of that literal name. So EnvironmentFile= alone,
+# and conduct derives its paths from DOCKER_VOLUME_CONFIG and DOCKER_VOLUME_CACHE
+# itself, from the same two variables every other consumer here reads.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=conduct, the coding-agent orchestrator
+Documentation=file:/var/home-server/docs/agents.md
+# After=, NEVER Wants=. A Wants=windmill-server.service here would start the
+# whole control plane at every boot after somebody deliberately stopped the
+# fleet - the trap that had home-server-promote.service pulling tdarr-server up
+# every ten minutes. Ordering is all that is wanted: conduct polls, so a control
+# plane that is down is a cycle that finds nothing, not a crash.
+After=windmill-server.service
+StartLimitIntervalSec=3600
+StartLimitBurst=20
+
+[Service]
+Type=simple
+EnvironmentFile=/var/home-server/.env
+ExecStart=/var/agents/bin/conduct serve
+Restart=always
+# 30 SECONDS, NOT 5, AND THE DIFFERENCE IS THE QUOTA. Every other unit here uses
+# 5 because a container that will not start costs nothing but journal lines. A
+# crash loop in conduct can respawn `claude -p` on the way past, and what that
+# burns is the subscription window shared with your own sessions.
+RestartSec=30
+
+# The fleet's aggregate ceiling. conduct itself is small - it forks podman and
+# waits - but it belongs inside the same accounting as the phases it starts, or
+# the slice measures everything except the thing that caused it.
+Slice=app-agents.slice
+MemoryHigh=384M
+MemoryMax=512M
+
+# The thing that orchestrates the stack must yield to it, same shape as
+# home-server-metrics.service and home-server-backup.service.
+Nice=10
+CPUWeight=20
+IOWeight=20
+
+[Install]
+WantedBy=default.target

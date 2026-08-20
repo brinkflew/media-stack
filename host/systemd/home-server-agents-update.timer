@@ -1,0 +1,28 @@
+# ==============================================================================
+# Pull conduct's code daily, well clear of everything else
+# ------------------------------------------------------------------------------
+# 04:50, which is after the 03:00 backup and the 04:30 search sweep and before
+# anybody is awake. Daily rather than weekly because this is a `git pull` of a
+# few kilobytes against caddy-build's Go toolchain compile - the cost of being
+# current is nothing, and the cost of not being is that a fix committed here
+# does not reach the fleet until someone remembers.
+#
+# Persistent=true so a machine that was off at 04:50 pulls when it comes back.
+# Note what that does NOT do: enabling a Persistent= timer writes its stamp file
+# straight away, so there is no missed elapse to catch up and it does not fire on
+# enable - measured, and the reason home-server-conduct-runner-build needs a
+# one-time manual start in this directory's README. This unit does not, because
+# the checkout is made by hand at that same moment anyway.
+# ==============================================================================
+
+[Unit]
+Description=Update conduct's checkout daily
+
+[Timer]
+OnCalendar=*-*-* 04:50
+Persistent=true
+RandomizedDelaySec=10min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
