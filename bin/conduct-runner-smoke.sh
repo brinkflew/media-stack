@@ -197,7 +197,8 @@ probe() {
 	runner timeout 6 bash -c "exec 3<>/dev/tcp/$host/$port" >/dev/null 2>&1 || rc=$?
 	case "$want:$rc" in
 		dropped:124)   ok "$label is dropped (rc 124)" ;;
-		dropped:*)     bad "$label returned rc $rc - 124 required; rc 1 means the packet ARRIVED and only the port was shut" ;;
+		dropped:1)     bad "$label is REFUSED, not dropped - the packet arrived and only the port was shut, which is not a blocked edge" ;;
+		dropped:*)     bad "$label returned rc $rc, which is neither 124 (dropped) nor 1 (refused) - the probe itself did not run, so this proves nothing either way" ;;
 		open:0)        ok "$label is reachable (rc 0)" ;;
 		open:*)        bad "$label returned rc $rc, expected 0" ;;
 	esac

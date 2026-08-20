@@ -395,6 +395,8 @@ signal read green.
   fleet network. The host itself and the internet are not.
 - **`Nice=` cannot be set on a transient scope**, and a read-only rootfs turns every cache
   environment variable into a required mount.
+- **`Persistent=true` does not fire on first enable** - the stamp file is written straight away - so
+  the one image nothing else builds needs a one-time start in `host/systemd/README.md`.
 - **`node:24-trixie-slim` ships no `python3`, `git` or `make`**, and trixie renamed `libmagic1` to
   `libmagic1t64`.
 

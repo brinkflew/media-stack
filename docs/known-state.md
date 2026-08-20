@@ -591,6 +591,15 @@ nothing points at is one nobody reads.
   and the internet, which is what makes `bun install`, `uv sync` and `gh` work at all. Read the
   distinction the way `docs/networking.md` insists: **124 from `timeout` is a blocked edge, 1 is a
   shut port.**
+- **`Persistent=true` does not cover the first install, and a unit comment here claimed it did.**
+  `systemctl --user enable --now` writes `~/.local/share/systemd/timers/stamp-<timer>` immediately,
+  so there is no missed elapse to catch up on and the timer does not fire - measured, with the stamp
+  dated the second the timer was enabled and `list-timers` showing `LAST -`. Harmless for every
+  other timer here, because each built image is pulled into the dependency graph by a `.container`
+  that names it. **Nothing references `conduct-runner`**, so on a host that has never run that unit
+  the phase runner image does not exist and nothing produces it before the first Saturday - at which
+  point `conduct` has no `:latest` to run. The one-time `systemctl --user start` is part of the
+  setup in `host/systemd/README.md`, beside the symlink loop.
 - **`Nice=` cannot be set on a transient scope**, and `systemd-run` says so with `Unknown assignment:
   Nice=10` rather than ignoring it - which is the good outcome, since the phase runner's whole
   invocation would have failed to start. It is an exec property, and a `--scope` is not started by

@@ -24,6 +24,13 @@ systemctl --user enable --now home-server-promote.timer home-server-verify.timer
                               home-server-reboot.timer home-server-metrics.timer \
                               home-server-dashboard-build.timer home-server-seeding.timer \
                               home-server-search.timer home-server-conduct-runner-build.timer
+
+# ONE-TIME, and only for this one. Enabling a Persistent= timer writes its stamp
+# file straight away, so there is no missed elapse to catch up and it does not
+# fire - measured. Every other built image here is pulled into the dependency
+# graph by a .container that names it; nothing references conduct-runner, so
+# without this line the phase runner does not exist until the first Saturday.
+systemctl --user start home-server-conduct-runner-build.service
 ```
 
 **The loop is a glob rather than a list on purpose.** It used to name the four files it knew about,

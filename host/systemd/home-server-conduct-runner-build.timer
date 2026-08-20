@@ -16,13 +16,25 @@
 # :next -> smoke -> :latest promotion is what makes the staleness safe rather
 # than the cadence - a bad release cannot reach the fleet on any schedule.
 #
-# Persistent=true, and here it does something the other build timers only do
-# incidentally: NOTHING ELSE EVER BUILDS THIS IMAGE. caddy.build and
+# Persistent=true so a machine that was off on Saturday rebuilds when it comes
+# back rather than skipping the week - the reason home-server-caddy-build.timer
+# gives, and the only one that applies.
+#
+# IT DOES NOT COVER THE FIRST INSTALL, AND THIS FILE SAID IT DID UNTIL THE
+# DEPLOY DISPROVED IT. `systemctl --user enable --now` writes
+# ~/.local/share/systemd/timers/stamp-<timer> immediately, so there is no missed
+# elapse to catch up on and the unit does NOT fire; measured, with the stamp
+# file dated the second the timer was enabled and LAST reading `-`.
+#
+# That matters more here than for either sibling. caddy.build and
 # dashboard.build are pulled into the dependency graph by a .container that
-# names them, so a fresh host builds them on the way to starting a service.
-# No container references conduct-runner, so on a host that has never run this
-# timer the image simply does not exist - and Persistent=true is what makes the
-# first boot build it rather than waiting for Saturday.
+# names them, so a fresh host builds them on its way to starting a service. No
+# container references conduct-runner, so on a host that has never run this
+# unit the image simply does not exist and nothing will produce it before the
+# first Saturday - at which point `conduct` has no :latest to run. The one-time
+# `systemctl --user start` is therefore part of the setup in
+# host/systemd/README.md, beside the symlink loop, rather than a property of
+# this timer.
 # ==============================================================================
 
 [Unit]
