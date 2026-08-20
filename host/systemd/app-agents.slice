@@ -24,6 +24,21 @@
 # recorded. That window is 4.31 days rather than for ever - revisit it after a
 # full Tdarr queue has run through.
 #
+# MEASURED AGAINST A REAL PHASE ON 2026-08-20, which is the first thing able to:
+# a full `make install && make check` of upskald inside the runner, with the
+# Windmill units up and the three phase datastores in here too, peaked the slice
+# at 3,566M against the 3,584M MemoryHigh below - 99.5% of it - while memory.max
+# events stayed 0 and oom_kill stayed 0.
+#
+# THAT IS THE DESIGN WORKING RATHER THAN A CEILING TO RAISE, and the distinction
+# is the one docs/known-state.md already records for Jellyfin: read `anon` against
+# `inactive_file` and memory.pressure, never the `high` counter. The runner's own
+# anon was 302 MB against 336 MB of page cache, and its pressure read
+# avg300=0.02 - about half a second of stall across a seven-minute run. What is
+# pinned at MemoryHigh is `uv sync` and `bun install` writing hundreds of
+# megabytes of cache, and reclaiming it is what MemoryHigh is for. The 1,042M
+# between that peak and MemoryMax is the margin that matters.
+#
 # CPUQuota AS WELL AS CPUWeight. A weight only bites under contention, and
 # `npm ci` beside a threaded test runner will take all twelve cores the moment
 # they are free. The symptom of relying on the weight alone is a stuttering
@@ -49,9 +64,14 @@ MemoryMax=4608M
 CPUWeight=30
 CPUQuota=400%
 IOWeight=20
-# The one number here with no measurement behind it. Chromium alone runs to
-# hundreds of threads, and when this binds the symptom is `fork: Resource
-# temporarily unavailable` raised by something unrelated, naming neither the
-# slice nor the limit. Measure pids.current during a real gate run before
-# trusting it.
+# NO LONGER THE NUMBER WITH NOTHING BEHIND IT. It was, and the comment said so
+# until a real gate run could be measured: on 2026-08-20 a full upskald gate in
+# the runner, with all four Windmill units and three phase datastores in here,
+# took the slice to a pids.peak of 325 - 21% of this. The runner's own scope
+# peaked at 91 tasks against its 1,024.
+#
+# Left at 1,536 rather than tightened toward the measurement, because the
+# symptom when it binds is `fork: Resource temporarily unavailable` raised by
+# something unrelated, naming neither the slice nor the limit, and a second
+# concurrent phase is a supported configuration that has not been measured yet.
 TasksMax=1536
