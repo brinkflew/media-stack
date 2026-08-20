@@ -559,6 +559,56 @@ nothing points at is one nobody reads.
   check switched off. It asserts the **set** of tag lists per lane now, never the count; the count
   is a property of there being one quadlet file per lane and `containers.units_active` already
   covers it.
+- **A `chcon` is what lets a phase read its own worktree, and nothing versions it.** The runner
+  bind-mounts the worktree with neither `:z` nor `:Z`: `:z` relabels the *source*, which by the
+  second phase holds a 607 MB venv and a 368 MB `node_modules`, and `:Z` locks out every other
+  container mounting the same tree. So the fleet root is relabelled once by hand and SELinux type
+  inheritance carries it - **measured, not assumed**: a file created under a `container_file_t`
+  directory comes out `container_file_t` whether `conduct` creates it from the host as
+  `unconfined_t` or a phase creates it from inside a container. `chcon` is not durable, though: a
+  `restorecon -R /var` or a relabelling reboot resets the tree, every phase then dies on a
+  permission error naming SELinux nowhere, and `git diff` shows nothing because the label was never
+  in git. The durable form needs `semanage`, in a package this host's rules argue against layering,
+  so `agents.fleet_root_label` is what says the label has been undone.
+- **`--security-opt label=level:s0` was specified to fix a trap this design does not have, and
+  shipping it would have made containment WORSE.** The premise was that podman assigns each
+  container a random MCS pair, so run 2 gets EACCES on a venv run 1 wrote - a failure that appears
+  only on the second run and reads as corruption rather than as permissions. Measured over four
+  consecutive containers with pairs `c540,c855` / `c85,c222` / `c38,c807` / `c42,c357`: **every file
+  each one created came out `container_file_t:s0` with no categories at all, and every run read
+  every earlier run's files.** The categories come from `:Z`, which relabels the mount source with
+  the container's pair - the control case produced `container_file_t:s0:c282,c750` - and this design
+  uses neither `:z` nor `:Z`. So the flag would have bought nothing and cost the per-container MCS
+  separation that is there for free. Dropped, on the measurement, exactly as `BASE_INTERNAL_URL`
+  was.
+- **`isolate=true` blocks more than "other podman bridges", and the plan asserted the weaker
+  claim.** It was written down that an agent could reach `https://192.168.0.100/` and everything
+  Caddy fronts, because a host publish is not a bridge. Measured from an isolated bridge against a
+  plain one: **Caddy's 443 and Jellyfin's 8096 both time out on the isolated network and both
+  connect on the plain one.** Reaching a published port at the host's LAN address DNATs into the
+  owning container's bridge, so it is a bridge-to-bridge flow after all. What is genuinely not
+  blocked is the host itself - port 22 is **refused** from both, which means the packet arrived -
+  and the internet, which is what makes `bun install`, `uv sync` and `gh` work at all. Read the
+  distinction the way `docs/networking.md` insists: **124 from `timeout` is a blocked edge, 1 is a
+  shut port.**
+- **`Nice=` cannot be set on a transient scope**, and `systemd-run` says so with `Unknown assignment:
+  Nice=10` rather than ignoring it - which is the good outcome, since the phase runner's whole
+  invocation would have failed to start. It is an exec property, and a `--scope` is not started by
+  systemd; the process is the caller's. `nice -n 10 podman run ...` is the replacement, and the same
+  applies to every other exec-context directive somebody is tempted to pass with `-p`.
+- **A read-only rootfs turns every cache environment variable into a required mount.** The runner
+  image sets `UV_CACHE_DIR`, `BUN_INSTALL_CACHE_DIR` and `PLAYWRIGHT_BROWSERS_PATH` to fixed `/opt`
+  paths precisely so they are mountable, and with `/opt/bun-cache` left unmounted `bun add` dies
+  with `bun is unable to write files to tempdir: ReadOnlyFileSystem` - naming neither the variable
+  nor the path, and reading as a broken image rather than as a missing `-v`.
+  `bin/conduct-runner-smoke.sh` runs one `bun add` to cover the whole class.
+- **`node:24-trixie-slim` ships no `python3`, no `git` and no `make`** - `ca-certificates curl wget
+  gnupg dirmngr xz-utils libatomic1` is the entire apt list, read out of `nodejs/docker-node`'s own
+  Dockerfile. Six of upskald's eight `make check-gate` targets shell out to `python3`, so the
+  obvious base image fails the gate at its first line. Every import in those scripts is stdlib, so
+  one apt package settles it and there is no pip layer. Trixie also renamed `libmagic1` to
+  **`libmagic1t64`** in the 64-bit `time_t` transition, and `api/pyproject.toml` depends on
+  `python-magic`.
 
 ## Two defects in one uCore image
 

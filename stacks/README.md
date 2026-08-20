@@ -124,7 +124,7 @@ in `docs/observability.md`.
 **`duckdns` and `unpackerr` define no healthcheck**, so they get no rollback beyond "did it crash
 immediately". That is accepted, not overlooked.
 
-**Two images are built here rather than pulled, and both take `AutoUpdate=local`** - `local` policy
+**Three images are built here rather than pulled, and TWO of them take `AutoUpdate=local`** - `local` policy
 notices a new image without ever *producing* one, while a `.build` unit only runs when its image is
 absent. Left alone, a built image is the one thing in the stack that never updates. Both carry
 `Pull=newer`, because podman build's default pull policy is `missing` - it would otherwise reuse a
@@ -134,11 +134,19 @@ stale local base image for ever while succeeding in four seconds.
 |---|---|---|---|
 | `caddy.build` | `home-server-caddy-build.timer` | Sat 22:00 | It compiles Caddy with xcaddy to add `caddy-dns/gandi`, and Caddy does not release daily. The build is also the safety net: an upstream release that will not compile against the DNS module fails there, while the running proxy keeps serving. |
 | `dashboard.build` | `home-server-dashboard-build.timer` | nightly 23:00 | **Its input is the checkout, not an upstream release**, and `dist/` is not committed - so this timer is also the deploy path. A `git pull` touching `apps/dashboard/src/` deploys nothing until it runs. A weekly cadence would mean a commit taking up to seven days to appear, silently. |
+| `conduct-runner.build` | `home-server-conduct-runner-build.timer` | Sat 21:00 | **The odd one out in three ways.** It tags `:next` rather than `:latest`, because `npm install -g @anthropic-ai/claude-code` succeeds against a broken release where `xcaddy` does not - so `bin/conduct-runner-smoke.sh` is the gate and the timer promotes only on a pass. It carries **no `AutoUpdate=`**, because no container references it: `conduct` runs it as `podman run --rm` from the host. And **nothing else ever builds it** - the other two are pulled into the dependency graph by a `.container` that names them, so `Persistent=true` is what makes a fresh host build this one at all. |
 
-Both deliberately do **not** restart their container. The build is the check - `xcaddy` compiles for
-one, `vue-tsc` type-checks for the other - so a bad commit fails at build time while the previous
-image keeps serving. The nightly `podman-auto-update` run is what swaps them, and `Notify=healthy`
-is what rolls back an image that will not come up.
+The first two deliberately do **not** restart their container. The build is the check - `xcaddy`
+compiles for one, `vue-tsc` type-checks for the other - so a bad commit fails at build time while
+the previous image keeps serving. The nightly `podman-auto-update` run is what swaps them, and
+`Notify=healthy` is what rolls back an image that will not come up.
+
+**`conduct-runner.build` restarts nothing either, and for a different reason: there is nothing to
+restart.** It has no container and no `AutoUpdate=`, so neither counting check sees it -
+`update.policy_count` greps `AutoUpdate=` out of `stacks/*/*.container` and `containers.units_active`
+iterates `*.container` and `*.pod`. Its safety net is not the compiler and not `Notify=healthy`; it
+is that `conduct` resolves `:latest` at the moment it starts a phase, and only a passing smoke moves
+that tag.
 
 **Old images survive the nightly prune.** The shipped `podman-auto-update.service` runs
 `podman image prune -f` afterwards, but a superseded image keeps its repository digest and so is not

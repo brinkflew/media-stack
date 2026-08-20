@@ -1,0 +1,38 @@
+# ==============================================================================
+# Rebuild the phase runner weekly, ahead of the nightly auto-update run
+# ------------------------------------------------------------------------------
+# Saturday 21:00, an hour before home-server-caddy-build.timer and three before
+# podman-auto-update.timer. Nothing here depends on that ordering - this unit
+# restarts no container and auto-update never touches the runner image, which
+# has no container to update - but keeping every source build in the same
+# evening is what somebody reading the journal will expect.
+#
+# WEEKLY RATHER THAN NIGHTLY, AND THE TRADE IS REAL RATHER THAN NOMINAL.
+# @anthropic-ai/claude-code releases far more often than Caddy does, so this is
+# up to seven days behind on the tool that does the actual work. Nightly was
+# rejected on two counts: the build is ~1.3 GB and two apt runs, and a nightly
+# build whose smoke fails is a nightly `failed` unit reported by
+# containers.failed_units for a tool that does not need daily currency. The
+# :next -> smoke -> :latest promotion is what makes the staleness safe rather
+# than the cadence - a bad release cannot reach the fleet on any schedule.
+#
+# Persistent=true, and here it does something the other build timers only do
+# incidentally: NOTHING ELSE EVER BUILDS THIS IMAGE. caddy.build and
+# dashboard.build are pulled into the dependency graph by a .container that
+# names them, so a fresh host builds them on the way to starting a service.
+# No container references conduct-runner, so on a host that has never run this
+# timer the image simply does not exist - and Persistent=true is what makes the
+# first boot build it rather than waiting for Saturday.
+# ==============================================================================
+
+[Unit]
+Description=Rebuild and verify the conduct phase runner image weekly
+
+[Timer]
+OnCalendar=Sat *-*-* 21:00
+Persistent=true
+RandomizedDelaySec=15min
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

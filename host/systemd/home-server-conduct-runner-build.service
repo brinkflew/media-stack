@@ -1,0 +1,56 @@
+# ==============================================================================
+# Build the phase runner, prove it, and only then let the fleet use it
+# ------------------------------------------------------------------------------
+# THREE STEPS, IN ONE ONESHOT, AND THE ORDER IS THE MECHANISM. A Type=oneshot
+# runs its ExecStart= lines in sequence and stops at the first failure, so:
+#
+#   1. conduct-runner.build produces localhost/home-server/conduct-runner:next
+#   2. bin/conduct-runner-smoke.sh has to pass against :next
+#   3. only then does :latest move onto it
+#
+# `conduct` runs :latest and only ever :latest. So a build that succeeds and
+# produces a broken image leaves the fleet exactly where it was, and leaves this
+# unit `failed` - which containers.failed_units reports hourly, and which does
+# NOT block the reboot window, since --greenboot mode drops container and
+# user-manager checks.
+#
+# WHY THE INDIRECTION EXISTS AT ALL. home-server-caddy-build.service needs none
+# of this, because xcaddy has to compile caddy-dns/gandi against the new Caddy
+# and an incompatible release fails at build time. Nothing here has that
+# property: `npm install -g @anthropic-ai/claude-code` succeeds against a broken
+# release, and so does apt. The build is not a gate, so a gate was written.
+#
+# IT DELIBERATELY RESTARTS NOTHING, like both of its siblings. There is no
+# service to restart - `conduct` resolves :latest at the moment it starts a
+# phase, so a phase already in flight finishes on the image it started with.
+#
+# `restart`, not `start`: the generated conduct-runner-build.service is a
+# oneshot that sits `inactive (dead)` after it has run once, and `start` on it
+# is a no-op - the trap home-server-caddy-build.service already documents.
+#
+# NAMED FOR THE IMAGE, NOT FOR THE ORCHESTRATOR. home-server-conduct.service is
+# a different unit doing a different job; caddy.build -> home-server-caddy-build
+# is the convention and it survives the longer name.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Rebuild and verify the conduct phase runner image
+Documentation=file:/var/home-server/apps/conduct-runner/Dockerfile
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user restart conduct-runner-build.service
+ExecStart=/var/home-server/bin/conduct-runner-smoke.sh
+ExecStart=/usr/bin/podman tag localhost/home-server/conduct-runner:next localhost/home-server/conduct-runner:latest
+# The build pulls a ~1.4 GB base, runs apt twice and installs three toolchains;
+# the smoke then downloads a chromium. Measured at well under this, but the
+# first run on a cold image store is the one that has no second chance.
+TimeoutStartSec=2700
+
+# It joins the fleet's own ceiling rather than competing with the media stack
+# for memory, which is the same argument every other member of the slice makes.
+# A build is not a phase, so it takes no per-unit limits of its own - the slice
+# is what bounds it.
+Slice=app-agents.slice

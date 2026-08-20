@@ -1,0 +1,50 @@
+# ==============================================================================
+# Build: the phase runner
+# ------------------------------------------------------------------------------
+# The third image built here rather than pulled, and the only one that is not a
+# service. NOTHING REFERENCES IT FROM A QUADLET: `conduct` runs it as
+# `podman run --rm` per phase, from the host, under a transient systemd scope in
+# app-agents.slice. See apps/conduct-runner/Dockerfile and docs/agents.md.
+#
+# THAT MAKES THIS UNIT DIFFERENT FROM ITS TWO SIBLINGS IN ONE WAY THAT MATTERS.
+# caddy.build and dashboard.build are pulled into the dependency graph by a
+# .container that names them, so systemd builds before it starts the service.
+# There is no such container here, so nothing triggers this at boot at all -
+# home-server-conduct-runner-build.timer is the only thing that ever runs it,
+# and Persistent=true is what makes a fresh host build on first boot rather than
+# waiting for Saturday.
+#
+# IT TAGS :next, NOT :latest, AND THAT IS THE WHOLE SAFETY MECHANISM.
+# apps/caddy/Dockerfile can afford to be its own gate because xcaddy fails to
+# compile against an incompatible Caddy. `npm install -g @anthropic-ai/claude-code`
+# succeeds against a broken release, and so does apt. So the build produces a
+# candidate, bin/conduct-runner-smoke.sh has to pass, and only then is :latest
+# moved onto it - three sequential ExecStart= lines in one oneshot, which stop
+# at the first failure. `conduct` runs :latest and only ever :latest, so a
+# failed smoke leaves the fleet on the last image that worked.
+#
+# NO AutoUpdate= ANYWHERE, because there is no container to update. That also
+# means this file is invisible to both counting checks: update.policy_count
+# greps AutoUpdate= out of stacks/*/*.container, and containers.units_active
+# iterates *.container and *.pod. Neither number moves when this lands, which is
+# the same reason caddy.build and dashboard.build appear in neither.
+# ==============================================================================
+
+[Unit]
+Description=Build the conduct phase runner image
+
+[Build]
+ImageTag=localhost/home-server/conduct-runner:next
+File=/var/home-server/apps/conduct-runner/Dockerfile
+SetWorkingDirectory=/var/home-server/apps/conduct-runner
+
+# The trap both siblings document: podman build's default pull policy is
+# `missing`, so once node:24-trixie-slim, ghcr.io/astral-sh/uv:0.12 and
+# oven/bun:1 exist in local storage they are never reconsidered. The weekly
+# rebuild would keep succeeding in seconds against a base that had stopped
+# receiving security updates, and nothing would say so.
+#
+# It matters more here than for either of them. This image is the one place on
+# this host where model-authored code executes, and its base is a Debian
+# userland with a browser's worth of system libraries in it.
+Pull=newer

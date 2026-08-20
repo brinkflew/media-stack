@@ -169,6 +169,7 @@ podman ps --filter health=unhealthy           # the one that catches a live-but-
 
 systemctl --user start caddy-build            # after editing apps/caddy/Dockerfile (~75s)
 systemctl --user start home-server-dashboard-build.service   # THE DEPLOY for apps/dashboard/
+systemctl --user start home-server-conduct-runner-build.service  # build, smoke, promote :latest
 systemctl --user restart dashboard            # then swap onto the new bundle
 podman exec caddy caddy reload --config /etc/caddy/Caddyfile   # routing change, no downtime
 
@@ -384,6 +385,18 @@ signal read green.
   unit failed and no container unhealthy; work just queues.
 - **`worker_ping` keeps a row per worker name and the name changes on every start**, so row counts -
   including `workers_alive` in Windmill's own health endpoint - over-count after a restart.
+- **A `chcon` is what lets a phase read its own worktree**, it is undone silently by any
+  `restorecon`, and type inheritance is what carries it to every file created afterwards.
+- **`--security-opt label=level:s0` fixes a trap this design does not have.** The MCS categories
+  come from `:Z`, not from bind mounts; four runs proved every file lands at `s0`. Shipping it would
+  have removed per-container separation for nothing.
+- **`isolate=true` blocks more than other bridges**: a published port reached at the host's LAN
+  address DNATs into the owning container's bridge, so Caddy and Jellyfin are unreachable from a
+  fleet network. The host itself and the internet are not.
+- **`Nice=` cannot be set on a transient scope**, and a read-only rootfs turns every cache
+  environment variable into a required mount.
+- **`node:24-trixie-slim` ships no `python3`, `git` or `make`**, and trixie renamed `libmagic1` to
+  `libmagic1t64`.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running

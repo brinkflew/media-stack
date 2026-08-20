@@ -1803,6 +1803,96 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 	fi
 
+	# THE LABEL IS THE WHOLE REASON A PHASE CAN READ ITS OWN WORKTREE, AND
+	# NOTHING VERSIONS IT. The runner bind-mounts the worktree with neither :z
+	# nor :Z - :z relabels the SOURCE, which by the second phase holds a 607 MB
+	# venv and a 368 MB node_modules, and :Z locks every other container out of
+	# a tree three of them mount. So the fleet root is relabelled ONCE, by hand,
+	# and SELinux type inheritance carries it: a file created in a
+	# container_file_t directory is container_file_t, whether conduct creates it
+	# from the host or a phase creates it from inside a container. Measured, not
+	# assumed.
+	#
+	# `chcon` is not durable. A `restorecon -R /var` or a relabelling reboot
+	# resets the tree, every phase then dies on a permission error that names
+	# SELinux nowhere, and `git diff` shows nothing because the label was never
+	# in git. The durable form needs `semanage`, which is a layered package this
+	# host's rules argue against - so the fix stays a one-line chcon and this is
+	# what says when it has been undone.
+	#
+	# IT READS THE ROOT AND NOTHING ELSE. Inheritance is what makes the tree
+	# correct, so the root is the only place the answer can change; a recursive
+	# walk over a gigabyte of node_modules every hour would cost far more than
+	# it could ever find.
+	fleet_root="${DOCKER_VOLUME_CACHE:-/var/home-server/cache}/conduct"
+	if [ ! -d "$fleet_root" ]; then
+		fact agents_fleet_root_label ""
+		note agents.fleet_root_label "$fleet_root does not exist yet - conduct has no worktree root to label"
+	else
+		fr_ctx=$(stat -c %C "$fleet_root" 2>/dev/null)
+		fr_type=$(printf '%s' "$fr_ctx" | cut -d: -f3)
+		fact agents_fleet_root_label "${fr_type:-}"
+		if [ "$fr_type" = container_file_t ]; then
+			ok agents.fleet_root_label "the fleet root is container_file_t, so a phase can read the tree it was given"
+		else
+			warn agents.fleet_root_label "the fleet root is ${fr_type:-unlabelled}, not container_file_t - every phase will fail on a permission error naming SELinux nowhere; fix with 'chcon -R -t container_file_t $fleet_root', and note a restorecon will undo it again"
+		fi
+	fi
+
+	# THE ISOLATION IS PROVEN LIVE ELSEWHERE, AND THIS IS THE HALF THAT CAN RUN
+	# HOURLY. The plan had this check run a throwaway container against
+	# windmill-db by IP every hour. It cannot: a live probe needs a fleet
+	# network, none exists between phases, so the check would have to create and
+	# destroy a podman network ~9,000 times a year - against a /16 that gives
+	# 256 subnets, where a leak from a killed run is silent and cumulative. That
+	# is the failure this repository already lists as a risk, and a check must
+	# not be the thing that causes it.
+	#
+	# So the two questions split the way the backup's did in step 3. "Is the
+	# isolation enforced by the kernel?" is proven BY IP, from a runner-shaped
+	# container, in bin/conduct-runner-smoke.sh - at every rebuild, where the
+	# network is created, used and removed inside one trap. "Do the fleet's
+	# networks still carry it?" is this, and it is a read.
+	#
+	# THE SECOND ARM IS THE ONE THAT WOULD MATTER MOST. A runner attached to a
+	# stack network is the single failure this whole tier exists to prevent, and
+	# it costs one `podman ps`. Note it also fires on a HAND-RUN diagnostic that
+	# carries the label - step 5's own negative control is exactly that shape -
+	# which is correct rather than a false positive, and clears when it exits.
+	# Filtered in the shell rather than with `--filter name=`, whose matching is
+	# a substring in some podman versions and an anchored regex in others - the
+	# kind of difference that silently widens what a check believes it saw.
+	fleet_nets=$(podman network ls --format '{{.Name}}' 2>/dev/null | grep '^net-conduct-' || true)
+	unisolated=""
+	for fn in $fleet_nets; do
+		[ "$(podman network inspect "$fn" --format '{{index .Options "isolate"}}' 2>/dev/null)" = true ] ||
+			unisolated="$unisolated $fn"
+	done
+	# The stack's own networks, derived from stacks/ rather than listed here -
+	# the same authority containers.units_active and update.policy_count use.
+	stack_nets=$(for nf in "$repo"/stacks/common/*.network; do
+		[ -e "$nf" ] || continue
+		basename "$nf" .network
+	done)
+	strays=""
+	for ec in $(podman ps --filter label=io.home-server.ephemeral --format '{{.Names}}' 2>/dev/null); do
+		for sn in $stack_nets; do
+			podman inspect "$ec" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null |
+				grep -qw "$sn" && strays="$strays $ec:$sn"
+		done
+	done
+	fact agents_fleet_networks "$(printf '%s\n' "$fleet_nets" | grep -c . || true)" num
+	fact agents_runner_strays "$(printf '%s' "$strays" | wc -w)" num
+	if [ -n "$strays" ]; then
+		warn agents.runner_isolation "an ephemeral container is attached to a stack network:$strays - a phase runner can reach the services that segment holds, which is the one edge this tier exists to prevent"
+	elif [ -n "$unisolated" ]; then
+		warn agents.runner_isolation "fleet network(s) without isolate=true:$unisolated - netavark does not inherit Docker's inter-bridge isolation, so those bridges are fully routable to every other one"
+	elif [ -n "$fleet_nets" ]; then
+		ok agents.runner_isolation "$(printf '%s\n' "$fleet_nets" | grep -c .) fleet network(s), all isolate=true, and no runner on a stack segment"
+	else
+		note agents.runner_isolation "no net-conduct-* network exists, so no phase is in flight - the live by-IP proof is bin/conduct-runner-smoke.sh"
+	fi
+
 	# --------------------------------------------------------------------------
 	# Seeding policy. Whether the 72h floor is actually being enforced.
 	# --------------------------------------------------------------------------
