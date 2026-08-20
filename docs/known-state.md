@@ -618,6 +618,37 @@ nothing points at is one nobody reads.
   one apt package settles it and there is no pip layer. Trixie also renamed `libmagic1` to
   **`libmagic1t64`** in the 64-bit `time_t` transition, and `api/pyproject.toml` depends on
   `python-magic`.
+- **Two writers share one exposition file, and a name collision rejects THE WHOLE SCRAPE.**
+  `bin/verify-host.sh` records facts; `source_status` in `bin/collect-metrics.py` mints
+  `home_server_<fact key>` for every numeric one; and that file's own `m.add()` names land beside
+  them. Prometheus tolerates a duplicate sample whose value matches and rejects the entire scrape
+  when it does not - and these two disagree by construction, because the battery is hourly and the
+  collector runs every thirty seconds. So the failure is not one wrong panel: it is every metric on
+  the host disappearing, waiting on whichever pair of samples first drifts apart. The collector
+  carries `FACT_OWNED_ELSEWHERE` for the one collision it wants, and that comment records how the
+  trap was found - "by reading the exposition rather than by the check, which stayed green
+  throughout". **`bin/lint-repo.sh` leg 9 is now that check**, statically, because the runtime
+  version needs the two writers to disagree first.
+- **The battery's agent facts and the collector's agent metrics are ONE LETTER APART.** The facts
+  are `agents_*`, plural, and become `home_server_agents_*`; the collector's family is
+  `home_server_agent_*`, singular. Two files, neither mentioning the other's spelling at the point
+  it matters, and the penalty for confusing them is the entry above.
+- **A lint leg that greps for `m.add("literal")` cannot see a name built by concatenation**, and the
+  first version of leg 9 proved it by passing with a deliberate collision planted in front of it.
+  Most names in `bin/collect-metrics.py` are built as `"home_server_agent_" + suffix` inside a loop,
+  so the grep captures the PREFIX and never the name. The leg reads every `home_server_` string
+  literal instead and treats one ending in `_` as a prefix that shadows every key beneath it -
+  **except the bare `home_server_`**, which is `source_status`'s own bridge and, left in, matches
+  every candidate and fails all ninety. Passing on everything and failing on everything are the same
+  uselessness in opposite directions, and the negative control is what tells them from a check that
+  works.
+- **`ActiveState` reads `active` for a long-running unit whether it is busy or idle**, which is the
+  exact mirror of the trap `bin/reboot-when-staged.sh` already carries about `home-server-backup`:
+  a `Type=oneshot` is `activating` for its entire working life and never `active`. Both are the
+  obvious question to ask systemd, both read correctly, and both are dead. So the phase-in-flight
+  refusal reads a marker `conduct` writes about itself - **and only believes it while the heartbeat
+  is fresh**, because a conduct killed mid-phase leaves the flag set for ever and a stale veto is
+  the "host silently stops taking OS security updates" failure from a fourth direction.
 
 ## Two defects in one uCore image
 

@@ -456,6 +456,87 @@ else
 	skip "no quadlet generator at $QUADLET"
 fi
 
+# ------------------------------------------------------------------------------
+say "Fact and metric names"
+# ------------------------------------------------------------------------------
+# THE TWO WRITERS SHARE ONE EXPOSITION FILE. bin/verify-host.sh records facts,
+# source_status in bin/collect-metrics.py mints `home_server_<fact key>` for each
+# numeric one, and that file's own m.add() names land beside them. Prometheus
+# tolerates a duplicate sample whose value matches and REJECTS THE WHOLE SCRAPE
+# when it does not - and these two disagree by construction, because the battery
+# is hourly and the collector runs every thirty seconds. So the failure is not a
+# wrong number on one panel: it is every metric on the host disappearing, waiting
+# on whichever pair of samples first drifts apart.
+#
+# collect-metrics.py carries FACT_OWNED_ELSEWHERE for the one collision it wants,
+# and the comment above it records how that was found - "by reading the exposition
+# rather than by the check, which stayed green throughout". This is that check,
+# and it is static because the runtime version needs the two writers to disagree
+# first.
+#
+# THE AGENTS SECTION IS WHY IT EXISTS NOW. The battery's facts are `agents_*` and
+# the collector's family is `home_server_agent_*`, singular - one letter apart, in
+# two files, neither of which mentions the other's spelling at the point it
+# matters.
+vh=bin/verify-host.sh
+cm=bin/collect-metrics.py
+if [ -f "$vh" ] && [ -f "$cm" ]; then
+	# EVERY home_server_ STRING LITERAL, not just the ones m.add() is handed
+	# directly, and the difference is the whole check. Most names in that file are
+	# built as `"home_server_agent_" + suffix` inside a loop, so a grep for the
+	# m.add() call captures the PREFIX and never the name - which is how the first
+	# version of this leg passed with a deliberate collision planted in front of
+	# it. A literal ending in `_` is therefore treated as a prefix and shadows
+	# every fact key under it; anything with a `%` is a format string in
+	# source_status's own bridge, which mints from fact keys rather than beside
+	# them, and is skipped.
+	#
+	# THE BARE `home_server_` LITERAL IS EXCLUDED, and it has to be: it is
+	# source_status's own bridge, `m.add("home_server_" + key, ...)`, which mints
+	# FROM fact keys rather than beside them. Left in, it is a prefix matching
+	# every candidate and the leg fails on all ninety of them - which is the same
+	# uselessness as passing on all of them, one direction over.
+	literals=$(grep -oE '"home_server_[a-z0-9_%]*"' "$cm" | tr -d '"' \
+		| grep -v '%' | grep -vx 'home_server_' | sort -u)
+	minted=$(printf '%s\n' "$literals" | grep -v '_$' || true)
+	prefixes=$(printf '%s\n' "$literals" | grep '_$' || true)
+	# The collisions collect-metrics.py deliberately owns and already skips.
+	owned=$(sed -n '/^FACT_OWNED_ELSEWHERE = (/,/^)/p' "$cm" \
+		| grep -oE '"[a-z0-9_]+"' | tr -d '"' | sort -u)
+	clash=""
+	# Process substitution rather than a pipe: a `while read` on the right of a
+	# pipe runs in a subshell, and $clash below would be assigned there and lost -
+	# the loop would then report success no matter what it found.
+	while read -r key; do
+		printf '%s\n' "$owned" | grep -qx "$key" && continue
+		# Every name source_status can mint from this key: the plain form, plus
+		# the unit rewrite it applies by suffix. Kept in step with that function.
+		cands="home_server_$key"
+		case "$key" in
+			*_mb) cands="$cands home_server_${key%_mb}_bytes" ;;
+			*_s)  cands="$cands home_server_${key%_s}_seconds" ;;
+			*_at) cands="$cands home_server_${key%_at}_timestamp_seconds" ;;
+		esac
+		for cand in $cands; do
+			printf '%s\n' "$minted" | grep -qx "$cand" &&
+				clash="$clash $key->$cand"
+			for pre in $prefixes; do
+				case "$cand" in "$pre"*) clash="$clash $key->${pre}*" ;; esac
+			done
+		done
+	done < <(grep -oE '^[[:space:]]*fact [a-z][a-z0-9_]*' "$vh" \
+		| awk '{print $2}' | sort -u)
+	if [ -n "$clash" ]; then
+		bad "fact key(s) shadow a metric collect-metrics.py mints:$clash
+    Rename one side. A duplicate sample whose values disagree rejects the whole
+    scrape, and the two writers run on different schedules by design."
+	else
+		ok "$(printf '%s\n' "$minted" | grep -c .) collector metric names and $(printf '%s\n' "$prefixes" | grep -c .) name prefix(es), none shadowed by a fact key"
+	fi
+else
+	skip "no $vh or $cm"
+fi
+
 echo
 if [ "$fails" -gt 0 ]; then
 	printf '\033[31m%d check(s) FAILED\033[0m\n' "$fails"

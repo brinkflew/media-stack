@@ -540,3 +540,122 @@ groups:
           description: >-
             Sustained rather than a transcode spike. Check airflow and whether
             two NVENC sessions are running against a queue that is not draining.
+
+  # ===========================================================================
+  # The agent fleet
+  # ---------------------------------------------------------------------------
+  # NOT ONE OF THESE CAN RIDE ON CheckFailing, and the reason is structural
+  # rather than an oversight. Every check in the agents section of
+  # bin/verify-host.sh is WARN or NOTE by charter - bin/reboot-host.sh refuses to
+  # act on a host this battery calls unhealthy, and nothing an agent fleet does
+  # wrong is fixed by a reboot - so none of them can ever emit FAIL, and
+  # CheckFailing is `== 3`. That is the same gap OsImageStale,
+  # ProbeBinaryMissing, UpdateRolledBack and RestoreNeverProven each had to
+  # discover for themselves, arriving here as a whole section at once.
+  #
+  # NOTES ARE SILENT, DELIBERATELY. `== 2` is warn; a NOTE is 1. Every
+  # conduct-dependent check NOTEs while the orchestrator is not installed, which
+  # is every hour until it ships, and none of that should reach a phone.
+  # ===========================================================================
+  - name: agents
+    rules:
+      - alert: AgentContainmentLost
+        # CRITICAL RATHER THAN WARNING, on a section that is otherwise all
+        # warnings, because these three are the containment itself. The slice is
+        # the only ceiling the runners have; isolate=true is the only thing
+        # keeping a phase off net-arr; and the fleet root's SELinux label is what
+        # a `restorecon -R /var` silently removes, after which every phase dies
+        # on a permission error naming SELinux nowhere.
+        expr: >-
+          home_server_check_status{id=~"agents.(slice_limits|runner_isolation|fleet_root_label)"} == 2
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent containment finding: {{ $labels.id }}"
+          description: >-
+            The fleet may be running with systemd's defaults instead of
+            app-agents.slice, with a bridge that is not isolated, or with a
+            worktree root nothing can read. `jq -r '.checks[]|select(.id=="{{ $labels.id }}")'
+            /var/lib/home-server/status.json` names which.
+
+      - alert: AgentCheckWarning
+        # THE CATCH-ALL FOR THE SECTION, and it covers every check added to it
+        # later without a rule change - the same property CheckFailing has for
+        # FAIL. The three above are excluded so a containment finding pages once
+        # rather than twice, thirty minutes apart, at two severities.
+        #
+        # It is also what carries agents.approvals_pending, which is why there is
+        # no ApprovalWaiting rule: that check only warns once an approval has
+        # waited twelve hours, so this fires at twelve and a half. A second rule
+        # would restate the same threshold in a second place.
+        expr: >-
+          home_server_check_status{section="agents",
+            id!~"agents.(slice_limits|runner_isolation|fleet_root_label)"} == 2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent check {{ $labels.id }} is warning"
+          description: >-
+            The fleet is degraded rather than contained wrongly. The wording is
+            in status.json: `jq -r '.checks[]|select(.id=="{{ $labels.id }}")'
+            /var/lib/home-server/status.json`.
+
+      - alert: AgentQuotaHeadroomLow
+        # THE ONE RULE WHOSE REMEDY IS A COMMAND RATHER THAN AN INVESTIGATION.
+        # conduct paces itself to stay under 0.9 of both windows; past that it
+        # should already have stopped dispatching, so this firing means either it
+        # did not or something else is spending the same subscription.
+        expr: home_server_agent_quota_ratio > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent quota for the {{ $labels.window }} window is {{ $value }}"
+          description: >-
+            The fleet shares one subscription with your own sessions, and the
+            cost of ignoring this is your own sessions failing rather than the
+            fleet's. Stop it with `systemctl --user stop home-server-conduct`.
+
+      - alert: AgentPhaseStuck
+        # Both series are unlabelled, so `and` matches on the empty label set.
+        # 10800s is twice the phase scope's RuntimeMaxSec: past it the scope that
+        # was meant to kill the runner did not, which is a different fault from a
+        # phase merely taking a long time.
+        expr: >-
+          home_server_agent_phase_in_flight == 1
+          and (time() - home_server_agent_phase_started_timestamp_seconds) > 10800
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A phase has been in flight for over three hours"
+          description: >-
+            The transient scope should have killed it at RuntimeMaxSec. Look for
+            a runner that outlived its scope (`podman ps --filter
+            label=io.home-server.ephemeral`) and a lease conduct will not
+            reclaim.
+
+      - alert: AgentSliceOOM
+        # WARNING RATHER THAN CRITICAL, AND THAT IS THE POINT. An OOM inside the
+        # slice is the containment working: the kernel enforced a ceiling this
+        # repository chose. It fires so the sizing gets revisited rather than the
+        # failures being written off as flaky tests - which is exactly what they
+        # look like from inside a phase.
+        #
+        # A kill here may land on a Windmill worker rather than on the phase that
+        # caused it: a cgroup OOM picks by badness across the whole subtree, and
+        # rootless podman refuses to lower a worker's oom_score_adj.
+        expr: increase(home_server_agent_slice_oom_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The agent slice OOM-killed a process"
+          description: >-
+            app-agents.slice hit MemoryMax. Read
+            home_server_agent_slice_memory_peak_bytes against
+            home_server_agent_slice_memory_max_bytes before assuming a leak - the
+            runner is sized to bind before the slice does, so a slice-level kill
+            means that ordering no longer holds.

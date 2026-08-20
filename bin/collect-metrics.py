@@ -1319,6 +1319,162 @@ def source_status(m):
 
 
 # ------------------------------------------------------------------------------
+# The agent fleet
+# ------------------------------------------------------------------------------
+# FAST TIER, and it earns the place: one flat file and one cgroup directory, no
+# subprocess at all. The numbers it carries are spend against a quota, and a
+# spend counter five minutes out of date is not stale, it is wrong - by then the
+# fleet has dispatched again on a figure that was already gone.
+#
+# MIND THE PREFIX. These are home_server_agent_*, SINGULAR. bin/verify-host.sh's
+# facts are agents_*, plural, and source_status above turns each into
+# home_server_agents_*. The two families are one letter apart, and a collision is
+# not a wrong number: FACT_OWNED_ELSEWHERE records that Prometheus rejects the
+# WHOLE SCRAPE when two samples of one name disagree, so a careless key here
+# takes every metric on the host down until somebody reads the exposition by
+# hand. bin/lint-repo.sh leg 9 asserts the two families stay disjoint.
+#
+# IT MUST NEVER RAISE ON AN ABSENT MARKER OR AN ABSENT SLICE, and that is not
+# politeness. A source that raises stops last_ok_at advancing for EVERY source at
+# once, so metrics.collector_fresh would WARN about a collector doing its job -
+# and absent is the normal state on this host until conduct ships.
+AGENT_SLICE = os.path.join(CGROUP, "app-agents.slice")
+CONDUCT_MARKER = os.path.expanduser("~/.cache/home-server/conduct-state")
+
+# THE KEY SET IS A LITERAL LIST, which is the whole cardinality argument. conduct
+# writes the marker and conduct does not exist yet; a loop over whatever keys it
+# happens to contain would let a component nobody has written mint series in a
+# store that keeps 400 days. A key not named here is read by nothing.
+#
+# (marker key, metric suffix, help)
+AGENT_NUMBERS = (
+    ("phase_in_flight", "phase_in_flight",
+     "1 while a phase runner is executing. ABSENT when conduct is not installed, "
+     "which is not the same as 0 and must not be drawn as idle."),
+    ("tokens_today", "tokens_today",
+     "Tokens spent since midnight. A gauge, not a counter: it resets daily by "
+     "design, and rate() over a resetting counter is a lie."),
+    ("tokens_week", "tokens_week", "Tokens spent in the current weekly window."),
+    ("runs_today", "runs_today", "Phase runs started since midnight."),
+    ("runs_failed_today", "runs_failed_today",
+     "Phase runs that ended in a failure since midnight."),
+    ("worktrees", "worktrees",
+     "Worktrees conduct currently holds a lease on. agents.worktree_orphans "
+     "compares it against what is on disk."),
+)
+
+# The two quota windows, as fractions rather than percentages, because every
+# other ratio in this file is one and an alert reading `> 0.9` should not have to
+# know which convention this particular metric picked.
+AGENT_QUOTA = (("quota_5h_pct", "5h"), ("quota_week_pct", "week"))
+
+# (marker key, metric infix)
+AGENT_STAMPS = (("last_ok_at", "last_ok"), ("heartbeat_at", "heartbeat"),
+                ("phase_started_at", "phase_started"),
+                ("quota_read_at", "quota_read"))
+
+
+def _marker(path):
+    """A key=value marker file as a dict of strings. Missing file -> {}."""
+    out = {}
+    try:
+        for line in read_text(path).splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                out[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return out
+
+
+def _marker_number(raw, scale=None):
+    """A marker value as a number, or None when it is absent or not one.
+
+    None is the point rather than a fallback: Metrics.add drops it, so a key
+    conduct has not written is ABSENT from the exposition instead of arriving as
+    a zero somebody would read as a measurement.
+    """
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if scale is not None:
+        return "%.4f" % (value * scale)
+    return int(value) if value == int(value) else value
+
+
+def source_agents(m):
+    # THE PRESENCE GAUGE IS NOT DECORATION. read_int returns None for the literal
+    # `max` and Metrics.add then drops the sample, so an UNBOUNDED control does
+    # not read as zero - it vanishes. The failure this whole tier exists for is
+    # systemd instantiating the slice with defaults, where all five controls read
+    # unlimited and therefore all five gauges disappear together, which from a
+    # dashboard is indistinguishable from a slice that is not running. Same
+    # reason home_server_filesystem_mounted exists beside the size gauges.
+    present = os.path.isdir(AGENT_SLICE)
+    m.add("home_server_agent_slice_present", 1 if present else 0, None,
+          "1 when app-agents.slice has a live cgroup. Every gauge below is "
+          "ABSENT both when the slice is empty and when a control is unlimited, "
+          "so this is what tells those two apart.")
+
+    if present:
+        for metric, filename, help_text in (
+                ("memory_bytes", "memory.current",
+                 "memory.current for the whole slice - every Windmill container, "
+                 "conduct, and any phase scope, summed by the kernel."),
+                ("memory_peak_bytes", "memory.peak",
+                 "High-water mark since the slice was created. What the runner's "
+                 "own MemoryMax was sized against."),
+                ("memory_max_bytes", "memory.max",
+                 "The MemoryMax= ceiling. ABSENT when unlimited, which is the "
+                 "silent failure agents.slice_limits exists to catch."),
+                ("memory_high_bytes", "memory.high",
+                 "The MemoryHigh= throttle watermark, NOT memory.low."),
+                ("pids", "pids.current", "Tasks in the slice."),
+                ("pids_max", "pids.max",
+                 "The TasksMax= limit. ABSENT when unlimited.")):
+            m.add("home_server_agent_slice_" + metric,
+                  read_int(os.path.join(AGENT_SLICE, filename)), None, help_text)
+
+        # THE ONE NUMBER THAT SAYS THE SIZING IS WRONG rather than that the tests
+        # are flaky. A cgroup OOM picks its victim by badness across the whole
+        # subtree, and rootless podman refuses to lower a Windmill worker's
+        # oom_score_adj - so a kill here may land on the control plane rather
+        # than on the phase that caused it. `high` is deliberately not exported:
+        # a slice doing file I/O accumulates it forever and it proves nothing.
+        events = read_kv(os.path.join(AGENT_SLICE, "memory.events"))
+        m.add("home_server_agent_slice_oom_total", events.get("oom_kill"), None,
+              "Processes killed by the kernel for breaching the slice's memory "
+              "ceiling. Non-zero means the sizing is wrong, not that a test is "
+              "flaky.", "counter")
+
+    state = _marker(CONDUCT_MARKER)
+    m.add("home_server_agent_marker_present", 1 if state else 0, None,
+          "1 when conduct has written its marker. Reads 0 on a host where the "
+          "orchestrator is not installed, which is what every agents check "
+          "reports as a NOTE rather than a finding.")
+
+    for key, infix in AGENT_STAMPS:
+        m.add("home_server_agent_%s_timestamp_seconds" % infix,
+              _epoch(state.get(key)), None,
+              "From conduct's marker. A TIMESTAMP, not an age: the consumer "
+              "subtracts from time(), so a stopped orchestrator shows as "
+              "staleness rather than freezing at its last value.")
+
+    for key, window in AGENT_QUOTA:
+        m.add("home_server_agent_quota_ratio",
+              _marker_number(state.get(key), 0.01), {"window": window},
+              "Fraction of the quota window conduct has spent. It paces itself "
+              "to stay under 0.9 of both; past that it stops dispatching.")
+
+    for key, suffix, help_text in AGENT_NUMBERS:
+        m.add("home_server_agent_" + suffix, _marker_number(state.get(key)),
+              None, help_text)
+
+
+# ------------------------------------------------------------------------------
 # The applications - the SLOW tier
 # ------------------------------------------------------------------------------
 # Every one of these is reached with `podman exec`, which works whatever the
@@ -2562,6 +2718,7 @@ SOURCES = (
     ("gpu", source_gpu, False, None),
     ("sensors", source_sensors, False, None),
     ("status", source_status, False, None),
+    ("agents", source_agents, False, None),
     ("playback", source_playback, False, "activity"),
     ("transfers", source_transfers, False, "activity"),
     ("smart", source_smart, True, None),

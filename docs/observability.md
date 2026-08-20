@@ -280,7 +280,7 @@ seconds; and **resolution**, so you are told when it stops. The first two are wh
 channel is still being read in six months - the same argument this file already makes about
 `journalctl -p err`. `repeat_interval` is **12h for warnings, 4h for critical**.
 
-**`CheckFailing` covers all 196 check ids and every future one - but only at FAIL.** Its expression
+**`CheckFailing` covers every check id the battery emits - 105 today - but only at FAIL.** Its expression
 is `home_server_check_status == 3`, so **a check that is deliberately WARN never notifies**, and
 several here are WARN precisely because they must not block a reboot. Usually that is right: a WARN
 belongs in the MOTD and the dashboard, not on a phone. Where it is not - `deploy.image_digest`,
@@ -340,6 +340,47 @@ worked.
 rules running - safe, but not what you asked for:
 
 ```bash
+## The agent fleet
+
+**Twelve checks, one collector source and one alert group, all of which measure a component that is
+not installed yet.** That order is deliberate rather than premature: a fleet that spends quota
+before anything reads the quota is the failure the whole of this file exists to prevent, so the
+readers land first and `conduct` is written against them.
+
+Every `conduct`-dependent check reports NOTE while `~/.cache/home-server/conduct-state` is absent,
+which is every hour until the orchestrator ships. A finding nobody can act on is how a reader learns
+to skip a whole section, and this one would otherwise have had months to teach that.
+
+**The marker is a flat `key=value` file in `backup-state`'s exact shape**, holding a heartbeat, a
+phase flag and its start, the two quota percentages and when they were last read, token and run
+totals, and a worktree count. Three readers parse it: `bin/verify-host.sh`, `bin/collect-metrics.py`
+and `bin/reboot-when-staged.sh`. **The key set is a literal list in the collector**, so what a
+component nobody has written yet can mint is bounded by construction rather than by a promise.
+
+**The staleness arm of `agents.quota_headroom` is the one that matters, and it is not the obvious
+one.** A fleet pacing itself against a six-hour-old window reading spends the cap rather than
+respecting it, and every other signal reads healthy while it does - `conduct` is up, phases
+complete, and the percentage on screen is simply the last one it managed to see. So the age of the
+reading is graded before the reading is.
+
+**There is no dollar metric and no daily spend ceiling, deliberately.** The quota is a subscription
+session key paced against a 5-hour window and a weekly cap, so a price per token would have to be
+invented and would measure nothing that can stop the fleet. Percentages are the currency.
+
+**Not one of the agents alerts can ride on `CheckFailing`.** Every check in the section is WARN or
+NOTE by charter - `bin/reboot-host.sh` refuses to act on a host this battery calls unhealthy, and
+nothing an agent fleet does wrong is fixed by a reboot - so none can ever emit FAIL. The `agents`
+group carries `AgentContainmentLost` (critical, the three containment ids), `AgentCheckWarning`
+(everything else in the section, so a check added later needs no rule change), plus quota, stuck
+phase and slice OOM. NOTEs are silent throughout, which is what keeps the pre-`conduct` months off
+a phone.
+
+**`bin/lint-repo.sh` leg 9 exists because of this tier.** The battery's facts are `agents_*` and the
+collector's family is `home_server_agent_*`, one letter apart, and a collision between a fact key
+and a metric name rejects the entire scrape rather than producing one wrong number. See
+`docs/known-state.md`; the leg is static because the runtime version needs the two writers to
+disagree first.
+
 # NOTE the `sh -c`: podman exec runs no shell, and promtool does not glob itself,
 # so the bare form fails with "path does not exist" and reads like a missing mount.
 podman exec prometheus sh -c 'promtool check rules /etc/prometheus/rules/*.yml'

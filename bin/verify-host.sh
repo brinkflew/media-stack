@@ -1894,6 +1894,242 @@ if [ -z "$GREENBOOT" ]; then
 	fi
 
 	# --------------------------------------------------------------------------
+	# conduct itself, through a marker that does not exist yet
+	# --------------------------------------------------------------------------
+	# THE CONTRACT IS WRITTEN HERE AND HONOURED IN /var/agents, which is the order
+	# the build sequence insists on: do not ship the orchestrator before the thing
+	# that measures what it spends. A fleet that burns quota before anything reads
+	# the quota is the week-one failure this whole section exists to prevent, so
+	# the readers land first and conduct is written against them.
+	#
+	# FLAT key=value, THE backup-state AND metrics-state SHAPE EXACTLY. Two shell
+	# readers parse it - this file and bin/reboot-when-staged.sh - and the key set
+	# is a literal list in bin/collect-metrics.py, so what it can mint is bounded
+	# by construction rather than by a promise nobody checks.
+	#
+	# EVERY CHECK BELOW NOTES WHILE THE FILE IS ABSENT, which is every hour until
+	# conduct ships. A finding nobody can act on is how a reader learns to skip a
+	# whole section, and this one would otherwise have had months of practice.
+	#
+	# MIND THE PREFIX. Facts here are `agents_` and become home_server_agents_*;
+	# the collector's own family is home_server_agent_*, SINGULAR. They are one
+	# letter apart, and a collision is not a wrong number: collect-metrics.py's
+	# FACT_OWNED_ELSEWHERE records that Prometheus rejects the WHOLE SCRAPE when
+	# two samples of one name disagree, so one careless key takes every metric on
+	# the host down until somebody reads the exposition by hand. bin/lint-repo.sh
+	# leg 9 is what makes that a build failure instead.
+	conduct_state="${HOME:-/root}/.cache/home-server/conduct-state"
+	cget() { sed -n "s/^$1=//p" "$conduct_state" 2>/dev/null | tail -1; }
+	# Seconds since an ISO-8601 key, or EMPTY when it is missing or unparseable -
+	# which the callers below all treat as "not measured" rather than as zero.
+	cage() {
+		local stamp epoch
+		stamp=$(cget "$1")
+		[ -n "$stamp" ] || return 0
+		epoch=$(date -d "$stamp" +%s 2>/dev/null) || return 0
+		[ -n "$epoch" ] || return 0
+		printf '%s' "$(( $(date +%s) - epoch ))"
+	}
+
+	# SECOND RESOLUTION AND metrics.collector_fresh's SHAPE, deliberately not
+	# check_timer_run: that helper grades in whole hours, so against a poll loop
+	# it would compare a zero-hour age to a zero-hour threshold and pass an
+	# orchestrator that stopped fifty minutes ago.
+	cd_ok=$(cget last_ok_at)
+	cd_age=$(cage last_ok_at)
+	if [ ! -e "$conduct_state" ]; then
+		note agents.conduct_fresh "no marker at $conduct_state - conduct is not installed yet"
+	elif [ -n "$cd_age" ] && [ "$cd_age" -le 600 ]; then
+		ok agents.conduct_fresh "conduct completed a cycle ${cd_age}s ago"
+	elif [ -n "$cd_age" ]; then
+		warn agents.conduct_fresh "conduct's last completed cycle was ${cd_age}s ago, limit 600s - it is either wedged mid-poll or stopped and left the marker behind, and the marker alone cannot tell you which"
+	elif [ "${uptime_s:-0}" -lt 600 ]; then
+		ok agents.conduct_fresh "nothing recorded in the ${uptime_s}s since boot - not yet due"
+	else
+		warn agents.conduct_fresh "the marker exists but records no completed cycle - conduct has started and never got through a poll"
+	fi
+	fact agents_conduct_last_ok_at "${cd_ok:-}"
+	fact agents_conduct_age_s "${cd_age:-}" num
+
+	# THE STALENESS ARM IS THE ONE THAT MATTERS AND IT IS NOT THE OBVIOUS ONE. A
+	# fleet pacing itself against a six-hour-old window reading spends the cap
+	# rather than respecting it, and every other signal reads healthy while it
+	# does - conduct is up, phases complete, the percentage on screen is simply
+	# the last one it managed to see. So the age of the reading is graded before
+	# the reading is.
+	#
+	# NO DOLLAR CEILING, AND ITS ABSENCE IS A DECISION. The quota is a
+	# subscription session key paced against a 5-hour window and a weekly cap, so
+	# a price per token would have to be invented and would measure nothing that
+	# can stop the fleet. Percentages are the currency here.
+	q5=$(cget quota_5h_pct)
+	qw=$(cget quota_week_pct)
+	q_age=$(cage quota_read_at)
+	q_worst=0
+	for q in "${q5:-0}" "${qw:-0}"; do
+		q=${q%%.*}
+		case "$q" in ''|*[!0-9]*) continue ;; esac
+		[ "$q" -le "$q_worst" ] || q_worst="$q"
+	done
+	if [ -z "$q5" ] && [ -z "$qw" ]; then
+		note agents.quota_headroom "conduct records no quota reading - nothing has spent any yet"
+	elif [ -n "$q_age" ] && [ "$q_age" -gt 3600 ]; then
+		warn agents.quota_headroom "the quota reading is ${q_age}s old, limit 3600s - conduct is pacing against a window it can no longer see, which looks exactly like a healthy fleet right up until the cap is gone"
+	elif [ "$q_worst" -ge 90 ]; then
+		warn agents.quota_headroom "quota use is ${q5:-?}% of the 5-hour window and ${qw:-?}% of the week, at or past the 90% floor conduct refuses to dispatch above - 'systemctl --user stop home-server-conduct' if it has not stopped itself"
+	else
+		ok agents.quota_headroom "quota use ${q5:-0}% of 5h, ${qw:-0}% of the week"
+	fi
+	fact agents_quota_5h_pct "${q5:-}" num
+	fact agents_quota_week_pct "${qw:-}" num
+	fact agents_quota_age_s "${q_age:-}" num
+
+	# 10800s is twice the phase scope's own RuntimeMaxSec. Past that the scope
+	# should already have killed it, so this fires on the scope having failed
+	# rather than on a slow phase - which is why it is not tuned to the phase.
+	pif=$(cget phase_in_flight)
+	p_age=$(cage phase_started_at)
+	# FREE TEXT FOR A SENTENCE, NEVER A LABEL. The forbidden-label family is
+	# worktree path, branch, PR number, job id and session id; this is that
+	# family, and it stays in the message where prose belongs.
+	p_label=$(cget phase_label)
+	if [ ! -e "$conduct_state" ]; then
+		note agents.phase_stuck "no marker - no phase can be in flight"
+	elif [ "${pif:-0}" != 1 ]; then
+		ok agents.phase_stuck "no phase in flight"
+	elif [ -n "$p_age" ] && [ "$p_age" -gt 10800 ]; then
+		warn agents.phase_stuck "a phase has been in flight for $((p_age / 60))m${p_label:+ ($p_label)} - past twice its scope's RuntimeMaxSec, so the scope that was meant to kill it did not; look for a runner that outlived it and a lease conduct will not reclaim"
+	else
+		ok agents.phase_stuck "a phase is in flight${p_age:+ (${p_age}s)}${p_label:+, $p_label}"
+	fi
+	fact agents_phase_in_flight "${pif:-}" num
+	fact agents_phase_age_s "${p_age:-}" num
+
+	# A LEAKED RUNNER IS WHAT bin/collect-metrics.py's ephemeral skip PROMISED
+	# SOMEBODY WOULD WATCH: "a leaked runner is a container with this label that
+	# outlived its transient scope". Those containers are deliberately absent
+	# from every other container series, so nothing else can see one at all.
+	#
+	# {{.StartedAt}} is a unix epoch, so this is a subtraction rather than a date
+	# parse. 7200s is RuntimeMaxSec plus slack - a runner past it outlived the
+	# scope that was supposed to kill it, which is a different fault from a slow
+	# phase and is what agents.phase_stuck above covers instead.
+	leaked=$(podman ps --filter label=io.home-server.ephemeral \
+		--format '{{.Names}} {{.StartedAt}}' 2>/dev/null |
+		awk -v now="$(date +%s)" -v max=7200 \
+			'$2 ~ /^[0-9]+$/ && now - $2 > max {printf " %s", $1}')
+	fact agents_runners_leaked "$(printf '%s' "$leaked" | wc -w)" num
+	if [ -n "$leaked" ]; then
+		warn agents.runners_leaked "ephemeral container(s) past their scope's ceiling:$leaked - the transient scope is meant to kill a runner at RuntimeMaxSec and these outlived it; 'podman rm -f' them, then look at why conduct's reconciler did not"
+	else
+		ok agents.runners_leaked "${eph_n:-0} ephemeral container(s), none past its scope's ceiling"
+	fi
+
+	# COUNTED, NEVER RECONCILED BY NAME. conduct's SQLite state is what knows
+	# which worktree belongs to which lease, and this file has no business
+	# opening it - so the marker publishes a count and this compares two numbers.
+	# More directories than leases is a reap that did not happen; the reverse is
+	# conduct's own problem and it says so itself.
+	wt_dir="$fleet_root/worktrees"
+	wt_n=$(find "$wt_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+	wt_claimed=$(cget worktrees)
+	case "$wt_claimed" in ''|*[!0-9]*) wt_claimed="" ;; esac
+	fact agents_worktrees "${wt_n:-0}" num
+	if [ ! -d "$wt_dir" ]; then
+		note agents.worktree_orphans "$wt_dir does not exist yet - conduct has made no worktree"
+	elif [ -z "$wt_claimed" ]; then
+		note agents.worktree_orphans "$wt_n worktree director(ies) on disk, and no marker to compare them against"
+	elif [ "$wt_n" -le "$wt_claimed" ]; then
+		ok agents.worktree_orphans "$wt_n worktree director(ies), all of them claimed"
+	else
+		warn agents.worktree_orphans "$wt_n worktree director(ies) on disk against $wt_claimed conduct claims - the difference is 1.25 GB of node_modules and .venv each that nothing will ever reap; 'rm -rf' them once conduct is stopped"
+	fi
+
+	# --------------------------------------------------------------------------
+	# The control plane, read out of its own database
+	# --------------------------------------------------------------------------
+	# Hoisted, because both checks below need the same answer and a stopped
+	# fleet must not produce two findings that say the same thing twice.
+	wm_up=""
+	podman ps --format '{{.Names}}' 2>/dev/null | grep -qx windmill-db && wm_up=1
+
+	# v2_job_queue.suspend IS THE PREDICATE, measured against the live schema
+	# rather than guessed: it is an int holding how many approvals a suspended
+	# job still needs, and resume_job holds the signed rows that answer them.
+	#
+	# THE AGE IS THE FINDING, NOT THE COUNT. Windmill notifies once, when the job
+	# suspends, and never repeats it - so an approval nobody saw waits for ever
+	# while everything reads green. A pending approval is normal; a twelve-hour
+	# old one means the notification was missed.
+	if [ -z "$wm_up" ]; then
+		fact agents_approvals_pending ""
+		note agents.approvals_pending "windmill-db is not running, so pending approvals cannot be read"
+	else
+		ap_sql="select count(*), coalesce(max(extract(epoch from (now() - created_at)))::bigint, 0) from v2_job_queue where suspend > 0"
+		ap_row=$(podman exec -e AP_SQL="$ap_sql" windmill-db \
+			sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$AP_SQL"' 2>/dev/null)
+		ap_n=${ap_row%%|*}
+		ap_age=${ap_row##*|}
+		case "$ap_n" in ''|*[!0-9]*) ap_n="" ;; esac
+		case "$ap_age" in ''|*[!0-9]*) ap_age=0 ;; esac
+		fact agents_approvals_pending "${ap_n:-}" num
+		if [ -z "$ap_n" ]; then
+			note agents.approvals_pending "the suspended-job count could not be read - not measured"
+		elif [ "$ap_n" -eq 0 ]; then
+			ok agents.approvals_pending "nothing is waiting on a human"
+		elif [ "$ap_age" -gt 43200 ]; then
+			warn agents.approvals_pending "$ap_n approval(s) pending, the oldest for $((ap_age / 3600))h - Windmill notified once when it suspended and nothing repeats that, so this is the only thing that will say so"
+		else
+			ok agents.approvals_pending "$ap_n approval(s) pending, oldest $((ap_age / 3600))h"
+		fi
+	fi
+
+	# 2048MB IS ABOUT A HUNDRED TIMES TODAY'S 18MB, and the slack is the point:
+	# what this catches is job logs and completed-job rows accumulating, which
+	# arrives in hundreds of megabytes rather than in dozens. It shares nvme0n1p4
+	# with config/, the metrics store and /var/backups, and that disk has no
+	# redundancy.
+	wdb_ceiling_mb=2048
+	if [ -z "$wm_up" ]; then
+		fact agents_windmill_db_mb ""
+		note agents.windmill_db_size "windmill-db is not running, so its size cannot be read"
+	else
+		wdb_b=$(podman exec -e DB_SQL="select pg_database_size(current_database())" windmill-db \
+			sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$DB_SQL"' 2>/dev/null)
+		case "$wdb_b" in ''|*[!0-9]*) wdb_b="" ;; esac
+		wdb_mb=""
+		[ -z "$wdb_b" ] || wdb_mb=$(( wdb_b / 1048576 ))
+		fact agents_windmill_db_mb "${wdb_mb:-}" num
+		if [ -z "$wdb_mb" ]; then
+			note agents.windmill_db_size "pg_database_size could not be read - not measured"
+		elif [ "$wdb_mb" -le "$wdb_ceiling_mb" ]; then
+			ok agents.windmill_db_size "the Windmill database is ${wdb_mb}MB of the ${wdb_ceiling_mb}MB budget"
+		else
+			warn agents.windmill_db_size "the Windmill database is ${wdb_mb}MB, over the ${wdb_ceiling_mb}MB budget - look at job-log retention before it competes with config/ and the metrics store for a disk with no redundancy"
+		fi
+	fi
+
+	# THE SECOND CHECKOUT, and it drifts for the same reason the first one does.
+	# /var/agents holds conduct's own code, deployed the same way this repository
+	# is - git pull, no copy step - so an edit made over ssh is silently clobbered
+	# by the next pull, or blocks it. The checkout section above says all of this
+	# about /var/home-server; this is the same failure one directory over, and
+	# nothing else looks at it.
+	agents_repo=/var/agents
+	if [ ! -d "$agents_repo/.git" ]; then
+		fact agents_checkout_dirty ""
+		note agents.checkout_drift "$agents_repo is not a checkout yet - conduct's code lands there when it ships"
+	else
+		ad_dirty=$(git -C "$agents_repo" status --porcelain 2>/dev/null | wc -l)
+		fact agents_checkout_dirty "${ad_dirty:-0}" num
+		if [ "${ad_dirty:-0}" -eq 0 ]; then
+			ok agents.checkout_drift "$agents_repo is clean"
+		else
+			warn agents.checkout_drift "$agents_repo has $ad_dirty uncommitted change(s) - the next 'git pull' there will refuse or clobber them, and the orchestrator running is not the orchestrator in git"
+		fi
+	fi
+
+	# --------------------------------------------------------------------------
 	# Seeding policy. Whether the 72h floor is actually being enforced.
 	# --------------------------------------------------------------------------
 	# WARN OR PASS, NEVER FAIL, for the reason the Logs and Metrics sections

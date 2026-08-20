@@ -234,6 +234,67 @@ case "$backup_state" in
 	*) refuse "the backup is $backup_state - rebooting through restic leaves a partial snapshot and a lock in the off-site repository" ;;
 esac
 
+# A PHASE IS MID-FLIGHT, AND ONLY A MARKER CAN SAY SO. conduct is a long-running
+# unit, so its ActiveState reads `active` from boot to shutdown whether it is
+# driving a phase or sitting idle - the exact mirror of the backup gate above,
+# where a oneshot is `activating` for its entire working life and never `active`.
+# Both are the obvious question, both read correctly, and both are dead. So this
+# reads a marker the process writes about itself.
+#
+# BUSY ONLY WHEN THE MARKER SAYS BUSY *AND* ITS HEARTBEAT IS FRESH. A conduct
+# killed mid-phase leaves phase_in_flight=1 behind for ever, and a stale flag
+# that vetoes reboots indefinitely is the "host silently stops taking OS security
+# updates" failure arriving from a fourth direction. Fresh is 600s, which is the
+# same window agents.conduct_fresh grades.
+conduct_state="${HOME_SERVER_CONDUCT_STATE:-${HOME:-/var/home/core}/.cache/home-server/conduct-state}"
+phase_flag=$(sed -n 's/^phase_in_flight=//p' "$conduct_state" 2>/dev/null | tail -1)
+phase_hb=$(sed -n 's/^heartbeat_at=//p' "$conduct_state" 2>/dev/null | tail -1)
+phase_hb_age=""
+if [ -n "$phase_hb" ]; then
+	hb_epoch=$(date -d "$phase_hb" +%s 2>/dev/null)
+	[ -z "${hb_epoch:-}" ] || phase_hb_age=$(( $(date +%s) - hb_epoch ))
+fi
+if [ "${phase_flag:-0}" = 1 ] && [ -n "$phase_hb_age" ] && [ "$phase_hb_age" -le 600 ]; then
+	# THE ESCALATION IS EASIER THAN THE ENCODER'S BELOW, and naming the trade is
+	# what makes it defensible rather than arbitrary. A killed phase costs one
+	# re-run of minutes against a worktree that is still on disk; a killed
+	# transcode costs an hour of GPU time. So this gives way after the second
+	# refusal of a morning where the encoder holds out for a fortnight.
+	#
+	# IT ALSO MAKES A REQUIREMENT NON-NEGOTIABLE RATHER THAN ASPIRATIONAL:
+	# conduct must survive being killed mid-phase, with durable state and a
+	# boot-time pass that reclaims leases and reaps orphaned worktrees,
+	# containers and networks. A design note saying so would be a wish. This
+	# guarantees it gets exercised, on a schedule, without anybody deciding to.
+	#
+	# Date-keyed so it resets between windows. The counter cannot be starved the
+	# way the encoder's staged_age_d can, because the day advances regardless of
+	# what conduct is doing.
+	today=$(date -u +%Y-%m-%d)
+	prev_day=$(sed -n 's/^phase_refused_on=//p' "$STATE" 2>/dev/null | tail -1)
+	prev_n=$(sed -n 's/^phase_refusals=//p' "$STATE" 2>/dev/null | tail -1)
+	case "$prev_n" in ''|*[!0-9]*) prev_n=0 ;; esac
+	[ "$prev_day" = "$today" ] || prev_n=0
+	if [ "$prev_n" -ge 2 ]; then
+		note "a phase has been in flight at $prev_n earlier attempts this morning - applying anyway. The phase dies with the reboot; conduct's reconciler reclaims its lease and its worktree on the way back up, which is the property this escalation exists to keep honest."
+	else
+		# RECORDED BEFORE REFUSING, because refuse() exits immediately - and not
+		# at all under --dry-run, which must change nothing. The block rewrites
+		# the file whole and keeps every key it does not own, the same shape the
+		# unattended_reboot_at write at the end of this script uses.
+		if [ -z "$DRY" ]; then
+			{
+				grep -vE '^phase_refus(als|ed_on)=' "$STATE" 2>/dev/null
+				echo "phase_refused_on=$today"
+				echo "phase_refusals=$((prev_n + 1))"
+			} | priv tee "$STATE.tmp" >/dev/null
+			priv mv "$STATE.tmp" "$STATE"
+		fi
+		refuse "conduct has a phase in flight (heartbeat ${phase_hb_age}s ago) - a reboot would kill it mid-run.
+  Refusal $((prev_n + 1)) of 2 this morning; the next attempt applies anyway."
+	fi
+fi
+
 # ------------------------------------------------------------------------------
 # Is anything mid-flight that a reboot would destroy?
 # ------------------------------------------------------------------------------

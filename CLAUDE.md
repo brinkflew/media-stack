@@ -399,6 +399,16 @@ signal read green.
   the one image nothing else builds needs a one-time start in `host/systemd/README.md`.
 - **`node:24-trixie-slim` ships no `python3`, `git` or `make`**, and trixie renamed `libmagic1` to
   `libmagic1t64`.
+- **A fact key and a collector metric name landing on one exposition file rejects the WHOLE
+  scrape**, because the battery is hourly and the collector runs every 30s, so the two disagree by
+  construction. `bin/lint-repo.sh` leg 9 makes it a build failure. The agent families are one letter
+  apart: `agents_*` facts against `home_server_agent_*` metrics.
+- **A lint leg that greps for a literal metric name cannot see one built by concatenation**, which
+  the first version of leg 9 proved by passing with a planted collision. Prefixes are the fix, and
+  the bare `home_server_` bridge must be excluded or it fails on all ninety.
+- **`ActiveState` is `active` for a long-running unit whether busy or idle** - the mirror of the
+  oneshot trap one gate over. The phase refusal reads a marker, and believes it only while the
+  heartbeat is fresh.
 
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running
@@ -544,7 +554,7 @@ Remaining, in order:
    "one more service" a number rather than a shrug.
 
    **The notification path is done too, 2026-08-15**, which closes this item. Prometheus rules ->
-   Alertmanager -> ntfy-alertmanager -> ntfy -> phone, 17 rules in five groups, at
+   Alertmanager -> ntfy-alertmanager -> ntfy -> phone, 30 rules in six groups, at
    `ntfy.avanserv.com`. See `docs/observability.md`. Prometheus having alerting rules built in is part of why it
    was chosen over a store needing a second container for them, and that paid off exactly as
    expected.
