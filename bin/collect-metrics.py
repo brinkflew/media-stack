@@ -2731,10 +2731,40 @@ SOURCES = (
 )
 
 
+def _name_the_non_ascii(body, exc):
+    """The offending line, so the series names itself rather than a byte offset.
+
+    A UnicodeEncodeError reports a position in a file thousands of characters
+    long, which is true and useless. What is wanted is the metric.
+    """
+    try:
+        line = body.count("\n", 0, exc.start)
+        return body.splitlines()[line][:160]
+    except Exception:  # noqa: BLE001 - a diagnostic must never raise
+        return "<could not locate the line>"
+
+
 def write_textfile(path, body):
     """Atomic replace. os.replace cannot be interrupted halfway within one
     filesystem, and node-exporter globs *.prom - so the .tmp is never read and a
-    reader never sees a partial file."""
+    reader never sees a partial file.
+
+    ASCII IS A GUARD RATHER THAN A LIMITATION, and it caught a real violation on
+    2026-08-20: a slow-tier render carried a 'u umlaut', which can only have come
+    from a media title reaching a LABEL. This repository's rule is that titles
+    live in the documents below and never in a series - cardinality is the lesser
+    reason, and a 400-day history of who watched what being surveillance of the
+    household rather than monitoring of a machine is the greater one. Prometheus
+    would accept the UTF-8 happily, which is exactly why nothing else would have
+    noticed.
+
+    BUT IT WAS FATAL, AND THAT WAS THE BUG. UnicodeEncodeError is not an
+    OSError, so the handler below did not catch it and the exception took the
+    WHOLE collection run down - twice an hour, silently, with the fast tier
+    losing its cycle for a fault in the slow one. It is caught now and the
+    offending line is named, so the violation is reported rather than either
+    crashing or being quietly re-encoded.
+    """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -2742,6 +2772,12 @@ def write_textfile(path, body):
             fh.write(body)
         os.replace(tmp, path)
         return True
+    except UnicodeEncodeError as exc:
+        print("collect-metrics: %s carries a non-ASCII character (%r), which "
+              "means a title has reached a label - the series is: %s"
+              % (path, exc.object[exc.start:exc.end], _name_the_non_ascii(body, exc)),
+              file=sys.stderr)
+        return False
     except OSError as exc:
         print("collect-metrics: cannot write %s: %s" % (path, exc),
               file=sys.stderr)
