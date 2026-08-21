@@ -281,6 +281,13 @@ a pattern, because **it spawns no process and so cannot fail open**. The hook
 covers what a pattern cannot - `PR_GATE_BYPASS` anywhere in a command, a nested
 `claude` (a child process has no hooks), a write verb aimed at a `REFUSE` path.
 
+**The Bash path rule is blunt on purpose, and it costs a false positive.** It refuses any command
+*naming* a `REFUSE` path rather than trying to recognise the ones that write, because enumerating
+write verbs is a losing game - `cp`, `mv`, `dd of=`, `ed`, `patch`, `git apply`, `awk -i inplace`
+and `rm`, which is not a write at all - while enumerating the paths is a closed set. So `cat
+Makefile` is refused. That is deliberate and should not be "fixed" by loosening the rule: reading
+those files through the Read tool is unaffected, and the message says which path and why.
+
 **It is defeated by one level of indirection and that is accepted.**
 `base64 -d > /tmp/x.sh; bash /tmp/x.sh` contains no protected path and no
 suspicious verb, and neither does a `package.json` script or a `conftest.py`. It
