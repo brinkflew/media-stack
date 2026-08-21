@@ -449,6 +449,15 @@ around one.
 puts them in front of a human. That is the polling step's, and it matters more than it sounds -
 the residual that survives both the hook and verify is exactly what that card is for.
 
+**And the publish half, step 6 of the list above.** Neither GitHub token exists yet: `conduct
+verify` ends at "this commit passes the gate and changed nothing" and pushes nowhere. That is the
+right order rather than an omission - there is nothing to publish until a model phase produces
+commits, and creating a credential before anything can use it means it sits on the host being
+neither used nor watched. When it lands it is **two** fine-grained tokens, one repository, no
+`workflow` scope: `contents:write` in `.env` for conduct, `pull_requests:write` as a Windmill
+workspace secret. The runner gets neither, and `tests/test_phase.py` asserts that no phase argv
+carries `--secret` or a token.
+
 **`verify` is not yet selectable as a tag.** `global_settings.custom_tags` reads `["chromium"]` and
 there is no `worker__verify` row in `config`, so the lane exists and is pinned by its quadlet but
 nothing can route a flow step to it. That is the polling step's problem and is named here so it is
