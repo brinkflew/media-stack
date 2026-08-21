@@ -366,6 +366,12 @@ signal read green.
 - **A Postgres dump outlives its own accuracy**, because the shadow tree is never deleted and the
   `protect` filter keeps last night's copy - so existence and freshness are asserted by different
   scripts on different machines.
+- **`systemctl show` reports a unit that does not exist as `inactive`, exit 0**, so any
+  hand-maintained watchlist is a check that stops firing the moment a name drifts. `LoadState` is
+  the only discriminator - and for a *slice* even that reads `loaded`, because systemd synthesises
+  slices; `FragmentPath` is what tells a real unit file from a default.
+- **Asking `rpm-ostree` a question starts the daemon you were asking about**, so polling
+  `rpm-ostreed.service` to detect an OS update makes it busy. Read the `transaction` field instead.
 - **A `Slice=` naming a slice with no unit file silently gets systemd's defaults**, so the fleet's
   one aggregate ceiling can be absent while every member is healthy and fully observed. The
   `host/systemd/` symlink loop globs by EXTENSION, which is where that comes from.

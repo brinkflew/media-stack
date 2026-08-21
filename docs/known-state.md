@@ -440,6 +440,41 @@ nothing points at is one nobody reads.
   `containers.units_active`'s finding and a second WARN would only block the reboot window over
   something a reboot does not fix.
 
+- **And `LoadState` cannot tell you whether that unit file exists.** Found on 2026-08-21 while
+  teaching `conduct` to place itself in the slice: **systemd SYNTHESISES slice units on demand**, so
+  `systemctl --user show app-agents.slice -p LoadState` returns `loaded` on a workstation that has
+  never heard of it, while a missing `.service` on the same machine correctly returns `not-found`.
+  The discriminator is `FragmentPath`, which is empty exactly when no file backs the unit. This is
+  the same fact as the entry above seen from the querying side: there is nothing to fail, so nothing
+  fails, and the obvious check reports success.
+
+- **`systemctl show` reports a unit that does not exist as `inactive`, with exit status 0.**
+  Identical output to a real unit sitting idle - `LoadState=not-found` is the only difference, and
+  nothing forces you to ask for it. So any hand-maintained list of units to watch is a check that
+  stops working silently the moment a name is renamed or misspelt: it reads "nothing is busy" for
+  ever and can never fire. `conduct`'s refusal cascade fetches `LoadState` and `ActiveState` in one
+  round trip for that reason, treats `not-found` and `masked` as faults in the LIST rather than as
+  states of the host, and `conduct doctor` resolves the whole watchlist on demand. **The faults are
+  reported and never refused on**: a wrong name must be loud without wedging the fleet, which would
+  trade a blind gate for a stuck one. `is-active` is worse and not the fix - its exit codes are not
+  uniform, 3 for real-but-inactive against 4 for missing.
+
+- **Asking `rpm-ostree` a question starts the daemon you were asking about.**
+  `rpm-ostreed.service` read `inactive`; after a single `rpm-ostree status` it read `active` /
+  `running` and stayed that way. It is D-Bus-activated, so **a monitor polling that unit's
+  `ActiveState` to decide whether an OS update is in progress flips itself to "busy" on its own
+  first poll**, and then stays busy. The question that survives being asked is the `transaction`
+  field in `rpm-ostree status --json` - `null` when idle, however often it is read - or the
+  `ActiveTransaction` property on the Sysroot object. `rpm-ostreed-automatic.service` is safe to
+  poll and is the complementary signal, being the unit that actually stages a deployment.
+
+- **Two `RemainAfterExit` oneshots read `active` for the entire boot while being permanently idle**:
+  `greenboot-healthcheck.service` and `ostree-remount.service`. That is the exact mirror of the
+  oneshot trap `bin/reboot-when-staged.sh` records - there a oneshot was `activating` for its whole
+  working life and never `active`; here one is `active` for the whole life of the boot having
+  finished in seconds. Anything treating `active` as busy would refuse for ever, so `conduct` keeps
+  an explicit never-watch list with a test rather than widening its allowlist.
+
 - **A `Slice=` naming a slice with no unit file does not fail - systemd instantiates it with
   defaults, and every signal reads correct.** `host/systemd/app-agents.slice` is the aggregate
   ceiling the coding-agent fleet runs inside, and the only thing that bounds it: its phase runners

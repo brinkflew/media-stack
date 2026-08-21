@@ -132,6 +132,51 @@ on what the first wrote. Measured over four containers: every file came out `con
 with no categories. The categories come from `:Z`, which this design does not use. The flag would
 have removed per-container MCS separation for nothing.
 
+## Placement: conduct must put itself in the slice
+
+`home-server-conduct.service` carries `Slice=app-agents.slice`, so a phase the unit dispatches is
+bounded. **A hand-run `conduct run` inherits the caller's cgroup** - started over ssh that is
+`session-N.scope` under `user.slice` - so conduct and every podman helper it forks were bounded by
+nothing, while the slice measured only the phase scope inside them. Every phase run during step 11's
+verification was outside the ceiling in exactly that way.
+
+**A process cannot simply be moved in.** Under cgroup v2 an internal node may not hold processes and
+`app-agents.slice` always has children, so writing a pid into its `cgroup.procs` is not available.
+`conduct run` and `conduct serve` therefore **re-exec themselves** through
+`systemd-run --user --scope --collect --slice=app-agents.slice`, carrying the same
+`MemoryHigh=384M`/`MemoryMax=512M` the unit does - identical rather than approximately alike. The
+check is `/proc/self/cgroup`, which asserts the effect rather than a flag.
+
+It **fails closed only where it can succeed**: if the slice has a unit file and the re-exec cannot
+happen, `run` refuses; if the slice does not exist this is not the fleet host, so it warns and
+continues. Refusing everywhere else would make the tool unusable on a workstation.
+
+## The refusal cascade, and the four things that make it wrong if written the obvious way
+
+`conduct` refuses to dispatch while the host is busy, over twelve units across **both** managers.
+`conduct doctor` resolves the whole list and exits non-zero when it has drifted.
+
+- **It has to ask the system manager too.** The cascade asked `systemctl --user` only and was blind
+  to every system unit - including `rpm-ostreed-automatic`, which pulls multi-gigabyte layers and
+  calls `syncfs`, and `raid-check`, a full array scrub. Neither was in any watchlist on this host,
+  and staging a deployment is what the machine was doing when it stalled on 2026-08-20.
+  `systemctl show` on a system unit needs no sudo.
+- **A missing unit reads as idle, not as an error**, so a misspelt entry is a gate that can never
+  fire. `LoadState` comes back in the same round trip and `not-found` is treated as a fault in the
+  LIST. **Faults are reported and never refused on** - a wrong name must be loud without wedging the
+  fleet, which would trade a blind gate for a stuck one.
+- **`rpm-ostreed.service` must never be polled.** `rpm-ostree status` D-Bus-activates it, so a
+  cascade watching that unit flips itself to busy on its own first poll. The `transaction` field is
+  asked instead.
+- **`podman-auto-update` exists as both a system and a user unit here**, and only the user timer is
+  scheduled - so watching the system copy alone reads inactive for ever while images are pulled.
+  Both are watched.
+
+**I/O pressure is recorded and not gated on.** `/proc/pressure/io` is printed at dispatch and at
+exit. The 2026-08-20 outage was an I/O stall so a threshold is the obvious next move, and it would
+be invented: nothing here has a baseline for this host's normal. `app-agents.slice` carried exactly
+that admission about `TasksMax` until a real gate run measured it at 325.
+
 ## The marker, and why it is not in `backup-state`
 
 conduct writes `~/.cache/home-server/conduct-state`, flat `key=value`, in the shape of
