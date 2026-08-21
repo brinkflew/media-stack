@@ -74,6 +74,7 @@ runner() {
 		-v "$FLEET_ROOT/uv-cache:/opt/uv-cache:rw" \
 		-v "$FLEET_ROOT/bun-cache:/opt/bun-cache:rw" \
 		-v "$WT:$WT:rw" -w "$WT" \
+		-v "$FLEET_ROOT/policy:/opt/conduct:ro" \
 		"$IMAGE" "$@"
 }
 
@@ -252,6 +253,69 @@ if runner sh -c 'printf "#!/bin/sh\nexit 0\n" > /tmp/x && chmod +x /tmp/x && /tm
 	ok "/tmp is writable and executable"
 else
 	bad "/tmp is not both writable and executable"
+fi
+
+# ------------------------------------------------------------------------------
+say "The deny hook, which fails open when it is missing"
+# ------------------------------------------------------------------------------
+# THIS IS THE ONE PLACE THE HOOK IS TESTABLE WITHOUT A MODEL OR A CREDENTIAL, and
+# that is why it is here rather than in a phase. It is a filter: JSON in, a
+# decision out. So the assertion is three canned PreToolUse payloads and the
+# exact permissionDecision each must produce.
+#
+# WHAT IT REALLY GUARDS IS THE FAIL-OPEN. Measured against Claude Code 2.1.238: a
+# --settings hook whose command does not exist lets the tool call PROCEED. So
+# "python3 moved in the base image", "the policy never got staged" and "the JSON
+# is malformed" all produce a phase that runs with no guardrail and says nothing
+# about it - and each of them fails this leg loudly instead.
+#
+# The policy is conduct's artifact rather than the image's, so it is staged here
+# if the orchestrator is installed. A host without /var/agents has nothing to
+# test and says so; a host WITH it and no policy is a real fault.
+if [ -x /var/agents/bin/conduct ]; then
+	/var/agents/bin/conduct policy >/dev/null 2>&1 || true
+fi
+
+hook_says() {
+	local label="$1" payload="$2" want="$3" got
+	got=$(printf '%s' "$payload" | runner python3 /opt/conduct/deny.py 2>/dev/null |
+		python3 -c 'import json,sys
+raw = sys.stdin.read().strip()
+print(json.loads(raw)["hookSpecificOutput"]["permissionDecision"] if raw else "none")' 2>/dev/null)
+	if [ "$got" = "$want" ]; then
+		ok "$label -> $got"
+	else
+		bad "$label -> ${got:-<nothing>}, wanted $want"
+	fi
+}
+
+if [ ! -r "$FLEET_ROOT/policy/deny.py" ]; then
+	note "no policy staged at $FLEET_ROOT/policy - install conduct, or run 'conduct policy'"
+else
+	hook_says "the PR gate's bypass string" \
+		'{"tool_name":"Bash","tool_input":{"command":"PR_GATE_BYPASS=1 gh pr create"}}' deny
+	hook_says "a write to .claude/settings.json" \
+		'{"tool_name":"Write","tool_input":{"file_path":".claude/settings.json"}}' deny
+	# NOT "allow". A PreToolUse allow BYPASSES the permission system, so the
+	# correct answer for an ordinary command is silence, and a hook that answered
+	# "allow" here would auto-approve everything the phase does.
+	hook_says "an ordinary command" \
+		'{"tool_name":"Bash","tool_input":{"command":"ls -la"}}' none
+	# The inverse of scripts/pr_quality_gate.py, deliberately: that one returns
+	# no opinion on any exception because a hook must not take a human's shell
+	# down. This one denies, because what it costs is one robot's pull request.
+	hook_says "input that is not JSON at all" 'not json' deny
+
+	if runner sh -c 'echo x > /opt/conduct/deny.py' >/dev/null 2>&1; then
+		bad "/opt/conduct is WRITABLE - a phase can disarm its own guardrail"
+	else
+		ok "/opt/conduct is read-only"
+	fi
+	if runner sha256sum -c --quiet /opt/conduct/SHA256SUMS >/dev/null 2>&1; then
+		ok "the staged policy matches its digests"
+	else
+		bad "the staged policy does not match SHA256SUMS - it is stale or truncated"
+	fi
 fi
 
 # ------------------------------------------------------------------------------
