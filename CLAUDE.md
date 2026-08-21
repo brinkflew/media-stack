@@ -429,6 +429,23 @@ signal read green.
 - A guard keying on "is the database on loopback" refuses inside a namespace, where the address is a
   service name. Its own comment names the premise a phase runner breaks.
 
+
+### The gate the fleet was going to trust, and six ways it was not a gate
+- **Running git in a directory is running its owner's code.** `core.fsmonitor`, `core.hooksPath`,
+  `textconv` and `remote.url = ext::sh -c` all exec from a repo's own config, only three git options
+  are protected-config-only, and two of the trigger calls shipped before any model phase existed.
+- **A diff is only as trustworthy as the ref it is measured against.** `origin/main` lives in the
+  worktree, so `git update-ref` empties the diff while the tree stays clean and every path check
+  passes.
+- **`git clone --local` hardlinks the object store**, so a writable `.git` in a container is write
+  access to the mirror every other clone is made from - and it surfaces later as a git bug.
+- **A receipt its own subject can mint is not evidence**, and a hook whose command cannot be found
+  **fails open**. A `PreToolUse` hook must never answer `allow`: that bypasses the permission system.
+- **`git reset --hard` does not make a tree pristine**, and a phase that committed nothing passes
+  every other check.
+- **The file that decides what a check means is usually not the file a short list names**, which is
+  why the protected paths are two tiers - and why a deleted test escapes both.
+
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running
   containers stayed healthy throughout, and **`jq` accepts the broken file**. The repair is a local

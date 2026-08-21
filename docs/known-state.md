@@ -737,6 +737,85 @@ test: `database_is_local` returns `(True, '127.0.0.1')` for the workstation's UR
 and `(False, 'db')` under the narrow set for the runner's.
 
 
+## The gate the fleet was going to trust, and six ways it was not a gate
+
+- **RUNNING GIT IN A DIRECTORY IS RUNNING ITS OWNER'S CODE, AND TWO OF THE CALLS ALREADY SHIPPED.**
+  A repository's own `.git/config` is executable surface and only three options are
+  protected-config-only (`safe.directory`, `safe.bareRepository`, `uploadpack.packObjectsHook`).
+  `core.fsmonitor` is a pathname git execs on any index refresh, so `git status` runs it;
+  `core.hooksPath` and `.git/hooks/*` fire on checkout, commit and push; `diff.<driver>.textconv`
+  fires on `git diff`; and `remote.<name>.url = ext::sh -c '<payload>'` fires on `git fetch`,
+  because `protocol.ext.allow` defaults to `user` and a direct invocation leaves
+  `GIT_PROTOCOL_FROM_USER` unset. The phase worktree is mounted `:rw` **including `.git`**, and
+  `conduct`'s `prepare_worktree` runs `fetch --all` and `checkout --force` **as `core` on the host**
+  - so a `--cap-drop=ALL --read-only` container on an isolated network with no podman socket was
+  escapable by the routine whose purpose is not to trust that directory. **It needed no model
+  phase**: `make install` runs `uv sync` and `bun install` against lockfiles the branch controls, one
+  postinstall is enough, and because worktrees are reused it fires during a *later, unrelated* run
+  with nothing in the log naming git. The fix is to remove `.git/hooks` and `.git/info` and rewrite
+  `.git/config` from a template before the first git command; `git -c core.fsmonitor= -c ...` per
+  call is whack-a-mole against an open-ended list where a miss is silent. Rewriting `config` also
+  neutralises the tree-level half, since a `.gitattributes` naming `filter=evil` is inert once no
+  `filter.evil.clean` is defined.
+- **A DIFF IS ONLY AS TRUSTWORTHY AS THE REF IT IS MEASURED AGAINST.** `git merge-base HEAD
+  origin/main` resolves `refs/remotes/origin/main` **in the worktree being inspected**, so one
+  `git update-ref refs/remotes/origin/main HEAD` makes the merge-base equal HEAD, empties the diff
+  and passes every protected-path check - with `git status --porcelain` clean throughout, because
+  refs are not tree state. The first version of the gate-file check was defeated by a command that
+  touches none of the files it inspects. Proved on the host: the worktree's own merge-base was
+  forged to its HEAD and the refusal still landed, because the base is read from a bare repository
+  only the orchestrator writes.
+- **`git clone --local` HARDLINKS THE OBJECT STORE.** Measured: `stat` reports `links=2` on one
+  inode reachable from both the mirror and the clone. With `.git` inside a writable bind mount, one
+  `printf > .git/objects/pack/*.pack` inside a container corrupts the mirror every future clone -
+  and every "pristine" verification tree - is built from, and it surfaces later, in an unrelated
+  run, looking like a git bug rather than an attack. `--no-hardlinks` costs 13 MB here. The
+  docstring that had to be corrected said the hardlinks "cost almost nothing", which was true and
+  was the hole.
+- **A RECEIPT ITS OWN SUBJECT CAN MINT IS NOT EVIDENCE.** `scripts/pr_quality_gate.py record` with
+  no arguments writes `squash=done review=pass make_check=pass`, and nothing cross-checks those
+  three strings against a run that happened. It is keyed to `head_sha` alone and never to the tree,
+  so an edit after recording leaves it valid. The bypass hole everyone looks for is beside the
+  point: an agent does not need to defeat that gate, it can satisfy it with one command the ship
+  skill already tells it to run.
+- **A HOOK WHOSE COMMAND CANNOT BE FOUND FAILS OPEN.** Measured against Claude Code 2.1.238, which
+  the documentation does not cover: a `PreToolUse` hook supplied through `--settings` whose command
+  does not exist lets the tool call **proceed**. So a hook can be a guardrail and never a boundary,
+  and "python3 moved in the base image" or "the policy never got staged" produce a phase running
+  unguarded that says nothing about it. Two things that ARE reliable, measured the same way:
+  `--settings` hooks and project hooks both run on the same matcher, and a `deny` in `--settings`
+  blocks a command project settings tried to allow. **`permissions.deny` spawns no process**, so it
+  cannot fail this way and should carry any rule expressible as a pattern. A free property: the
+  runner's `HOME` is ephemeral tmpfs, so a fleet worktree is never a *trusted* workspace and an
+  untrusted workspace's `permissions.allow` entries are ignored outright - though its hooks still
+  run, which is the asymmetry to remember.
+- **A `PreToolUse` HOOK MUST NOT ANSWER `allow`, AND THAT IS NOT PEDANTRY.** An `allow` decision
+  BYPASSES the permission system for that call, so a hook written to "allow what is fine and deny
+  what is not" auto-approves everything the session does. The correct answer for a command with no
+  rule against it is **silence** - print nothing, exit 0 - which defers to the normal flow.
+- **UPSKALD'S CI TREATED `.claude/**` AS DOCS.** `scripts/path_filter.py` classifies it into an area
+  that never feeds `shared`, and omits `scripts/pr_quality_gate.py` from `PIPELINE_CRITICAL_SCRIPTS`
+  - so the pull request that guts the gate is the one CI barely runs. `make check` does not help:
+  it never hashes, diffs or verifies any of the nine files that define the gate, and the only
+  behavioural cover is a test file living on the same branch as the thing it tests.
+- **`git reset --hard` DOES NOT MAKE A TREE PRISTINE.** It leaves untracked files, and
+  `playwright-report/`, `test-results/`, `web/stats*.html` and `api/htmlcov` are all gitignored - so
+  `git status --porcelain` never mentions them and the next run inherits the last one's output.
+  `rm -rf .git` plus `git init`, a fetch, and `git clean -xdff` excluding only the dependency
+  directories is what makes it pristine while keeping the fifteen minutes `make install` costs.
+- **A PHASE THAT COMMITTED NOTHING PASSES EVERY OTHER CHECK.** The merge-base equals HEAD, the diff
+  is empty, the tree is clean, and a human is asked to approve an empty pull request. `rev-list
+  --count >= 1` is the only thing that catches it, and `merge-base --is-ancestor` is its sibling,
+  for a phase that hands back unrelated history.
+- **THE FILE THAT DECIDES WHAT A CHECK MEANS IS USUALLY NOT THE FILE A SHORT LIST NAMES.**
+  `check-gate` is eight targets and almost every one leaves the Makefile immediately, so
+  `web/package.json`'s `"lint": "eslint . --fix"` becoming `"true"` deletes a whole check while the
+  Makefile - which is on every sensible protected list - never changes. But refusing on
+  `api/pyproject.toml`, which carries ruff's ignore list and pytest's `filterwarnings`, would refuse
+  most real work. Hence two tiers rather than one: a list that refuses, and a list that reaches the
+  human. **And one class neither tier catches**: `check-gate` has no coverage step, so deleting a
+  test is free and green, and no path list can express "fewer assertions than before".
+
 ## Two defects in one uCore image
 
 - **THE SAME IMAGE ALSO SHIPPED AN UNPARSEABLE `policy.json`, AND THAT IS WHY THE PCP MASK WAS
