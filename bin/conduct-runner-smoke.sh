@@ -88,7 +88,19 @@ printf '  image %s bytes, built %s\n' \
 	"$(podman image inspect "$IMAGE" --format '{{.Size}}')" \
 	"$(podman image inspect "$IMAGE" --format '{{.Created}}')"
 
-mkdir -p "$WT" "$FLEET_ROOT/pw-browsers" "$FLEET_ROOT/uv-cache" "$FLEET_ROOT/bun-cache"
+# EVERY ONE OF THESE IS A MOUNT SOURCE, AND PODMAN DOES NOT CREATE A MISSING ONE.
+# `policy` is here rather than beside the leg that uses it because the mount is on
+# runner() and so applies to every container this script starts - on a host where
+# no phase has dispatched yet, leaving it out fails the tooling legs first, with
+# an error about a directory nobody was thinking about.
+mkdir -p "$WT" "$FLEET_ROOT/pw-browsers" "$FLEET_ROOT/uv-cache" "$FLEET_ROOT/bun-cache" \
+	"$FLEET_ROOT/policy"
+
+# Staged here, for the same reason: the assertions live further down, but the
+# mount is needed from the first runner() call.
+if [ -x /var/agents/bin/conduct ]; then
+	/var/agents/bin/conduct policy >/dev/null 2>&1 || true
+fi
 podman network create --opt isolate=true "$NET" >/dev/null
 
 # ------------------------------------------------------------------------------
@@ -269,13 +281,9 @@ say "The deny hook, which fails open when it is missing"
 # is malformed" all produce a phase that runs with no guardrail and says nothing
 # about it - and each of them fails this leg loudly instead.
 #
-# The policy is conduct's artifact rather than the image's, so it is staged here
-# if the orchestrator is installed. A host without /var/agents has nothing to
-# test and says so; a host WITH it and no policy is a real fault.
-if [ -x /var/agents/bin/conduct ]; then
-	/var/agents/bin/conduct policy >/dev/null 2>&1 || true
-fi
-
+# The policy is conduct's artifact rather than the image's, and it was staged at
+# the top with the other mount sources. A host without /var/agents has nothing to
+# test here and says so; a host WITH it and no policy is a real fault.
 hook_says() {
 	local label="$1" payload="$2" want="$3" got
 	got=$(printf '%s' "$payload" | runner python3 /opt/conduct/deny.py 2>/dev/null |
