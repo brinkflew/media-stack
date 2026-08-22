@@ -17,13 +17,23 @@
 # permissive: a person is reading its output and can decide, so it warns where
 # this refuses.
 #
-# THE EXCEPTION IS THE ENCODER, PAST A THRESHOLD, and it is there because a gate
-# that is correct every time can still be wrong in aggregate. The window is five
-# attempts on one Sunday morning; a Tdarr queue spanning all five costs the
+# THE NAMED EXCEPTIONS ARE THE THREE MID-FLIGHT GATES, and they exist because a
+# gate that is correct every time can still be wrong in aggregate. The window is
+# five attempts on one Sunday morning; a Tdarr queue spanning all five costs the
 # deployment a week, and a queue that does so repeatedly costs it indefinitely.
-# Past 14 days staged or 30 days of uptime the script kills the transcode and
-# applies, because at that point one hour of GPU time is cheaper than another
-# month on a superseded image. Every other gate here refuses without limit.
+#
+#   the encoder   past 14 days staged or 30 days of uptime the script kills the
+#                 transcode and applies, because at that point one hour of GPU
+#                 time is cheaper than another month on a superseded image.
+#   a phase       gives way after the second refusal of a morning - a killed
+#                 phase costs one re-run against a worktree still on disk.
+#   playback      gives way after the second refusal of a morning - a dropped
+#                 stream costs about fifteen seconds and Jellyfin has already
+#                 saved the position.
+#
+# The two cheap ones are counted per morning and the expensive one is measured
+# in days, which is the whole of how the three are priced apart. Every other
+# gate here refuses without limit.
 #
 # THE ONE GATE THAT IS NOT ABOUT THIS REBOOT is the red_boot_at marker. FCOS's
 # own documentation names the trap: nothing tells the updater that an image was
@@ -298,6 +308,55 @@ fi
 # ------------------------------------------------------------------------------
 # Is anything mid-flight that a reboot would destroy?
 # ------------------------------------------------------------------------------
+# SOMEBODY IS WATCHING, AND THE ENCODER GATE BELOW CANNOT SEE THEM. That is not
+# a shortcoming of nvidia-smi: a DirectPlay session hands the file to the client
+# untouched and opens no encode session at all, so the only measurement this
+# section used to have reads 0% while a film is playing. Measured on this host -
+# a live DirectPlay session with utilization.encoder at 0. For as long as this
+# section was one gate, the Sunday window could cut a stream with every check
+# passing and nothing anywhere saying otherwise.
+#
+# UNKNOWN REFUSES HERE, and the same script proceeds on unknown in
+# bin/update-when-idle.sh. The asymmetry is the one this whole file is built on
+# and bin/reboot-host.sh restates: a container update costs an interrupted
+# stream, a reboot costs a car journey, so they are allowed to price the same
+# missing answer differently. Note that bin/jellyfin-watching.sh reports a
+# STOPPED Jellyfin as 0 rather than unknown, so this cannot refuse merely
+# because the media server is down.
+watching=$("$REPO/bin/jellyfin-watching.sh") ||
+	refuse "jellyfin is running and could not be asked whether anyone is watching - unknown is not idle"
+if [ "${watching:-0}" -gt 0 ]; then
+	# THE COUNT IDIOM, NOT THE ENCODER'S AGE IDIOM, and for the reason the phase
+	# gate above gives: this costs what a killed phase costs, not what a killed
+	# transcode costs. A viewer loses about fifteen seconds and resumes, because
+	# Jellyfin saves the position - so it gives way after the second refusal of a
+	# morning where the encoder holds out for a fortnight.
+	#
+	# Date-keyed so it resets between windows, and it cannot be starved: the day
+	# advances regardless of what anyone is watching.
+	today=$(date -u +%Y-%m-%d)
+	prev_day=$(sed -n 's/^playback_refused_on=//p' "$STATE" 2>/dev/null | tail -1)
+	prev_n=$(sed -n 's/^playback_refusals=//p' "$STATE" 2>/dev/null | tail -1)
+	case "$prev_n" in ''|*[!0-9]*) prev_n=0 ;; esac
+	[ "$prev_day" = "$today" ] || prev_n=0
+	if [ "$prev_n" -ge 2 ]; then
+		note "$watching session(s) playing, refused at $prev_n earlier attempts this morning - applying anyway. The stream drops; Jellyfin has the position saved and the client resumes on the way back up."
+	else
+		# Recorded BEFORE refusing, because refuse() exits immediately - and not
+		# at all under --dry-run. Same shape as the phase counter above.
+		if [ -z "$DRY" ]; then
+			{
+				grep -vE '^playback_refus(als|ed_on)=' "$STATE" 2>/dev/null
+				echo "playback_refused_on=$today"
+				echo "playback_refusals=$((prev_n + 1))"
+			} | priv tee "$STATE.tmp" >/dev/null
+			priv mv "$STATE.tmp" "$STATE"
+		fi
+		refuse "$watching Jellyfin session(s) are playing - a reboot would cut the stream.
+  Refusal $((prev_n + 1)) of 2 this morning; the next attempt applies anyway."
+	fi
+fi
+
 # A killed transcode is not fatal - the source is hardlinked in downloads/ and
 # untouched, and Tdarr re-queues the job - but it wastes an hour of GPU time and
 # leaves a partial file in the cache, and this reboot can simply happen an hour

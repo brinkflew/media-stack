@@ -83,6 +83,36 @@ unpackerr rotate themselves, and `bin/backup-server.sh` already excludes `*.log`
 `jellyfin/log/` and `tdarr/logs/` - so they are out of the backup. `logs.config_log_size` is a
 tripwire on the NVMe, not a rotation policy.
 
+### The deferred update, and why it must not read as a broken one
+
+`bin/update-when-idle.sh` runs as `ExecCondition=` on `podman-auto-update.service` and skips the run
+while somebody is watching Jellyfin - see `bin/README.md` for what counts. Three ids and two facts
+exist because **a skipped unit never advances `ExecMainExitTimestamp`**, so without them two nights
+of deferral is indistinguishable from a timer that has stopped firing:
+
+| Id | What it measures |
+|---|---|
+| `update.podman_run` | Unchanged in the ordinary case. When the gate itself ran within 26h **and** a deferral streak is open, this WARNs and names the deferral instead of `check_timer_run`'s "the timer has stopped firing" - which would be false, and is the sentence a reader would act on. |
+| `update.playback_defer` | The streak. PASS below the 3-day ceiling, because a deferral of a night or two is the gate working. WARN past it, which means the escalation did not fire - the only genuinely wrong state this can see. |
+| `update.playback_probe` | Whether the gate could ask at all. It updates anyway when Jellyfin is unreachable, so this is the record that it did. |
+
+Facts: `update_playback_defers` (num) and `update_playback_deferred_at`.
+
+**The gate-ran-recently condition on `update.podman_run` is the load-bearing part.** A streak left
+behind by a gate that has itself stopped running explains nothing, and reporting it as a deferral
+would turn this from a correction into a silencer - the same distinction
+`podman-auto-update.service.d/10-home-server.conf` draws for the prune it makes non-fatal. So a
+stale `last_run_at` falls through to the helper and its blunter verdict.
+
+**`update.playback_probe` exists because the gate fails OPEN**, which is the opposite of the encoder
+gate one file over. That asymmetry is deliberate and priced: an unreadable measurement before a
+reboot refuses, because unknown is not idle and the cost is a car journey; an unreadable measurement
+before a container update proceeds, because failing closed would let a broken Jellyfin API stop all
+twenty-seven containers updating with every unit healthy and nothing failed to say so. Proceeding is
+the right direction **and** a blind spot, so it is measured rather than left to pass in silence -
+the same argument `home_server_collector_client_unavailable` makes for a source that lost its
+endpoint and kept reporting healthy.
+
 ## Metrics
 
 **`status.json` answers "is this true now" and nothing else.** It cannot say when a backup started

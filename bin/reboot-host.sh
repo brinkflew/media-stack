@@ -140,6 +140,20 @@ else
 	bad "encoder is busy (${enc%+}) - a transcode will be killed"
 fi
 
+# Nobody mid-film. The encoder check above cannot answer this: a DirectPlay
+# session opens no encode session, so it reads 0% while somebody is watching.
+#
+# WARN RATHER THAN REFUSE, which is this script's whole difference from
+# bin/reboot-when-staged.sh - a person is reading this and can decide that the
+# household is asleep or that the stream is their own. Unattended, the same
+# condition refuses twice before giving way.
+watchers=$(sshq '/var/home-server/bin/jellyfin-watching.sh' 2>/dev/null)
+case "${watchers:-x}" in
+	0)             ok "nobody is watching Jellyfin" ;;
+	''|*[!0-9]*)   warn "could not tell whether anyone is watching Jellyfin" ;;
+	*)             bad "$watchers Jellyfin session(s) playing - the stream will be cut" ;;
+esac
+
 # Index 0, not select(.staged) - see the note at the /boot gate above and the
 # long one at next_dep in bin/verify-host.sh. Written the obvious way this said
 # "NOTHING IS STAGED. A reboot would come back on the same deployment" about a

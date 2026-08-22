@@ -1570,3 +1570,63 @@ answering; four had never served a single query and were deleted.
   draft is the right posture anyway: `ai-review` is the **only** draft-gated job in `ci.yml`, so a
   draft gets the whole pipeline without a robot reviewing a robot, and auto-merge cannot arm on it.
   Note that `CI Passed` counts a skipped job as a pass.
+
+## A restart that cut a stream, and the gate that was looking at the wrong device
+
+- **THE NIGHTLY CONTAINER UPDATE INTERRUPTED A LIVE JELLYFIN SESSION, and the series recorded the
+  whole thing.** `podman-auto-update` runs at ~00:00 UTC and Jellyfin follows `:latest`, so it is
+  recreated whenever the image moves. On 2026-08-19 that was 00:20:30. Reading
+  `sum(home_server_jellyfin_sessions)` and `home_server_jellyfin_sessions_total` at one-minute
+  resolution: `playing=1 total=3` steady from 00:10 to 00:20, **no sample at all at 00:21** because
+  the collector could not reach a container that was down, `playing=0 total=0` at 00:22, then
+  `playing=1 total=1` from 00:23 onward. One client resumed; the other two never came back. It is
+  the ONLY night in ten that Jellyfin's image actually moved, which is what makes this worth a gate
+  rather than a reschedule - the exposure is roughly weekly, and moving the hour changes the odds
+  without removing them.
+- **`podman auto-update` HAS NO PER-CONTAINER FILTER.** podman 5.8.4 offers `--authfile`,
+  `--dry-run`, `--format`, `--rollback` and `--tls-verify`, and nothing else - so "update everything
+  except Jellyfin" is not a thing that can be asked for. Dropping `AutoUpdate=` from the quadlet is
+  not the same request: it turns Jellyfin's updates off permanently rather than conditionally, gives
+  up podman's rollback (which `Notify=healthy` exists to arm), and trips `update.policy_count`,
+  which derives both sides of its count from the same authority and FAILs on a mismatch. So the
+  whole run is gated, which costs nothing: nothing here needs an image on the night it ships.
+- **`ExecCondition=` IS THE PRIMITIVE, NOT `ExecStartPre=`.** A non-zero `ExecStartPre=` FAILS the
+  unit; a non-zero `ExecCondition=` (1-254) SKIPS it and leaves it not failed, while 255 or a signal
+  still fails. That is exactly the property `bin/reboot-when-staged.sh` gets from `refuse()` exiting
+  0, and it is why `bin/update-when-idle.sh` exits **1** to refuse - the one place the two scripts
+  invert. A deferral that marked the unit red would be a night when everything worked correctly and
+  the host reported a fault.
+- **THE REBOOT WINDOW HAD THE SAME HOLE FROM A DIFFERENT DIRECTION, and the existing gate could not
+  see it.** `bin/reboot-when-staged.sh` asked `nvidia-smi --query-gpu=utilization.encoder`, which is
+  a perfectly good question about transcoding and says nothing about playback: **a DirectPlay
+  session hands the file to the client untouched and opens no encode session at all**, so the
+  encoder reads 0% while a film is playing. Measured on this host. For as long as that section was
+  one gate, the Sunday 05:00-09:00 window could cut a stream with every check passing.
+- **THE SAME MEASUREMENT IS PRICED TWO WAYS ON PURPOSE, and getting this backwards is the trap.**
+  `bin/jellyfin-watching.sh` exits 2 for "running but unaskable". The reboot gate treats that as a
+  refusal, because unknown is not idle and the cost of a wrong reboot is a car journey. The update
+  gate treats it as go, because failing closed there means a broken Jellyfin API silently stops all
+  twenty-seven containers updating while every unit reads healthy - the "host stops taking updates
+  and nothing says so" failure arriving from yet another direction. `update.playback_probe` is what
+  keeps the open direction from being a blind spot. A container that is NOT RUNNING is 0 rather than
+  unknown in both, since there is no session to interrupt in one that is already down.
+- **A STALENESS FILTER AND A CEILING CATCH DIFFERENT THINGS, AND BOTH ARE NEEDED.** A client that
+  vanishes without telling the server lingers in `/Sessions` with a frozen `LastPlaybackCheckIn`, so
+  a session counts only if it checked in within 300s. That drops ghosts and does nothing at all
+  about the case the data actually shows: **one unbroken run of 18.4 hours**, which a browser tab
+  left open on a paused episode sustains with perfectly fresh check-ins. Only the 3-day ceiling
+  breaks that. Three days rather than the encoder's fourteen because the trade is priced
+  differently - a dropped stream costs about fifteen seconds with the position already saved, where
+  a killed transcode costs an hour of GPU time.
+- **THE HOST IS ON UTC AND THE HOUSEHOLD IS NOT**, which makes every `OnCalendar=` in
+  `host/systemd/` easy to read wrongly. `timedatectl` reports UTC, so podman's stock `OnCalendar=daily`
+  was already firing at 02:00 local rather than midnight, and "move it to 5am" would have landed it
+  at 03:00 UTC - exactly on `home-server-backup`, restarting containers underneath restic, which is
+  the partial-snapshot-and-a-lock condition `reboot-when-staged.sh` already refuses over. The window
+  is 00:00/01:00/02:00 UTC: three attempts, the quietest band in the session series, and stopping
+  one hour short of the backup.
+- **THE SYMLINK LOOP GLOBS BY EXTENSION, AND THIS IS THE THIRD TIME THAT HAS COST SOMETHING.**
+  `host/systemd/README.md` linked `*.service.d` only, so the first `*.timer.d` in this repository
+  was invisible: `daemon-reload` succeeded, `systemctl cat` showed podman's stock timer, and the
+  retry window did not exist. Same shape as the `Slice=` entry above. The glob now covers both, and
+  an existing host needs the link made by hand once.

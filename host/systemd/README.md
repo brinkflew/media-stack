@@ -15,7 +15,7 @@ for u in /var/home-server/host/systemd/*.service /var/home-server/host/systemd/*
          /var/home-server/host/systemd/*.slice; do
   ln -sf "$u" ~/.config/systemd/user/
 done
-for d in /var/home-server/host/systemd/*.service.d; do
+for d in /var/home-server/host/systemd/*.service.d /var/home-server/host/systemd/*.timer.d; do
   ln -sfn "$d" ~/.config/systemd/user/
 done
 systemctl --user daemon-reload
@@ -172,13 +172,25 @@ directory - unlike `~/.config/containers/systemd/{common,torrent,media,infra}`, 
 whole directories in `stacks/` and so pick up new files for free. A unit added here and not
 symlinked is invisible, and nothing complains.
 
-**A `*.service.d/` directory is the one exception, and it is symlinked WHOLE**, which is why there
-is a second loop. These are drop-ins over units this repository does not own - podman's own
-`podman-auto-update.service` today - so there is no file of ours to symlink beside them, and
-systemd resolves a symlinked drop-in directory happily. Linking the directory rather than each
-`.conf` inside it means a second drop-in is picked up for free, the way `stacks/` already works.
-Note `ln -sfn`: without `-n`, a re-run follows the existing symlink and nests the target inside
-itself.
+**A `*.service.d/` or `*.timer.d/` directory is the one exception, and it is symlinked WHOLE**,
+which is why there is a second loop. These are drop-ins over units this repository does not own -
+podman's own `podman-auto-update.service` and `podman-auto-update.timer` today - so there is no
+file of ours to symlink beside them, and systemd resolves a symlinked drop-in directory happily.
+Linking the directory rather than each `.conf` inside it means a second drop-in is picked up for
+free, the way `stacks/` already works. Note `ln -sfn`: without `-n`, a re-run follows the existing
+symlink and nests the target inside itself.
+
+**That loop globs by EXTENSION, which is the third time that has cost something.** It read
+`*.service.d` only until 2026-08-22, so the first `*.timer.d` directory added to this repository was
+invisible: `daemon-reload` reported success, `systemctl cat` showed podman's stock timer, and the
+retry window simply did not exist. Same shape as the `Slice=` entry in `docs/known-state.md`, where
+a slice with no unit file silently got systemd's defaults. **A new drop-in EXTENSION means editing
+the glob**, and an existing host needs the one-time link by hand:
+
+```bash
+ln -sfn /var/home-server/host/systemd/podman-auto-update.timer.d ~/.config/systemd/user/
+systemctl --user daemon-reload
+```
 
 **Drop-ins over a USER unit may be symlinks into the checkout; over a SYSTEM unit they may not.**
 `systemd --user` for uid 1000 runs as `unconfined_t` and reads `var_t` fine, which is why every
@@ -212,7 +224,8 @@ symlinks, so there is no copy step. Only `daemon-reload` is needed.
 | `home-server-conduct` | **The orchestrator.** A plain user unit rather than a quadlet because no container here may reach the podman socket - `container_t -> unconfined_t : unix_stream_socket connectto` is DENY under enforcing SELinux - and forking podman is the whole of its job. It runs each phase one tier down, inside `conduct-runner`, under a transient scope in `app-agents.slice` with `--cap-drop=ALL`, `--read-only` and a network of its own. It polls Windmill rather than being called by it, so the control plane has no route to the host at all. `RestartSec=30` rather than the usual 5, because a crash loop here can respawn `claude -p` on the way past and what that burns is the quota shared with your own sessions. See `/var/agents` and `docs/agents.md`. |
 | `home-server-agents-update` | Pulls `/var/agents` nightly at 04:50 and restarts conduct only if it was already running. `--ff-only`, so a checkout that has diverged is refused rather than merged - and `agents.checkout_drift` reports it within the hour. Nothing is built: conduct is stdlib-only, so there is no venv to rebuild and no lockfile to drift. |
 | `home-server-mirror-update` | Fetches each project's mirror from GitHub nightly at 04:40, ten minutes ahead of the checkout pull so a refresh runs on code that was already deployed. **The mirror is not a cache**: `avanserv/upskald` is private and the phase runner may hold no GitHub credential in any form, so a container cannot clone it; the base every diff is measured against has to come from a repository the phase cannot write; and one host-side copy is what pins base and worktree to the same moment. It runs over a **second** read-only deploy key and passes `-F /dev/null`, because the `Host github.com` block above pins `IdentitiesOnly` to the other one - and GitHub answers a valid key for the wrong repository with `repository not found`. `agents.mirror_fresh` reads `FETCH_HEAD`'s mtime, since a mirror that quietly stopped moving is indistinguishable from one nothing has pushed to until verify refuses three days later. See `conduct/mirror.py`. |
-| `podman-auto-update.service.d` | **Not a unit of ours - a drop-in over podman's.** It makes the `ExecStartPost=` image prune non-fatal, so a disk reclaim that could be skipped for a night cannot mark the unit that updates eighteen containers as failed. It could and did: on 2026-08-17 and 2026-08-18 `podman auto-update` exited 0, every container updated, and the unit reported failure because the prune hit a leftover build container and exited 125. The condition itself is now measured by `containers.storage_orphans`, which is what makes this a correction and not a silencer. |
+| `podman-auto-update.service.d` | **Not a unit of ours - a drop-in over podman's**, and now three files. `10-` makes the `ExecStartPost=` image prune non-fatal, so a disk reclaim that could be skipped for a night cannot mark the unit that updates eighteen containers as failed. It could and did: on 2026-08-17 and 2026-08-18 `podman auto-update` exited 0, every container updated, and the unit reported failure because the prune hit a leftover build container and exited 125. The condition itself is now measured by `containers.storage_orphans`, which is what makes this a correction and not a silencer. `20-` runs `bin/pre-update-snapshot.sh` as `ExecStartPre=` with **no** `-` prefix, so a failed database snapshot aborts the update rather than leaving the rollback with nothing to restore. `30-` runs `bin/update-when-idle.sh` as `ExecCondition=`, which skips the run - without failing the unit - while somebody is watching Jellyfin. |
+| `podman-auto-update.timer.d` | **Also a drop-in over podman's**, and the reason the symlink loop above had to learn `*.timer.d`. Podman ships `OnCalendar=daily`, one attempt at ~00:00-00:15 and no second chance for a day. That is fine for an unconditional update and wrong for a gated one, so this replaces it with three attempts at 00:00, 01:00 and 02:00 UTC - 02:00 to 04:00 local, the quietest band there is. The `OnCalendar=` empty assignment is load-bearing for the same reason `10-`'s is: systemd appends to a list directive unless it is cleared first. |
 
 ```bash
 systemctl --user list-timers home-server-promote.timer home-server-verify.timer

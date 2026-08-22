@@ -611,6 +611,24 @@ signal read green.
 - Prowlarr pushes every indexer to every application and retries the refused ones for ever. Some gap
   between the three counts is correct, so read them - do not alert on equality.
 
+### A restart that cut a stream, and the gate that was looking at the wrong device
+- **The nightly update interrupted a live session on 2026-08-19**, at one-minute resolution in the
+  series: two of three connected clients never came back. `podman auto-update` takes no
+  per-container filter, so the whole run is gated instead.
+- **`ExecCondition=` skips a unit without failing it** where `ExecStartPre=` fails it, which is why
+  the update gate exits 1 to refuse and `reboot-when-staged.sh` exits 0.
+- **A DirectPlay session opens no encode session**, so the reboot window's `nvidia-smi` gate read 0%
+  while a film played. The same measurement is priced two ways on purpose: unknown refuses before a
+  reboot and proceeds before an update, and `update.playback_probe` keeps the open direction from
+  being a blind spot.
+- **A staleness filter drops ghosts; only the ceiling drops a tab left open all night** - one
+  measured run of 18.4 hours. Three days, not the encoder's fourteen, because the interruption is
+  cheap.
+- **The host is on UTC and the household is not**, so "move it to 5am" would have landed the update
+  on top of the 03:00 backup.
+- **The `host/systemd/` symlink loop globs by EXTENSION** and knew only `*.service.d`, so the first
+  `*.timer.d` was invisible with `daemon-reload` reporting success. Third time.
+
 ## Target architecture
 
 **Steps 1 and 2 are done.** The host is uCore `stable-nvidia-lts` and every service is a rootless

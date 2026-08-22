@@ -1034,7 +1034,73 @@ if [ -z "$GREENBOOT" ]; then
 	else
 		bad update.podman_timer "podman-auto-update.timer is not enabled - no container ever updates"
 	fi
-	check_timer_run update.podman_run "container update" 86400 podman-auto-update.service --user
+	# THE DEFERRAL IS READ BEFORE THE RUN AGE, because it is the only thing that
+	# makes a stale run age legible. bin/update-when-idle.sh is an ExecCondition=
+	# on podman-auto-update.service, and a skipped unit never advances
+	# ExecMainExitTimestamp - so two nights of somebody watching Jellyfin at every
+	# attempt looks EXACTLY like a timer that has stopped firing, which is the
+	# sentence check_timer_run would print. A rollout must not look like a fault.
+	#
+	# The ceiling is 3 days, in bin/update-when-idle.sh, which owns it. Repeated
+	# here only inside a message; if the two ever disagree the script is right.
+	upd_state="${HOME_SERVER_UPDATE_STATE:-${HOME:-/var/home/core}/.cache/home-server/update-state}"
+	upd_defers=$(sed -n 's/^defers=//p' "$upd_state" 2>/dev/null | tail -1)
+	upd_since=$(sed -n 's/^deferring_since=//p' "$upd_state" 2>/dev/null | tail -1)
+	upd_defer_at=$(sed -n 's/^last_defer_at=//p' "$upd_state" 2>/dev/null | tail -1)
+	upd_ran_at=$(sed -n 's/^last_run_at=//p' "$upd_state" 2>/dev/null | tail -1)
+	upd_unknown_at=$(sed -n 's/^last_unknown_at=//p' "$upd_state" 2>/dev/null | tail -1)
+	case "$upd_defers" in ''|*[!0-9]*) upd_defers=0 ;; esac
+	upd_since_d=""
+	if [ -n "$upd_since" ]; then
+		upd_epoch=$(date -d "$upd_since" +%s 2>/dev/null)
+		[ -z "${upd_epoch:-}" ] || upd_since_d=$(( ( $(date +%s) - upd_epoch ) / 86400 ))
+	fi
+	upd_ran_h=""
+	if [ -n "$upd_ran_at" ]; then
+		upd_epoch=$(date -d "$upd_ran_at" +%s 2>/dev/null)
+		[ -z "${upd_epoch:-}" ] || upd_ran_h=$(( ( $(date +%s) - upd_epoch ) / 3600 ))
+	fi
+	fact update_playback_defers "${upd_defers:-}" num
+	fact update_playback_deferred_at "${upd_defer_at:-}"
+
+	# THE GATE MUST HAVE RUN RECENTLY FOR THE DEFERRAL TO EXPLAIN ANYTHING. A
+	# streak left behind by a gate that itself stopped running explains nothing
+	# and would turn this into the silencer it exists to avoid, so a stale
+	# last_run_at falls through to the helper and its blunter verdict.
+	if [ -n "$upd_since_d" ] && [ -n "$upd_ran_h" ] && [ "$upd_ran_h" -le 26 ]; then
+		warn update.podman_run "the container update has been DEFERRED for ${upd_since_d}d, $upd_defers attempt(s) - somebody was watching Jellyfin each time. Past 3d it updates anyway. This is a deferral, not a stopped timer"
+	else
+		check_timer_run update.podman_run "container update" 86400 podman-auto-update.service --user
+	fi
+
+	# The escalation not firing is the failure worth naming here. Everything else
+	# this check can see is normal operation: a deferral of a night or two is the
+	# gate working, and no deferral at all is the common case.
+	if [ -z "$upd_since_d" ]; then
+		ok update.playback_defer "no container update is being held for playback"
+	elif [ "$upd_since_d" -lt 3 ]; then
+		ok update.playback_defer "the container update is deferred ${upd_since_d}d of 3 for playback, $upd_defers attempt(s)"
+	else
+		warn update.playback_defer "the container update has been deferred ${upd_since_d}d, past the 3d ceiling that should have overridden it - the escalation in bin/update-when-idle.sh is not firing"
+	fi
+
+	# A GATE THAT CANNOT ANSWER PROCEEDS, AND MUST SAY SO. bin/update-when-idle.sh
+	# updates anyway when Jellyfin cannot be asked, because failing closed would
+	# let a broken media server stop all 27 containers updating. That is the right
+	# direction and it is also a blind spot, so it is measured rather than left to
+	# pass in silence - the same argument home_server_collector_client_unavailable
+	# makes for a source that lost its endpoint and kept reporting healthy.
+	if [ -z "$upd_unknown_at" ]; then
+		ok update.playback_probe "the playback gate has always been able to ask Jellyfin"
+	else
+		upd_epoch=$(date -d "$upd_unknown_at" +%s 2>/dev/null)
+		upd_unk_h=$(( ( $(date +%s) - ${upd_epoch:-0} ) / 3600 ))
+		if [ -z "${upd_epoch:-}" ] || [ "$upd_unk_h" -gt 48 ]; then
+			ok update.playback_probe "the playback gate last failed to reach Jellyfin at $upd_unknown_at, over 48h ago"
+		else
+			warn update.playback_probe "the playback gate could not reach Jellyfin at $upd_unknown_at and updated without checking - see JELLYFIN_API_KEY and the jellyfin container"
+		fi
+	fi
 
 	# A FAILED ROLLBACK AND A BURPED PRUNE ARE THE SAME FINDING TODAY, and they
 	# could not be further apart. update.podman_run reports "exit 125" for both:
