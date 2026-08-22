@@ -54,6 +54,38 @@ function bySeries(): Record<string, SeriesSpec[]> {
   table[SYSTEM.memoryTotal] = [{ metric: { __name__: "node_memory_MemTotal_bytes" }, at: constant(MEM_TOTAL) }];
   table[SYSTEM.load1] = [{ metric: { __name__: "node_load1" }, at: swing("load", 2.4, 1.6) }];
 
+  // TWELVE HARDWARE THREADS, and they are deliberately NOT the same wave: one
+  // core pinned while the other eleven idle is the exact case the aggregate
+  // hides, so core 3 runs hot here and the chart has something to show.
+  table[SYSTEM.cpuPerCore] = Array.from({ length: 12 }, (_, i) => ({
+    metric: { cpu: String(i), mode: "idle" },
+    at: i === 3 ? swing("cpu3", 0.86, 0.1) : swing(`cpu${i}`, 0.18, 0.14),
+  }));
+
+  // THE FOUR BANDS ARE DERIVED FROM ONE WAVE AND CLOSED BY SUBTRACTION. Four
+  // independent swing()s would not sum to MEM_TOTAL, and the stack would
+  // under-fill its pinned frame in dev - a chart that looks broken while
+  // nothing is, which is the one fixture failure that trains you to ignore it.
+  const memUsed = (t: number) => wave("memratio", t, 0.27, 0.05) * MEM_TOTAL;
+  const memBuf = (t: number) => wave("membuf", t, 0.012, 0.003) * MEM_TOTAL;
+  // A DELIBERATE HOLE, four hours back: the same discipline as the six missing
+  // uptime days. It is what puts the stack's compounding gap rule on screen,
+  // where "cache is unknown here" must break every band above it rather than
+  // drawing three quarters of a column and calling it a total.
+  const memCache = (t: number) =>
+    Math.round((now - t) / 1800) === 8 ? Number.NaN : wave("memcache", t, 0.55, 0.08) * MEM_TOTAL;
+  const memFree = (t: number) => MEM_TOTAL - memUsed(t) - memBuf(t) - memCache(t);
+
+  table[SYSTEM.memoryUsedParts] = [{ metric: {}, at: memUsed }];
+  table[SYSTEM.memoryBuffers] = [{ metric: {}, at: memBuf }];
+  table[SYSTEM.memoryCache] = [{ metric: {}, at: memCache }];
+  // Inherits the NaN through the arithmetic, which is right: with cache
+  // unknown, free is unknown too.
+  table[SYSTEM.memoryFree] = [{ metric: {}, at: memFree }];
+
+  table[SYSTEM.swapTotal] = [{ metric: {}, at: constant(4 * GB) }];
+  table[SYSTEM.swapUsed] = [{ metric: {}, at: swing("swap", 1.2 * GB, 0.4 * GB) }];
+
   // TWO CARDS, because the host has two and they are not interchangeable. GPU 0's
   // video engines are dead hardware - every NVENC session on it fails - so both
   // consumers are pinned to gpu=1 and card 0 encodes nothing, for ever. A
@@ -111,7 +143,7 @@ function bySeries(): Record<string, SeriesSpec[]> {
   table[SYSTEM.diskReallocated] = DISKS.map((d) => ({ metric: { device: d.device }, at: constant(d.realloc) }));
   table[SYSTEM.diskPending] = DISKS.map((d) => ({ metric: { device: d.device }, at: constant(d.pending) }));
   table[SYSTEM.diskMediaErrors] = [{ metric: { device: "nvme0" }, at: constant(0) }];
-  table[SYSTEM.uptime] = [{ metric: {}, at: constant(41 * 86400 + 6 * 3600) }];
+  table[SYSTEM.bootTime] = [{ metric: {}, at: constant(now - (41 * 86400 + 6 * 3600)) }];
 
   // --- containers ----------------------------------------------------------
   table[SERVICES.info] = CONTAINERS.map((c) => ({

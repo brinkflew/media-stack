@@ -18,7 +18,7 @@
 // emits no series.
 // =============================================================================
 
-import type { Tone } from "@/types";
+import type { CheckStatus, Tone } from "@/types";
 
 export interface ContainerHealth {
   tone: Tone;
@@ -36,4 +36,29 @@ export function containerTone(running: boolean, health: number | undefined): Con
   if (health === 0) return { tone: "ok", state: "healthy" };
   if (health === 1) return { tone: "warn", state: "starting" };
   return { tone: "fail", state: "unhealthy" };
+}
+
+/**
+ * A check's status as a tone. ONE FUNCTION, because two call sites guessing is
+ * how the System page came to draw a `note` amber in the strip at the top and
+ * grey in the list below it - the strip bound `:class="c.status"` and only
+ * `.fail` had an override, so `note` fell through to the warn treatment and
+ * nothing said so.
+ *
+ * `note` IS GREY, not amber. bin/verify-host.sh emits it for a check that could
+ * not run, and the whole argument above containerTone applies unchanged: an
+ * unmeasured thing must not borrow the colour of a measured one, in either
+ * direction.
+ */
+export function checkTone(status: CheckStatus): Tone {
+  switch (status) {
+    case "fail":
+      return "fail";
+    case "warn":
+      return "warn";
+    case "pass":
+      return "ok";
+    default:
+      return "off";
+  }
 }

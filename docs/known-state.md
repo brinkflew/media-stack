@@ -1656,3 +1656,35 @@ answering; four had never served a single query and were deleted.
   was invisible: `daemon-reload` succeeded, `systemctl cat` showed podman's stock timer, and the
   retry window did not exist. Same shape as the `Slice=` entry above. The glob now covers both, and
   an existing host needs the link made by hand once.
+
+## The dashboard measured one thing twice, and drew another thing two ways
+
+- **`sum(rate(node_disk_read_bytes_total))` COUNTED THE MEDIA SPINDLE TWICE, and the number looked
+  entirely plausible.** node-exporter's diskstats collector drops partitions by default but not
+  device-mapper, and `dm-0` is stacked on `sda` - so the sum added the same traffic at two layers.
+  Measured on 2026-08-22: `dm-0` at 782.41187 GB read against `sda` at 782.41410 GB, which is one
+  workload seen twice rather than two workloads. The System page had reported roughly double the
+  host's disk throughput for as long as the chart existed, on a metric nothing else cross-checks.
+  `device!~"dm-.*"` is the fix. **The general shape is the one this file keeps recording**: an
+  aggregate over a label set nobody enumerated, where every individual series is correct.
+- **A BYTE AXIS STEPPED IN BASE TEN IS ROUND BEFORE THE UNIT CONVERSION AND RAGGED AFTER IT.** The
+  first labelled y axis picked 1/2/5-times-a-power-of-ten ticks, which `fmt.bytes` then divided by
+  1024 to print: a 16 GiB frame came out "0 B / 5 GB / 9 GB / 14 GB". Nothing was wrong with the
+  data or with the tick placement; the scale was simply unreadable, and it read as a rendering bug
+  in the chart rather than as a unit mismatch. Byte and rate axes step on powers of two now
+  (`tickBase: 1024` in `MetricChart`), and read "0 B / 4 GB / 8 GB / 12 GB / 16 GB".
+- **THE SAME FINDINGS WERE DRAWN TWICE, IN TWO VISUAL LANGUAGES THAT DISAGREED.** A strip of tinted
+  cards at the top of the System page and a list below the metrics both read `host.problems`. The
+  strip was capped at three, so which findings existed depended on which half of the page you looked
+  at; and a `note` rendered **amber** in the strip and **grey** in the list, because the strip bound
+  `:class="c.status"` and only `.fail` had an override, so `note` fell through to the warn
+  treatment. `checkTone()` in `src/health.ts` is the single mapping now, beside `containerTone` and
+  for the same reason. No fixture had a `note` in it, so neither the fixtures nor `bin/lint-repo.sh`
+  could have caught this; one has now.
+- **THE DEAD MAN'S SWITCH WAS RENDERED AS A WARNING, WHICH IS THE ONE THING IT MUST NEVER LOOK
+  LIKE.** `Watchdog` is `expr: vector(1)` at `severity: heartbeat`, so it always fires and firing is
+  the healthy state. `src/api/alerts.ts` fetched with no filter and the page coloured anything that
+  was not `critical` as `warn`, so the alert meaning "the notification chain works" sat permanently
+  above the real ones and inflated the firing count. It is filtered out now - but **hiding it must
+  not hide its absence**, which is the only thing it was ever able to say, so a response that does
+  not contain it raises a `fail` line in its place.

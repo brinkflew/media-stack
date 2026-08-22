@@ -1,16 +1,23 @@
 <script setup lang="ts">
 /**
- * System: the actionable strip, three headline charts, one shared timeline,
- * and the four panels that answer "what is this machine doing".
+ * System: the findings, five core-metric cards, the pressure lanes, and the
+ * four panels that answer "what is this machine doing".
  *
- * The shared time axis across every lane is the point of the design, and it is
- * why all six lanes are fetched in one pass with identical start/end/step: two
- * charts on slightly different windows cannot be read against each other, and
- * the whole reason to put them on one axis is to see that the disk spike and
- * the pressure spike are the same event.
+ * ONE TIME AXIS ACROSS EVERYTHING, which is the point of the design and is why
+ * every series on this page is fetched in one pass with identical
+ * start/end/step: two charts on slightly different windows cannot be read
+ * against each other, and the whole reason to share an axis is to see that the
+ * disk spike and the pressure spike are the same event.
+ *
+ * THAT STILL HOLDS NOW THAT THE LANES NO LONGER REPEAT THE CARDS. `useCrosshair`
+ * is a module-level ref holding a unix TIME, not a pixel, so hovering the disk
+ * card marks the same instant on the IO pressure lane below it even though they
+ * are different components at different sizes. The lanes were shortened to what
+ * the cards do not already draw; the cross-reading was not.
  */
 import { computed, watch } from "vue";
 
+import FindingsPanel from "@/components/FindingsPanel.vue";
 import PanelBox from "@/components/PanelBox.vue";
 import MetricChart from "@/components/MetricChart.vue";
 import StatusDot from "@/components/StatusDot.vue";
@@ -18,12 +25,12 @@ import UptimeBars from "@/components/UptimeBars.vue";
 import WindowPicker from "@/components/WindowPicker.vue";
 
 import { usePoll } from "@/composables/usePoll";
-import { useBatteryStale, useMetricsStale } from "@/composables/useStaleness";
+import { useMetricsStale } from "@/composables/useStaleness";
 import { useHostStore } from "@/stores/host";
 import { instant, instantBy, labelsBy, range, value } from "@/api/prometheus";
-import { bySeverityThenTime, fetchAlerts } from "@/api/alerts";
+import { bySeverityThenTime, fetchAlerts, isHeartbeat } from "@/api/alerts";
 import { AVAILABILITY, SERVICES, SYSTEM } from "@/queries";
-import { latest, median, onGrid, peak, sampleAt, toPoints, type ChartSeries } from "@/charts";
+import { latest, onGrid, peak, sampleAt, toPoints, type ChartSeries, type Point } from "@/charts";
 import { dailyRatios, ratioSummary } from "@/uptime";
 import * as fmt from "@/format";
 import { useTimeWindow } from "@/composables/useTimeWindow";
@@ -34,97 +41,38 @@ const { window: win } = useTimeWindow();
 const cross = useCrosshair();
 
 // ---------------------------------------------------------------------------
-// The lanes. One definition drives the shared timeline AND the three headline
-// charts above it, so the two can never disagree about what they are showing.
+// Every range query this page draws, in one fetch on one grid.
 // ---------------------------------------------------------------------------
-interface Lane {
+interface Source {
   key: string;
-  label: string;
-  sub: string;
   query: string;
-  tone: "ok" | "warn" | "fail";
-  unit: string;
-  format: (v: number) => string;
-  /** Shown as one of the three big charts at the top. */
-  headline?: boolean;
-  floorAtZero?: boolean;
   /**
    * Draw every series the query returns, one line each, keyed by this label.
    * Set only where the multiplicity is REAL and must not be collapsed: this
    * host has two GPUs, one of them with dead video engines, and taking whichever
-   * series sorted first is what made the encoder read 0% for ever.
+   * series sorted first is what made the encoder read 0% for ever. The twelve
+   * CPU threads are the second case, for the opposite reason - the aggregate is
+   * what hides one pinned core.
    */
   splitBy?: string;
 }
 
-const LANES: Lane[] = [
-  {
-    key: "cpu",
-    label: "CPU",
-    sub: "all cores, busy fraction",
-    query: SYSTEM.cpuBusy,
-    tone: "ok",
-    unit: "",
-    format: (v) => fmt.percent(v, 1),
-    headline: true,
-  },
-  {
-    key: "memory",
-    label: "Memory",
-    sub: "in use, MemAvailable based",
-    query: SYSTEM.memoryUsed,
-    tone: "ok",
-    unit: "",
-    format: (v) => fmt.bytes(v),
-    headline: true,
-  },
-  {
-    key: "gpu",
-    label: "GPU encoder",
-    sub: "NVENC block, per card",
-    query: SYSTEM.gpuEncoder,
-    tone: "ok",
-    unit: "",
-    format: (v) => fmt.percent(v, 0),
-    headline: true,
-    splitBy: "gpu",
-  },
-  {
-    key: "net",
-    label: "Network in",
-    sub: "physical interfaces",
-    query: SYSTEM.netRx,
-    tone: "ok",
-    unit: "",
-    format: (v) => fmt.rate(v),
-  },
-  {
-    key: "disk",
-    label: "Disk read",
-    sub: "every block device",
-    query: SYSTEM.diskRead,
-    tone: "ok",
-    unit: "",
-    format: (v) => fmt.rate(v),
-  },
-  {
-    key: "iopsi",
-    label: "IO pressure",
-    sub: "time fully stalled on IO",
-    query: SYSTEM.ioPressure,
-    tone: "warn",
-    unit: "",
-    format: (v) => fmt.percent(v, 1),
-  },
-  {
-    key: "cpupsi",
-    label: "CPU pressure",
-    sub: "time waiting for a core",
-    query: SYSTEM.cpuPressure,
-    tone: "warn",
-    unit: "",
-    format: (v) => fmt.percent(v, 1),
-  },
+const SOURCES: Source[] = [
+  { key: "cpuCores", query: SYSTEM.cpuPerCore, splitBy: "cpu" },
+  { key: "cpuMean", query: SYSTEM.cpuBusy },
+  { key: "memInUse", query: SYSTEM.memoryUsed },
+  { key: "memUsed", query: SYSTEM.memoryUsedParts },
+  { key: "memBuffers", query: SYSTEM.memoryBuffers },
+  { key: "memCache", query: SYSTEM.memoryCache },
+  { key: "memFree", query: SYSTEM.memoryFree },
+  { key: "swapUsed", query: SYSTEM.swapUsed },
+  { key: "netRx", query: SYSTEM.netRx },
+  { key: "netTx", query: SYSTEM.netTx },
+  { key: "diskRead", query: SYSTEM.diskRead },
+  { key: "diskWrite", query: SYSTEM.diskWritten },
+  { key: "gpu", query: SYSTEM.gpuEncoder, splitBy: "gpu" },
+  { key: "iopsi", query: SYSTEM.ioPressure },
+  { key: "cpupsi", query: SYSTEM.cpuPressure },
 ];
 
 const series = usePoll(async (signal) => {
@@ -132,34 +80,49 @@ const series = usePoll(async (signal) => {
   const start = end - win.value.seconds;
   const step = win.value.step;
 
-  const results = await Promise.all(
-    LANES.map(async (lane) => {
-      const matrix = await range(lane.query, { window: win.value.seconds, step, signal });
-      const split = lane.splitBy;
+  // THE CEILINGS ARE RESOLVED IN THE SAME PASS, deliberately. MemTotal is its
+  // own instant query, and fetching it separately means the memory card scales
+  // to its data on the first paint and then visibly rescales when the ceiling
+  // lands - a jump on every mount, for nothing.
+  const [results, memTotal, swapTotal] = await Promise.all([
+    Promise.all(
+      SOURCES.map(async (source) => {
+        const matrix = await range(source.query, { window: win.value.seconds, step, signal });
+        const split = source.splitBy;
 
-      // Without splitBy the query aggregates in PromQL and returns exactly one
-      // series, so taking the first is not a choice being made. With it, every
-      // series is drawn - see the Lane comment for what collapsing them cost.
-      const lines: ChartSeries[] = split
-        ? matrix
-            .map((s) => ({
-              label: s.metric[split] ?? "?",
-              tone: lane.tone,
-              points: onGrid(toPoints(s.values), start, end, step),
-            }))
-            .sort((a, b) => a.label.localeCompare(b.label, "en", { numeric: true }))
-        : [
-            {
-              tone: lane.tone,
-              points: onGrid(matrix.length ? toPoints(matrix[0].values) : [], start, end, step),
-            },
-          ];
+        // Without splitBy the query aggregates in PromQL and returns exactly one
+        // series, so taking the first is not a choice being made.
+        const lines: Point[][] = split
+          ? matrix
+              .map((s) => ({
+                label: s.metric[split] ?? "?",
+                points: onGrid(toPoints(s.values), start, end, step),
+              }))
+              .sort((a, b) => a.label.localeCompare(b.label, "en", { numeric: true }))
+              .map((s) => s.points)
+          : [onGrid(matrix.length ? toPoints(matrix[0].values) : [], start, end, step)];
 
-      return [lane.key, lines] as const;
-    }),
-  );
+        const labels = split
+          ? matrix
+              .map((s) => s.metric[split] ?? "?")
+              .sort((a, b) => a.localeCompare(b, "en", { numeric: true }))
+          : [];
 
-  return { start, end, step, byLane: new Map<string, ChartSeries[]>(results) };
+        return [source.key, { lines, labels }] as const;
+      }),
+    ),
+    instant(SYSTEM.memoryTotal, signal).then((r) => value(r[0]?.value)),
+    instant(SYSTEM.swapTotal, signal).then((r) => value(r[0]?.value)),
+  ]);
+
+  return {
+    start,
+    end,
+    step,
+    memTotal,
+    swapTotal,
+    by: new Map<string, { lines: Point[][]; labels: string[] }>(results),
+  };
 }, 30_000);
 
 // The window is read inside the loader, so a change to it would otherwise not
@@ -168,44 +131,159 @@ watch(win, () => {
   void series.refresh();
 });
 
-function lanesOf(key: string): ChartSeries[] {
-  return series.data.value?.byLane.get(key) ?? [];
+function pointsOf(key: string): Point[] {
+  return series.data.value?.by.get(key)?.lines[0] ?? [];
 }
 
-const headlines = computed(() => LANES.filter((l) => l.headline));
+function allOf(key: string): Point[][] {
+  return series.data.value?.by.get(key)?.lines ?? [];
+}
+
+function labelsOf(key: string): string[] {
+  return series.data.value?.by.get(key)?.labels ?? [];
+}
 
 /**
- * One number per series, joined. Under the cursor while one is set, and the
- * latest sample otherwise - so the same slot answers "what is it now" and "what
- * was it then" without a second place to look.
+ * One number from a series: under the cursor while one is set, and the latest
+ * sample otherwise - so the same slot answers "what is it now" and "what was it
+ * then" without a second place to look.
  *
  * A hole reads as the no-data dash rather than as the last real value: the
  * cursor sitting in a gap must not be answered with a number from elsewhere.
  */
-function reading(lane: Lane): string {
-  const lines = lanesOf(lane.key);
-  if (!lines.length) return fmt.NO_DATA;
-
+function at(points: Point[]): number {
   const t = cross.at.value;
-  return lines
-    .map((s) => lane.format(t === null ? latest(s.points) : (sampleAt(s.points, t)?.[1] ?? Number.NaN)))
-    .join(" / ");
+  return t === null ? latest(points) : (sampleAt(points, t)?.[1] ?? Number.NaN);
 }
 
-function peakReading(lane: Lane): string {
-  const lines = lanesOf(lane.key);
+const from = computed(() => series.data.value?.start);
+const to = computed(() => series.data.value?.end);
+
+// ---------------------------------------------------------------------------
+// The five cards
+// ---------------------------------------------------------------------------
+
+/**
+ * Twelve threads at one flat opacity plus the mean at full weight.
+ *
+ * NOT THE BRIGHTNESS RAMP: the cores are interchangeable, and drawing core 11
+ * at a third of core 0 would say something about core 11 that is not true. The
+ * ramp is for series that differ; these differ only in which one is busy.
+ */
+const cpuSeries = computed<ChartSeries[]>(() => {
+  const cores = allOf("cpuCores").map((points, i) => ({
+    points,
+    label: `cpu${labelsOf("cpuCores")[i] ?? i}`,
+    tone: "ok" as const,
+    opacity: 0.3,
+  }));
+  const mean = pointsOf("cpuMean");
+  return mean.length ? [...cores, { points: mean, label: "mean", tone: "ok" as const, opacity: 1, width: 2 }] : cores;
+});
+
+/** The busiest single thread right now. The whole reason to draw twelve lines:
+ *  one core at 100% is 8% of the aggregate and looks like an idle machine. */
+const busiestCore = computed(() => {
+  const values = allOf("cpuCores").map((p) => at(p)).filter(Number.isFinite);
+  return values.length ? Math.max(...values) : Number.NaN;
+});
+
+/**
+ * Bottom band first. They sum to MemTotal by construction - see queries.ts -
+ * which is the only thing that makes pinning the frame to MemTotal honest.
+ */
+const memorySeries = computed<ChartSeries[]>(() => [
+  { points: pointsOf("memUsed"), label: "used", tone: "ok" },
+  { points: pointsOf("memBuffers"), label: "buffers", tone: "ok" },
+  { points: pointsOf("memCache"), label: "cache", tone: "ok" },
+  { points: pointsOf("memFree"), label: "free", tone: "ok" },
+]);
+
+/** MemAvailable-based, and the aside rather than a band, because it is the
+ *  number a human means by "memory in use". Reporting MemTotal - MemFree there
+ *  instead would say 88% on a perfectly healthy host - the exact misreading
+ *  queries.ts warns about for the same reason. */
+const memoryInUse = computed(() => at(pointsOf("memInUse")));
+
+const swap = computed(() => {
+  const total = series.data.value?.swapTotal ?? Number.NaN;
+  if (!Number.isFinite(total) || total <= 0) return null;
+  const used = at(pointsOf("swapUsed"));
+  return { used, total, ratio: used / total };
+});
+
+/** In above the zero rule, out below it. Positive magnitudes in both halves -
+ *  only the drawing is signed, see charts.ts. */
+const netSeries = computed<ChartSeries[]>(() => [
+  { points: pointsOf("netRx"), label: "in", tone: "ok", direction: "up" },
+  { points: pointsOf("netTx"), label: "out", tone: "ok", direction: "down" },
+]);
+
+const diskSeries = computed<ChartSeries[]>(() => [
+  { points: pointsOf("diskRead"), label: "read", tone: "ok", direction: "up" },
+  { points: pointsOf("diskWrite"), label: "write", tone: "ok", direction: "down" },
+]);
+
+// ---------------------------------------------------------------------------
+// The lanes that the cards do not already draw
+// ---------------------------------------------------------------------------
+interface Lane {
+  key: string;
+  label: string;
+  sub: string;
+  tone: "ok" | "warn" | "fail";
+  format: (v: number) => string;
+  /** Pin the frame. Both pressures are a fraction of wall-clock time. */
+  yMax?: number;
+}
+
+const LANES: Lane[] = [
+  {
+    key: "gpu",
+    label: "GPU encoder",
+    sub: "NVENC block, per card",
+    tone: "ok",
+    format: (v) => fmt.percent(v, 0),
+    yMax: 1,
+  },
+  {
+    key: "iopsi",
+    label: "IO pressure",
+    sub: "time fully stalled on IO",
+    tone: "warn",
+    format: (v) => fmt.percent(v, 1),
+    yMax: 1,
+  },
+  {
+    key: "cpupsi",
+    label: "CPU pressure",
+    sub: "time waiting for a core",
+    tone: "warn",
+    format: (v) => fmt.percent(v, 1),
+    yMax: 1,
+  },
+];
+
+function laneSeries(lane: Lane): ChartSeries[] {
+  const entry = series.data.value?.by.get(lane.key);
+  if (!entry) return [];
+  return entry.lines.map((points, i) => ({
+    points,
+    label: entry.labels[i],
+    tone: lane.tone,
+  }));
+}
+
+function laneReading(lane: Lane): string {
+  const lines = laneSeries(lane);
+  if (!lines.length) return fmt.NO_DATA;
+  return lines.map((s) => lane.format(at(s.points))).join(" / ");
+}
+
+function lanePeak(lane: Lane): string {
+  const lines = laneSeries(lane);
   if (!lines.length) return fmt.NO_DATA;
   return lines.map((s) => lane.format(peak(s.points))).join(" / ");
-}
-
-/** Named in the foot because the dashed grey rule in every chart IS this, and
- *  an unlabelled reference line is a question rather than a fact. Drawn only for
- *  single-series charts, so it is reported only for those too. */
-function medianReading(lane: Lane): string | null {
-  const lines = lanesOf(lane.key);
-  if (lines.length !== 1) return null;
-  const m = median(lines[0].points);
-  return Number.isFinite(m) ? lane.format(m) : null;
 }
 
 /** Seven ticks across the window, each carrying the date only where it changes -
@@ -223,7 +301,29 @@ const cursorStamp = computed(() => (cross.at.value === null ? null : fmt.stamp(c
 // Alerts, which is where the design's log stream was. See src/api/alerts.ts.
 // ---------------------------------------------------------------------------
 const alerts = usePoll((signal) => fetchAlerts(signal), 30_000);
-const sortedAlerts = computed(() => [...(alerts.data.value ?? [])].sort(bySeverityThenTime));
+
+/** The heartbeat is NOT one of these. It always fires, so listing it puts a
+ *  permanent amber row above every real alert and makes "4 firing" mean three. */
+const sortedAlerts = computed(() =>
+  [...(alerts.data.value ?? [])].filter((a) => !isHeartbeat(a)).sort(bySeverityThenTime),
+);
+
+/**
+ * HIDING IT MUST NOT HIDE ITS ABSENCE, which is the only thing it ever had to
+ * say. `expr: vector(1)` cannot stop firing while Prometheus evaluates rules
+ * and Alertmanager holds them, so a response that does not contain it is the
+ * chain being broken - the finding the rule exists to produce.
+ *
+ * Guarded on there being a response at all: Alertmanager unreachable already
+ * dims this panel with its own sentence, and must not additionally be reported
+ * as a dead heartbeat.
+ */
+const heartbeatLost = computed(
+  () =>
+    alerts.error.value === null &&
+    alerts.data.value !== null &&
+    !alerts.data.value.some(isHeartbeat),
+);
 
 /** Event ticks on the shared axis: where each active alert began. Alerts that
  *  started before the window are pinned to the left edge rather than dropped -
@@ -232,13 +332,13 @@ const eventMarks = computed(() => {
   const s = series.data.value;
   if (!s) return [];
   return sortedAlerts.value.map((a) => {
-    const at = Date.parse(a.startsAt) / 1000;
-    const ratio = Math.min(1, Math.max(0, (at - s.start) / (s.end - s.start)));
+    const t = Date.parse(a.startsAt) / 1000;
+    const ratio = Math.min(1, Math.max(0, (t - s.start) / (s.end - s.start)));
     return {
       key: a.fingerprint ?? a.labels.alertname,
       left: `${(ratio * 100).toFixed(2)}%`,
       tone: a.labels.severity === "critical" ? ("fail" as const) : ("warn" as const),
-      before: at < s.start,
+      before: t < s.start,
     };
   });
 });
@@ -342,10 +442,10 @@ function backupTone(key: string, limit: number): "ok" | "warn" | "fail" | "off" 
 // ---------------------------------------------------------------------------
 // Staleness, passed down to every panel rather than decided inside them
 // ---------------------------------------------------------------------------
-// Both live in @/composables/useStaleness now: four pages need the same two
-// sentences, and four copies is how they start disagreeing.
+// useMetricsStale lives in @/composables/useStaleness: four pages need the same
+// sentence, and four copies is how they start disagreeing. The battery half of
+// it went with the findings, into FindingsPanel.
 const metricsStale = useMetricsStale();
-const batteryStale = useBatteryStale();
 
 const osLine = computed(() => {
   const booted = host.fact("booted_version");
@@ -359,7 +459,7 @@ const staged = computed(() => {
   return typeof s === "string" && s.length ? s : null;
 });
 
-// The GPU is worth a line of its own: two NVENC sessions already pin the
+// The GPU is worth a panel of its own: two NVENC sessions already pin the
 // encoder block at 100% while the SM sits at 10%, so "the GPU is busy" and
 // "the GPU is saturated" are different questions here.
 //
@@ -425,144 +525,238 @@ const jellyfinSessions = usePoll(
       <WindowPicker />
     </Teleport>
 
-    <!-- The actionable strip. Only non-passing findings, worst first, capped
-         at three - the design's whole argument is that this row is glanceable,
-         and the full list is the panel below. -->
-    <section v-if="host.problems.length" class="strip">
-      <article v-for="c in host.problems.slice(0, 3)" :key="c.id" class="finding" :class="c.status">
-        <StatusDot :tone="c.status === 'fail' ? 'fail' : 'warn'" :live="c.status === 'fail'" :size="6" />
-        <div class="finding-body">
-          <div class="finding-title">{{ c.message }}</div>
-          <div class="finding-id mono">{{ c.id }}</div>
-        </div>
-      </article>
-    </section>
+    <!-- The findings, in the one place they live. See FindingsPanel.vue for
+         why there is no longer a second, differently-coloured copy of this. -->
+    <FindingsPanel />
 
-    <!-- Three headline charts -->
-    <section class="headlines">
-      <PanelBox v-for="lane in headlines" :key="lane.key" :label="lane.label" :stale="metricsStale">
-        <template #aside>
-          <span class="value mono" :class="{ hovered: cross.active.value }">{{ reading(lane) }}</span>
-        </template>
-        <MetricChart
-          :series="lanesOf(lane.key)"
-          :tone="lane.tone"
-          :height="72"
-          :grid="3"
-          :format="lane.format"
-          show-median
-          :from="series.data.value?.start"
-          :to="series.data.value?.end"
-        />
-        <div class="foot mono">
-          <span>{{ lane.sub }}</span>
-          <span>
-            <template v-if="medianReading(lane)">median {{ medianReading(lane) }} / </template
-            >peak {{ peakReading(lane) }}
-          </span>
-        </div>
-      </PanelBox>
-    </section>
-
-    <!-- The shared timeline -->
-    <section class="timeline">
-      <header class="tl-head">
-        <span class="label">Timeline</span>
-        <div class="tl-axis mono">
-          <!-- The day slot is always rendered, empty where the date has not
-               changed, so the times stay on one baseline across the row. -->
-          <span v-for="(t, i) in axis" :key="i" class="tick">
-            <span class="tick-day">{{ t.day ?? "" }}</span>
-            <span>{{ i === axis.length - 1 ? "now" : t.time }}</span>
-          </span>
-        </div>
-        <!-- The instant every value in this column is reporting. A stamp here
-             rather than "Current" is the whole signal that the numbers are a
-             reading from the cursor and not the live ones. -->
+    <!-- The five cards. Core vitals only: the GPU is a detail of one workload
+         and has a panel of its own below. -->
+    <section class="section">
+      <div class="head">
+        <span class="label">Core metrics</span>
         <span class="label right" :class="{ at: cursorStamp }">{{ cursorStamp ?? "Current" }}</span>
-      </header>
-
-      <!-- Dimmed on the same signal as the headline charts above, which draw
-           the SAME series. Leaving the lanes bright while the charts fade
-           would say the timeline is current when it is the identical frozen
-           data. The Alerts lane below is NOT dimmed: it comes from
-           Alertmanager, which is a different source with a different pulse. -->
-      <div v-for="lane in LANES" :key="lane.key" class="lane" :class="{ dim: !!metricsStale }">
-        <div class="lane-name">
-          <div class="lane-label">{{ lane.label }}</div>
-          <div class="lane-sub mono">{{ lane.sub }}</div>
-        </div>
-        <MetricChart
-          :series="lanesOf(lane.key)"
-          :tone="lane.tone"
-          :height="30"
-          :format="lane.format"
-          show-median
-          :from="series.data.value?.start"
-          :to="series.data.value?.end"
-        />
-        <div class="lane-value">
-          <span class="mono now" :style="{ color: `var(--${lane.tone})` }">
-            {{ reading(lane) }}
-          </span>
-          <div class="lane-peak mono">peak {{ peakReading(lane) }}</div>
-        </div>
       </div>
 
-      <div class="lane">
-        <div class="lane-name">
-          <div class="lane-label">Alerts</div>
-          <div class="lane-sub mono">when each one started</div>
+      <div class="cards">
+        <PanelBox class="c-cpu" label="CPU" :stale="metricsStale">
+          <template #aside>
+            <span class="value mono" :class="{ hovered: cross.active.value }">
+              {{ fmt.percent(at(pointsOf("cpuMean")), 1) }}
+            </span>
+          </template>
+          <MetricChart
+            :series="cpuSeries"
+            :height="104"
+            :grid="4"
+            :y-max="1"
+            y-axis
+            x-axis
+            :x-ticks="5"
+            :format="(v: number) => fmt.percent(v, 0)"
+            :from="from"
+            :to="to"
+          />
+          <div class="foot mono">
+            <span>12 threads, busy fraction of each</span>
+            <span>busiest thread {{ fmt.percent(busiestCore, 0) }}</span>
+          </div>
+        </PanelBox>
+
+        <PanelBox class="c-mem" label="Memory" :stale="metricsStale">
+          <template #aside>
+            <span class="value mono" :class="{ hovered: cross.active.value }">
+              {{ fmt.bytes(memoryInUse) }}
+            </span>
+          </template>
+          <MetricChart
+            :series="memorySeries"
+            :height="104"
+            :grid="4"
+            :y-max="series.data.value?.memTotal"
+            stacked
+            legend
+            y-axis
+            x-axis
+            :x-ticks="4"
+            :tick-base="1024"
+            :format="(v: number) => fmt.bytes(v, 0)"
+            :from="from"
+            :to="to"
+          />
+          <!-- SWAP IS NOT A FIFTH BAND. The stack is pinned to MemTotal and
+               adding four gigabytes to it would draw a machine with twenty. -->
+          <div v-if="swap" class="swap">
+            <div class="swap-head mono">
+              <span>swap</span>
+              <span>{{ fmt.bytes(swap.used) }} of {{ fmt.bytes(swap.total) }}</span>
+            </div>
+            <div class="bar">
+              <span class="fill" :style="{ width: `${Math.min(100, swap.ratio * 100).toFixed(1)}%` }" />
+            </div>
+          </div>
+        </PanelBox>
+
+        <PanelBox class="c-net" label="Network" :stale="metricsStale">
+          <template #aside>
+            <span class="value mono" :class="{ hovered: cross.active.value }">
+              {{ fmt.rate(at(pointsOf("netRx"))) }}
+            </span>
+          </template>
+          <MetricChart
+            :series="netSeries"
+            :height="88"
+            :grid="4"
+            mirror
+            y-axis
+            x-axis
+            :x-ticks="3"
+            :tick-base="1024"
+            :format="(v: number) => fmt.rate(v)"
+            :from="from"
+            :to="to"
+          />
+          <div class="foot mono">
+            <span>in, above / out, below</span>
+            <span>out {{ fmt.rate(at(pointsOf("netTx"))) }}</span>
+          </div>
+        </PanelBox>
+
+        <PanelBox class="c-disk" label="Disk I/O" :stale="metricsStale">
+          <template #aside>
+            <span class="value mono" :class="{ hovered: cross.active.value }">
+              {{ fmt.rate(at(pointsOf("diskRead"))) }}
+            </span>
+          </template>
+          <MetricChart
+            :series="diskSeries"
+            :height="88"
+            :grid="4"
+            mirror
+            y-axis
+            x-axis
+            :x-ticks="3"
+            :tick-base="1024"
+            :format="(v: number) => fmt.rate(v)"
+            :from="from"
+            :to="to"
+          />
+          <div class="foot mono">
+            <span>read, above / write, below</span>
+            <span>write {{ fmt.rate(at(pointsOf("diskWrite"))) }}</span>
+          </div>
+        </PanelBox>
+
+        <PanelBox class="c-fs" label="Disk usage" :stale="metricsStale">
+          <template #aside>
+            <span>{{ (storage.data.value?.filesystems ?? []).length }} mounts</span>
+          </template>
+          <div class="filesystems">
+            <div v-for="f in storage.data.value?.filesystems ?? []" :key="f.mountpoint" class="fs">
+              <div class="fs-head">
+                <span class="mono">{{ f.mountpoint }}</span>
+                <span class="mono dim">{{ fmt.bytes(f.free) }} free</span>
+              </div>
+              <div class="bar">
+                <span
+                  class="fill"
+                  :style="{ width: `${Math.min(100, f.ratio * 100).toFixed(1)}%`, background: `var(--${fsTone(f.ratio)})` }"
+                />
+              </div>
+              <div class="fs-foot mono">
+                <span>{{ fmt.bytes(f.used) }} of {{ fmt.bytes(f.total) }}</span>
+                <span :style="{ color: `var(--${fsTone(f.ratio)})` }">{{ fmt.percent(f.ratio, 0) }}</span>
+              </div>
+            </div>
+          </div>
+        </PanelBox>
+      </div>
+    </section>
+
+    <!-- What the cards do not draw, on the same axis they are drawn on. -->
+    <section class="section">
+      <div class="head">
+        <span class="label">Pressure and events</span>
+      </div>
+
+      <div class="timeline">
+        <header class="tl-head">
+          <span class="label">Lane</span>
+          <div class="tl-axis mono">
+            <!-- The day slot is always rendered, empty where the date has not
+                 changed, so the times stay on one baseline across the row. -->
+            <span v-for="(t, i) in axis" :key="i" class="tick">
+              <span class="tick-day">{{ t.day ?? "" }}</span>
+              <span>{{ i === axis.length - 1 ? "now" : t.time }}</span>
+            </span>
+          </div>
+          <span class="label right">Reading</span>
+        </header>
+
+        <!-- Dimmed on the same signal as the cards above, which are fetched in
+             the same pass. The Alerts lane below is NOT dimmed: it comes from
+             Alertmanager, which is a different source with a different pulse. -->
+        <div v-for="lane in LANES" :key="lane.key" class="lane" :class="{ dim: !!metricsStale }">
+          <div class="lane-name">
+            <div class="lane-label">{{ lane.label }}</div>
+            <div class="lane-sub mono">{{ lane.sub }}</div>
+          </div>
+          <MetricChart
+            :series="laneSeries(lane)"
+            :tone="lane.tone"
+            :height="30"
+            :y-max="lane.yMax"
+            :format="lane.format"
+            :from="from"
+            :to="to"
+          />
+          <div class="lane-value">
+            <span class="mono now" :style="{ color: `var(--${lane.tone})` }">
+              {{ laneReading(lane) }}
+            </span>
+            <div class="lane-peak mono">peak {{ lanePeak(lane) }}</div>
+          </div>
         </div>
-        <div class="events">
-          <span
-            v-for="m in eventMarks"
-            :key="m.key"
-            class="mark"
-            :class="{ before: m.before }"
-            :style="{ left: m.left }"
-          >
-            <span class="stem" :style="{ background: `var(--${m.tone})` }" />
-            <StatusDot :tone="m.tone" glow :size="7" />
-          </span>
-          <span class="sweep" />
-        </div>
-        <div class="lane-value">
-          <span class="mono now">{{ eventMarks.length }}</span>
-          <div class="lane-peak mono">firing</div>
+
+        <div class="lane">
+          <div class="lane-name">
+            <div class="lane-label">Alerts</div>
+            <div class="lane-sub mono">when each one started</div>
+          </div>
+          <div class="events">
+            <span
+              v-for="m in eventMarks"
+              :key="m.key"
+              class="mark"
+              :class="{ before: m.before }"
+              :style="{ left: m.left }"
+            >
+              <span class="stem" :style="{ background: `var(--${m.tone})` }" />
+              <StatusDot :tone="m.tone" glow :size="7" />
+            </span>
+            <span class="sweep" />
+          </div>
+          <div class="lane-value">
+            <span class="mono now">{{ eventMarks.length }}</span>
+            <div class="lane-peak mono">firing</div>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- Bottom row -->
-    <section class="bottom">
-      <div class="column">
-        <PanelBox label="Findings" :stale="batteryStale">
-        <template #aside>
-          <span v-if="host.doc">{{ host.doc.summary.total }} checks, {{ host.problems.length }} not passing</span>
-        </template>
+    <section class="section">
+      <div class="head">
+        <span class="label">Storage and history</span>
+      </div>
 
-        <ul v-if="host.problems.length" class="findings">
-          <li v-for="c in host.problems" :key="c.id" class="finding-row">
-            <StatusDot :tone="c.status === 'fail' ? 'fail' : c.status === 'warn' ? 'warn' : 'off'" :size="5" />
-            <span class="mono fid">{{ c.id }}</span>
-            <span class="fmsg truncate" :title="c.message">{{ c.message }}</span>
-          </li>
-        </ul>
-        <p v-else class="empty mono">every check passed</p>
-
-          <p v-if="host.doc && !host.doc.mode.routes" class="note mono">
-            The public route battery was not walked in this run. Those checks are absent, not passing.
-          </p>
-        </PanelBox>
-
+      <div class="bottom">
         <PanelBox label="GPU and playback" :stale="metricsStale">
           <div
             v-if="gpu.data.value?.length"
             class="gpu mono"
             :style="{ '--cards': gpu.data.value.length }"
           >
-            <div class="gpu-row head">
+            <div class="gpu-row head-row">
               <span></span>
               <span v-for="c in gpu.data.value" :key="c.id" class="gv">gpu{{ c.id }}</span>
             </div>
@@ -582,97 +776,104 @@ const jellyfinSessions = usePoll(
             consumers are pinned to gpu1 and gpu0 encodes nothing by design.
           </p>
         </PanelBox>
-      </div>
 
-      <PanelBox label="Alerts" sunken :stale="alerts.error.value ? 'alertmanager could not be reached' : null">
-        <template #aside>
-          <span>{{ sortedAlerts.length }} firing</span>
-        </template>
-
-        <ul v-if="sortedAlerts.length" class="alerts">
-          <li v-for="a in sortedAlerts" :key="a.fingerprint ?? a.labels.alertname" class="alert">
-            <div class="alert-head">
-              <StatusDot :tone="a.labels.severity === 'critical' ? 'fail' : 'warn'" :size="5" />
-              <span class="alert-name mono">{{ a.labels.alertname }}</span>
-              <span class="alert-age mono">{{ fmt.sinceIso(a.startsAt, host.now) }}</span>
-            </div>
-            <div class="alert-summary">{{ a.annotations.summary ?? "" }}</div>
-            <div class="alert-detail mono truncate" :title="a.annotations.description">
-              {{ a.annotations.description ?? "" }}
-            </div>
-          </li>
-        </ul>
-        <p v-else class="empty mono">nothing firing</p>
-      </PanelBox>
-
-      <div class="right-column">
-        <PanelBox label="Drives and SMART" :stale="metricsStale">
-          <div class="drives">
-            <div v-for="d in storage.data.value?.drives ?? []" :key="d.device" class="drive">
-              <div class="drive-head">
-                <span class="mono dev">{{ d.device }}</span>
-                <span class="mono model truncate" :title="d.model">{{ d.model }}</span>
-              </div>
-              <div class="drive-grid mono">
-                <span>{{ fmt.celsius(d.temp) }}</span>
-                <span class="right">{{ fmt.powerOnHours(d.hours) }}</span>
-              </div>
-              <div class="smart mono" :class="smartLine(d).tone">{{ smartLine(d).text }}</div>
-            </div>
-
-            <div v-for="f in storage.data.value?.filesystems ?? []" :key="f.mountpoint" class="fs">
-              <div class="fs-head">
-                <span class="mono">{{ f.mountpoint }}</span>
-                <span class="mono dim">{{ fmt.bytes(f.free) }} free</span>
-              </div>
-              <div class="bar">
-                <span
-                  class="fill"
-                  :style="{ width: `${Math.min(100, f.ratio * 100).toFixed(1)}%`, background: `var(--${fsTone(f.ratio)})` }"
-                />
-              </div>
-              <div class="fs-foot mono">
-                <span>{{ fmt.bytes(f.used) }} of {{ fmt.bytes(f.total) }}</span>
-                <span :style="{ color: `var(--${fsTone(f.ratio)})` }">{{ fmt.percent(f.ratio, 0) }}</span>
-              </div>
-            </div>
-          </div>
-        </PanelBox>
-
-        <PanelBox label="Uptime, 30 days" :stale="metricsStale">
+        <PanelBox label="Alerts" sunken :stale="alerts.error.value ? 'alertmanager could not be reached' : null">
           <template #aside>
-            <span>worst five</span>
+            <span>{{ sortedAlerts.length }} firing</span>
           </template>
 
-          <div class="uptime">
-            <div v-for="row in availability.data.value ?? []" :key="row.name" class="uprow">
-              <div class="uphead mono">
-                <span>{{ row.name }}</span>
-                <span :style="{ color: row.worst < 0.999 ? 'var(--warn)' : 'var(--ok)' }">{{ row.summary }}</span>
+          <ul v-if="sortedAlerts.length" class="alerts">
+            <li v-for="a in sortedAlerts" :key="a.fingerprint ?? a.labels.alertname" class="alert">
+              <div class="alert-head">
+                <StatusDot :tone="a.labels.severity === 'critical' ? 'fail' : 'warn'" :size="5" />
+                <span class="alert-name mono">{{ a.labels.alertname }}</span>
+                <span class="alert-age mono">{{ fmt.sinceIso(a.startsAt, host.now) }}</span>
               </div>
-              <UptimeBars :days="row.days" />
-            </div>
-          </div>
+              <div class="alert-summary">{{ a.annotations.summary ?? "" }}</div>
+              <div class="alert-detail mono truncate" :title="a.annotations.description">
+                {{ a.annotations.description ?? "" }}
+              </div>
+            </li>
+          </ul>
+          <p v-else class="empty mono">nothing firing</p>
 
-          <div class="backups">
-            <div v-for="b in backups" :key="b.key" class="backup mono">
-              <StatusDot :tone="backupTone(b.key, b.limit)" :size="5" />
-              <span class="bname">{{ b.label }}</span>
-              <span class="bage">{{ fmt.sinceIso(host.fact(b.key) as string, host.now) }}</span>
-            </div>
-          </div>
+          <!-- The heartbeat is hidden while it is alive, because firing IS the
+               healthy state. Its absence is the finding, and it is the only
+               thing this rule was ever able to say. -->
+          <p v-if="heartbeatLost" class="note lost mono">
+            The alerting heartbeat is not firing, so the notification chain is unproven. Check
+            alertmanager, then ntfy-alertmanager, then ntfy, in that order.
+          </p>
         </PanelBox>
+
+        <div class="right-column">
+          <PanelBox label="Drives and SMART" :stale="metricsStale">
+            <div class="drives">
+              <div v-for="d in storage.data.value?.drives ?? []" :key="d.device" class="drive">
+                <div class="drive-head">
+                  <span class="mono dev">{{ d.device }}</span>
+                  <span class="mono model truncate" :title="d.model">{{ d.model }}</span>
+                </div>
+                <div class="drive-grid mono">
+                  <span>{{ fmt.celsius(d.temp) }}</span>
+                  <span class="right">{{ fmt.powerOnHours(d.hours) }}</span>
+                </div>
+                <div class="smart mono" :class="smartLine(d).tone">{{ smartLine(d).text }}</div>
+              </div>
+            </div>
+          </PanelBox>
+
+          <PanelBox label="Uptime, 30 days" :stale="metricsStale">
+            <template #aside>
+              <span>worst five</span>
+            </template>
+
+            <div class="uptime">
+              <div v-for="row in availability.data.value ?? []" :key="row.name" class="uprow">
+                <div class="uphead mono">
+                  <span>{{ row.name }}</span>
+                  <span :style="{ color: row.worst < 0.999 ? 'var(--warn)' : 'var(--ok)' }">{{ row.summary }}</span>
+                </div>
+                <UptimeBars :days="row.days" />
+              </div>
+            </div>
+
+            <div class="backups">
+              <div v-for="b in backups" :key="b.key" class="backup mono">
+                <StatusDot :tone="backupTone(b.key, b.limit)" :size="5" />
+                <span class="bname">{{ b.label }}</span>
+                <span class="bage">{{ fmt.sinceIso(host.fact(b.key) as string, host.now) }}</span>
+              </div>
+            </div>
+          </PanelBox>
+        </div>
       </div>
     </section>
   </div>
 </template>
 
 <style scoped>
+/* Two rhythms, not one. --gap-lg between sections and --gap inside them is what
+   makes this read as four sections rather than as one stack of panels. */
 .page {
   padding: 16px var(--pad-page) var(--pad-page);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--gap-lg);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .os {
@@ -689,52 +890,28 @@ const jellyfinSessions = usePoll(
   border: 1px solid var(--warn-edge);
 }
 
-
-/* --- actionable strip --- */
-.strip {
+/* --- the cards --------------------------------------------------------- */
+/* Twelve columns, because the two rows do not divide the same way: CPU needs
+   the width for twelve lines, and the second row is three equal things. */
+.cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 9px;
+  grid-template-columns: repeat(12, 1fr);
+  gap: var(--gap);
+  align-items: start;
 }
 
-.finding {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 10px 13px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--warn-edge);
-  background: var(--warn-tint);
-  min-width: 0;
+.c-cpu {
+  grid-column: span 7;
 }
 
-.finding.fail {
-  border-color: var(--fail-edge);
-  background: var(--fail-tint);
+.c-mem {
+  grid-column: span 5;
 }
 
-.finding-body {
-  min-width: 0;
-}
-
-.finding-title {
-  font: var(--t-ui-md);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.finding-id {
-  font: var(--t-mono-sm);
-  color: var(--fg-5);
-  margin-top: 2px;
-}
-
-/* --- headline charts --- */
-.headlines {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 9px;
+.c-net,
+.c-disk,
+.c-fs {
+  grid-column: span 4;
 }
 
 .value {
@@ -751,16 +928,32 @@ const jellyfinSessions = usePoll(
 .foot {
   display: flex;
   justify-content: space-between;
+  gap: 10px;
   margin-top: 8px;
   font: var(--t-mono-sm);
   color: var(--fg-5);
 }
 
-/* --- timeline --- */
-.timeline {
-  margin-top: 6px;
+.swap {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
 }
 
+.swap-head {
+  display: flex;
+  justify-content: space-between;
+  font: var(--t-mono-sm);
+  color: var(--fg-5);
+}
+
+.filesystems {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* --- timeline ----------------------------------------------------------- */
 .tl-head,
 .lane {
   display: grid;
@@ -889,52 +1082,19 @@ const jellyfinSessions = usePoll(
   pointer-events: none;
 }
 
-/* --- bottom --- */
+/* --- bottom ------------------------------------------------------------- */
 .bottom {
   display: grid;
   grid-template-columns: 1fr 1fr 340px;
-  gap: 10px;
-  margin-top: 10px;
+  gap: var(--gap);
   align-items: start;
 }
 
-.column,
 .right-column {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--gap);
   min-width: 0;
-}
-
-.findings {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-.finding-row {
-  display: grid;
-  grid-template-columns: 12px 190px 1fr;
-  gap: 9px;
-  align-items: center;
-  padding: 5px 4px;
-  border-radius: var(--r-xs);
-}
-
-.finding-row:hover {
-  background: oklch(1 0 0 / 0.04);
-}
-
-.fid {
-  font: var(--t-mono-sm);
-  color: var(--fg-5);
-}
-
-.fmsg {
-  font: var(--t-mono-sm);
-  color: var(--fg-3);
 }
 
 .empty {
@@ -949,6 +1109,10 @@ const jellyfinSessions = usePoll(
   border-top: 1px solid var(--line);
   font: var(--t-mono-xs);
   color: var(--fg-5);
+}
+
+.note.lost {
+  color: var(--fail-text);
 }
 
 .alerts {
@@ -988,7 +1152,7 @@ const jellyfinSessions = usePoll(
   margin-top: 2px;
 }
 
-/* --- drives --- */
+/* --- drives ------------------------------------------------------------- */
 .drives {
   display: flex;
   flex-direction: column;
@@ -1062,13 +1226,14 @@ const jellyfinSessions = usePoll(
 .fill {
   display: block;
   height: 100%;
+  background: var(--ok);
 }
 
 .fs-foot {
   color: var(--fg-5);
 }
 
-/* --- uptime --- */
+/* --- uptime ------------------------------------------------------------- */
 .uptime {
   display: flex;
   flex-direction: column;
@@ -1108,7 +1273,7 @@ const jellyfinSessions = usePoll(
   color: var(--fg-5);
 }
 
-/* --- gpu --- */
+/* --- gpu ---------------------------------------------------------------- */
 .gpu {
   display: flex;
   flex-direction: column;
@@ -1125,7 +1290,7 @@ const jellyfinSessions = usePoll(
   color: var(--fg-5);
 }
 
-.gpu-row.head {
+.gpu-row.head-row {
   color: var(--fg-dim);
   font: var(--t-mono-xs);
 }
@@ -1136,7 +1301,7 @@ const jellyfinSessions = usePoll(
   text-align: right;
 }
 
-.gpu-row.head .gv {
+.gpu-row.head-row .gv {
   color: var(--fg-dim);
   font-weight: 400;
 }
@@ -1147,12 +1312,12 @@ const jellyfinSessions = usePoll(
 }
 
 @media (max-width: 1280px) {
-  .bottom {
-    grid-template-columns: 1fr 1fr;
+  .cards > * {
+    grid-column: 1 / -1;
   }
 
-  .headlines {
-    grid-template-columns: 1fr;
+  .bottom {
+    grid-template-columns: 1fr 1fr;
   }
 
   .right-column {

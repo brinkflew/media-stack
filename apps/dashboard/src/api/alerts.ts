@@ -32,10 +32,30 @@ export async function fetchAlerts(signal?: AbortSignal): Promise<AmAlert[]> {
   return await fetchJson<AmAlert[]>(`${BASE}/alerts?${params}`, { signal });
 }
 
+/**
+ * The dead man's switch. `expr: vector(1)` in apps/prometheus/rules, so it is
+ * ALWAYS firing, and firing is the HEALTHY state: its arrival on the phone each
+ * day is the only proof the four-hop notification chain works, and its absence
+ * is the finding.
+ *
+ * Which makes it the one alert that must not be drawn like an alert. It was a
+ * permanent amber row in the panel and a permanent amber tick on the timeline,
+ * rendered identically to a real warning, because this module fetched with no
+ * filter and the page coloured anything that was not `critical` as warn.
+ */
+export const HEARTBEAT_SEVERITY = "heartbeat";
+
+export function isHeartbeat(a: AmAlert): boolean {
+  return a.labels.severity === HEARTBEAT_SEVERITY;
+}
+
 /** Sort worst-first, then most recent first. Critical before warning, because
- *  the whole point of a grouped view is that the top line is the one to read. */
+ *  the whole point of a grouped view is that the top line is the one to read.
+ *  The heartbeat ranks last EXPLICITLY rather than by falling off the end of
+ *  the ternary - it is not a milder problem, it is not a problem. */
 export function bySeverityThenTime(a: AmAlert, b: AmAlert): number {
-  const rank = (x: AmAlert) => (x.labels.severity === "critical" ? 0 : x.labels.severity === "warning" ? 1 : 2);
+  const rank = (x: AmAlert) =>
+    x.labels.severity === "critical" ? 0 : x.labels.severity === "warning" ? 1 : isHeartbeat(x) ? 3 : 2;
   const d = rank(a) - rank(b);
   if (d !== 0) return d;
   return Date.parse(b.startsAt) - Date.parse(a.startsAt);

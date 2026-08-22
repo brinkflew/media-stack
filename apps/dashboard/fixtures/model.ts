@@ -158,6 +158,16 @@ const CHECKS: Check[] = [
   { section: "deploy", id: "deploy.boot_free", status: "pass", message: "171 MB free of 350 MB" },
   { section: "deploy", id: "deploy.update_run", status: "pass", message: "last ran 9h ago" },
   { section: "storage", id: "storage.media_mount", status: "warn", message: "/mnt/media 91% used, 3.2 TB free of 36 TB" },
+  // A `note`, which bin/verify-host.sh emits for a check that COULD NOT RUN.
+  // It is here because the two findings surfaces used to disagree about exactly
+  // this status - amber in the strip at the top, grey in the list below it -
+  // and neither fixture nor lint could see it, because no fixture had one.
+  {
+    section: "storage",
+    id: "storage.smart_selftest",
+    status: "note",
+    message: "smartctl reports no self-test log for dm-0; not measured rather than passing",
+  },
   { section: "gpu_cdi", id: "gpu.count", status: "pass", message: "1 GPU visible" },
   { section: "gpu_cdi", id: "cdi.spec_count", status: "pass", message: "exactly one spec at /run/cdi/nvidia.yaml" },
   { section: "gpu_cdi", id: "cdi.driver_match", status: "pass", message: "spec names 580.173.02, which is running" },
@@ -354,6 +364,19 @@ export function alerts(): AmAlert[] {
         description: "Retention runs from the workstation: bin/backup-offsite.sh. It grows until it does.",
       },
       3 * 86400,
+    ),
+    // THE DEAD MAN'S SWITCH, AND IT MUST NOT RENDER AS A PROBLEM. `expr:
+    // vector(1)`, so it is always firing and firing is the healthy state. It is
+    // here precisely so the fixture exercises the filter that hides it: a
+    // fixture without it would let the heartbeat come back as a permanent amber
+    // row and say nothing.
+    active(
+      { alertname: "Watchdog", severity: "heartbeat" },
+      {
+        summary: "Alerting is alive",
+        description: "Sent once a day through the whole chain. If this stops arriving, the chain is broken.",
+      },
+      19 * 3600,
     ),
   ];
 }

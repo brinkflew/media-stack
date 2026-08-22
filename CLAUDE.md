@@ -635,6 +635,16 @@ signal read green.
   says "has never run" and FAILs from the FIRST deferral. Got wrong twice before it was measured;
   the check grades on the deferral age and reads none of the unit's own timestamps.
 
+### The dashboard measured one thing twice, and drew another thing two ways
+- **`sum(rate(node_disk_*))` counted the media spindle twice**: diskstats drops partitions and not
+  device-mapper, so dm-0 was added to the sda it sits on. Measured, 0.0003% apart.
+- A byte axis stepped in base ten is round before the unit conversion and ragged after it - a
+  16 GiB frame labelled "0 B / 5 GB / 9 GB / 14 GB". Byte and rate axes step on powers of two.
+- **The same findings were drawn twice and disagreed about `note`** - amber in the strip, grey in
+  the list - and no fixture had one, so nothing could see it. `checkTone()` is the one mapping.
+- **The dead man's switch was rendered as a warning.** Filtered out now; and because hiding it must
+  not hide its absence, a response without it raises a `fail` line in its place.
+
 ## Target architecture
 
 **Steps 1 and 2 are done.** The host is uCore `stable-nvidia-lts` and every service is a rootless

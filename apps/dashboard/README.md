@@ -170,10 +170,17 @@ available, and these files are the authority anyway.
 ## Developing
 
 **The fixtures are deliberately unhealthy.** A fixture where everything passes exercises the state
-that needs the least design work; the interesting layouts are an actionable strip with something in
+that needs the least design work; the interesting layouts are a Findings panel with something in
 it, a container in a restart loop, a disk with a reallocated sector, thirty days of uptime where
 six are missing. So the synthetic host has all of those, and they are failures the real one has
 actually had.
+
+**Four of those exist to exercise a rule rather than a layout**, and deleting them would make the
+fixture prettier and blinder: a `note`-status check, because the two findings surfaces used to
+disagree about that status and nothing could see it; the `Watchdog` heartbeat, because it must
+render as nothing at all; an hour with no `memoryCache` sample, because a hole in one band of a
+stack has to break every band above it; and `netTx`/`diskWritten` deliberately unequal to
+`netRx`/`diskRead`, because that is what proves a mirrored chart has not swapped its halves.
 
 `fixtures/prometheus.ts` answers by **exact query string** against `src/queries.ts`, and warns at
 startup about any catalogued query it does not cover. A fixture that has quietly stopped covering

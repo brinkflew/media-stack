@@ -30,6 +30,18 @@ export const SYSTEM = {
   cpuBusy: `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[${RATE}]))`,
 
   /**
+   * The same thing WITHOUT the avg(), so it returns one series per hardware
+   * thread - twelve here, because SMT is on deliberately (see CLAUDE.md, "The
+   * segmentation"). The aggregate above hides the case this exists to show: a
+   * single-threaded job pinning one core reads as 8% busy across twelve, which
+   * looks like an idle machine and is not.
+   *
+   * These series already exist in the TSDB; asking for them per core costs
+   * nothing against the cardinality budget, because a query creates no series.
+   */
+  cpuPerCore: `1 - rate(node_cpu_seconds_total{mode="idle"}[${RATE}])`,
+
+  /**
    * MemAvailable, not MemFree. Free excludes reclaimable page cache, so a
    * healthy Linux host looks permanently out of memory - which is the same
    * misreading CLAUDE.md documents at length for Jellyfin's cgroup.
@@ -37,6 +49,36 @@ export const SYSTEM = {
   memoryUsed: "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
   memoryUsedRatio: "1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes",
   memoryTotal: "node_memory_MemTotal_bytes",
+
+  /**
+   * THE FOUR BANDS OF THE MEMORY STACK, AND THEY SUM TO MemTotal BY
+   * CONSTRUCTION. That is the only thing that makes pinning the chart's frame
+   * to MemTotal honest, and it is why `memoryUsed` above is NOT the bottom
+   * band: it is MemAvailable-based, and MemAvailable already contains most of
+   * Cached and Buffers, so stacking it under them counts them twice. The stack
+   * would then overshoot the ceiling, where projectY clamps each cumulative top
+   * on its own - the top band thins away and the overshoot is absorbed silently
+   * rather than drawn.
+   *
+   *   used = MemTotal - MemFree - Buffers - Cached - SReclaimable
+   *   used + Buffers + (Cached + SReclaimable) + MemFree == MemTotal, exactly.
+   */
+  memoryUsedParts:
+    "node_memory_MemTotal_bytes - node_memory_MemFree_bytes - node_memory_Buffers_bytes" +
+    " - node_memory_Cached_bytes - node_memory_SReclaimable_bytes",
+  memoryBuffers: "node_memory_Buffers_bytes",
+  memoryCache: "node_memory_Cached_bytes + node_memory_SReclaimable_bytes",
+  memoryFree: "node_memory_MemFree_bytes",
+
+  /**
+   * SWAP IS NOT RAM AND IS NOT A FIFTH BAND. The stack is pinned to MemTotal;
+   * adding four gigabytes of swap to it would draw a machine with twenty. It
+   * gets its own bar with its own ceiling instead. Measured on this host on
+   * 2026-08-22: 4.0 GB total with 1.2 GB in use, so it is neither absent nor
+   * decorative.
+   */
+  swapTotal: "node_memory_SwapTotal_bytes",
+  swapUsed: "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes",
 
   load1: "node_load1",
 
@@ -53,8 +95,15 @@ export const SYSTEM = {
   netRx: `sum(rate(node_network_receive_bytes_total{device!="lo"}[${RATE}]))`,
   netTx: `sum(rate(node_network_transmit_bytes_total{device!="lo"}[${RATE}]))`,
 
-  diskRead: `sum(rate(node_disk_read_bytes_total[${RATE}]))`,
-  diskWritten: `sum(rate(node_disk_written_bytes_total[${RATE}]))`,
+  /**
+   * WHOLE DISKS ONLY. node-exporter's diskstats collector already drops
+   * partitions, but NOT device-mapper, and dm-0 is stacked on sda - so a bare
+   * sum() counts every byte of the media spindle twice. Measured on this host
+   * on 2026-08-22: dm-0 at 782.41187 GB read against sda at 782.41410 GB,
+   * which is one workload seen at two layers rather than two workloads.
+   */
+  diskRead: `sum(rate(node_disk_read_bytes_total{device!~"dm-.*"}[${RATE}]))`,
+  diskWritten: `sum(rate(node_disk_written_bytes_total{device!~"dm-.*"}[${RATE}]))`,
 
   /**
    * CPU pressure: the share of time at least one task was stalled waiting for
@@ -77,7 +126,10 @@ export const SYSTEM = {
   diskPending: "home_server_disk_pending_sectors",
   diskMediaErrors: "home_server_disk_media_errors_total",
 
-  uptime: "home_server_uptime_seconds",
+  /** NOT home_server_uptime_seconds, which nothing has ever emitted - it
+   *  returned empty for as long as it existed. The page reads uptime from
+   *  status.json's facts; this is the one with a time axis. */
+  bootTime: "node_boot_time_seconds",
 } as const;
 
 export const SERVICES = {
