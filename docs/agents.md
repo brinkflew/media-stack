@@ -507,14 +507,25 @@ publishes on `127.0.0.1` and conduct reaches *it*: no firewalld change, no new S
 **`paths.ts` carries `conduct` as an outbound-only pseudo-node that may never appear as a `to`** -
 which in that file is a modelling rule and here is the security property.
 
-**A Windmill flow step suspends; conduct answers it.** One flow, `f/agents/phase`, whose first
-module is an `identity` step carrying nothing but a `suspend`. conduct polls
-`GET /jobs/queue/list?suspended=true`, and **that one call is the whole of discovery** - measured
-against 1.792 rather than assumed, it returns `args` *and* `flow_status`, the latter carrying `step`
-and a `modules[]` each with an `id`. It then dispatches the phase named in the flow's arguments and
-answers with `POST /jobs/flow/resume/{id}`, the authenticated endpoint - not a signed `jobs_u` URL,
-which exists so a human with no login can approve from a phone and would put a bearer secret in a
-log line if conduct minted one for itself.
+**A Windmill flow step suspends; conduct answers it.** One flow, `f/agents/phase`, two modules:
+`await_conduct`, an `identity` step carrying nothing but a `suspend`, and `conduct_phase`, which is
+what actually waits. conduct polls `GET /jobs/queue/list?suspended=true`, fetches each suspended job
+with `GET /jobs_u/get/{id}`, dispatches the phase named in the flow's arguments, and answers with
+`POST /jobs/flow/resume/{id}` - the authenticated endpoint, not a signed `jobs_u` URL, which exists
+so a human with no login can approve from a phone and would put a bearer secret in a log line if
+conduct minted one for itself.
+
+**Two things about that had to be measured, and the OpenAPI says otherwise on both.**
+`jobs/queue/list` **declares** `args` and `flow_status` on `QueuedJob` and returns them **null** -
+the list is a lightweight projection, so the schema describes the type and not what the endpoint
+fills. And **a `suspend` belongs to the module it precedes**: the module carrying it reads `Success`
+once it has run, and the module *after* it reads `WaitingForEvents` and is what `flow_status.step`
+points at. The first version of this flow put conduct's name on the module declaring the wait, so
+conduct read the id of the module that was waiting, found a name it did not own, and skipped its own
+work - **no error, no log line, and a job that would have suspended for its full 24-hour timeout**.
+Hence two modules, named for what each one is. `current_module` matches on the type as well as the
+index, because `step` alone names whichever module the flow is at rather than one anybody is waiting
+on.
 
 Two properties fall out of using suspend, and both are load-bearing:
 
@@ -547,7 +558,15 @@ can edit with nothing in `git diff` - the exact shape `agents.worker_lanes` exis
 `conduct/flows/phase.py` is the source of truth and drift is self-healing rather than merely
 detected. That costs no new check and no new metric, and it means a UI edit survives until the next
 restart and no longer: the same bargain `.env` already makes. `conduct flow --check` says what a
-restart would change.
+restart would change - **after stripping Windmill's own additions by name**, because it resolves a
+dependency lock into every `rawscript` module and a byte comparison therefore never matches. By name
+rather than by "git's keys must match and the server may add anything", since that would also accept
+a `retry:` or a `cache_ttl:` somebody added in the UI, which is the drift the check is for.
+
+**`agents.approvals_pending` counts conduct's suspended steps as well as a human's**, and cannot
+separate them in SQL - both are `suspend > 0` on the same mechanism. It is left counting both, and
+its message says so: conduct claims its own within one 60s poll, so anything old enough to reach the
+12-hour threshold is genuinely stuck whoever it was waiting on, which is the finding either way.
 
 **The token is a workspace-owner token, and that is an accepted risk rather than an oversight.**
 Windmill CE's scopes do not express *"may list and resume jobs and nothing else"*. What bounds it is

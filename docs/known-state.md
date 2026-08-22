@@ -1292,9 +1292,30 @@ Built 2026-08-22 with the polling half of the orchestrator.
   and what is conduct's and what is a human's is decided by the **module id**, which comes from the
   flow definition in git rather than from a payload the step computed. **conduct answering an
   approval step would be conduct approving its own gate**, so the guard is asserted by a test that
-  fails the moment it is removed. Two properties come free: refusing costs nothing, because the step
-  simply stays suspended; and discovery is **one** HTTP call, because `jobs/queue/list` returns
-  `args` and `flow_status` together - measured against 1.792, not assumed.
+  fails the moment it is removed, and proved live against a planted human gate that conduct left
+  suspended and never once mentioned. Refusing costs nothing either, because a refused step simply
+  stays suspended - so the cascade can stay as blunt as it is.
+- **`jobs/queue/list` DECLARES `args` and `flow_status` and returns both null.** The OpenAPI
+  describes `QueuedJob`'s type, not what that endpoint populates; the list is a lightweight
+  projection. Discovery is therefore one call plus one `jobs_u/get` per suspended job, which is
+  cheap only because the normal number of suspended jobs is zero. Reading the schema is not
+  measuring the endpoint.
+- **A `suspend` belongs to the module it PRECEDES, which is the reverse of the obvious reading.**
+  The module carrying it reads `Success` once it has run and the module *after* it reads
+  `WaitingForEvents` and is what `flow_status.step` points at. The first flow put conduct's name on
+  the module declaring the wait, so conduct read the id of the module that was waiting, found a name
+  it did not own, and skipped it - **no error, no log line, and a job that would have sat suspended
+  for its full 24-hour timeout**. Match on the module type as well as the index: `step` alone names
+  whichever module the flow is at, and only `WaitingForEvents` means somebody is being waited on.
+- **A drift check that fires on every flow the server has ever stored is not a check.** Windmill
+  resolves a dependency lock into each `rawscript` module, so comparing a deployed flow against git
+  byte-for-byte never matches. Strip the generated keys **by name**: "git's keys must match and the
+  server may add anything" would also accept a `retry:` or a `cache_ttl:` added in the UI, which is
+  the drift the check exists for.
+- **`agents.approvals_pending` counts conduct's steps as well as a human's**, and cannot tell them
+  apart in SQL, because both are `suspend > 0` on the same mechanism. It is left counting both and
+  the message says so: conduct claims its own within one 60s poll, so anything reaching the 12-hour
+  threshold is genuinely stuck whoever it was waiting on.
 - **The answer is written to the database before it is delivered, and the order is the whole point.**
   A phase that succeeded and then could not be reported is twenty minutes already spent;
   rediscovering the same suspended step next cycle spends it again. A row with a payload and no

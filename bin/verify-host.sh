@@ -2061,6 +2061,13 @@ if [ -z "$GREENBOOT" ]; then
 	# suspends, and never repeats it - so an approval nobody saw waits for ever
 	# while everything reads green. A pending approval is normal; a twelve-hour
 	# old one means the notification was missed.
+	#
+	# IT COUNTS CONDUCT'S STEPS TOO, since 2026-08-22, and the wording below says
+	# so rather than pretending otherwise. Work reaches conduct as a suspended step
+	# on the same mechanism the human gates use, so `suspend > 0` cannot tell the
+	# two apart in SQL. In practice a conduct step is claimed within one 60s poll,
+	# so anything old enough to reach the 12h threshold is genuinely stuck whoever
+	# it was waiting on - which is the finding either way.
 	if [ -z "$wm_up" ]; then
 		fact agents_approvals_pending ""
 		note agents.approvals_pending "windmill-db is not running, so pending approvals cannot be read"
@@ -2076,11 +2083,11 @@ if [ -z "$GREENBOOT" ]; then
 		if [ -z "$ap_n" ]; then
 			note agents.approvals_pending "the suspended-job count could not be read - not measured"
 		elif [ "$ap_n" -eq 0 ]; then
-			ok agents.approvals_pending "nothing is waiting on a human"
+			ok agents.approvals_pending "nothing is suspended - no gate waiting on a human, and no step waiting on conduct"
 		elif [ "$ap_age" -gt 43200 ]; then
-			warn agents.approvals_pending "$ap_n approval(s) pending, the oldest for $((ap_age / 3600))h - Windmill notified once when it suspended and nothing repeats that, so this is the only thing that will say so"
+			warn agents.approvals_pending "$ap_n suspended step(s), the oldest for $((ap_age / 3600))h - conduct claims its own within one 60s poll, so at this age it is a human gate nobody saw. Windmill notified once when it suspended and nothing repeats that, so this is the only thing that will say so"
 		else
-			ok agents.approvals_pending "$ap_n approval(s) pending, oldest $((ap_age / 3600))h"
+			ok agents.approvals_pending "$ap_n suspended step(s) - a human gate, or one conduct has not polled for yet - oldest $((ap_age / 3600))h"
 		fi
 	fi
 

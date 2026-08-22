@@ -463,6 +463,12 @@ signal read green.
   SELinux denial or a firewalld hole. In `paths.ts` that is `conduct` never appearing as a `to`.
 - **Work is a suspended flow step, addressed by MODULE ID from git** - not by a payload. conduct
   answering an approval step would be conduct approving its own gate.
+- **`jobs/queue/list` declares `args` and `flow_status` and returns both null** - the schema
+  describes the type, not what the endpoint fills. Reading the schema is not measuring the endpoint.
+- **A `suspend` belongs to the module it PRECEDES**, so the module reading `WaitingForEvents` is the
+  next one. Naming the wrong one made conduct skip its own work with no error anywhere.
+- A flow drift check must strip Windmill's generated `lock` by name, or it fires on every flow.
+- `agents.approvals_pending` counts conduct's suspended steps too and cannot separate them in SQL.
 - **The answer is stored before it is delivered**, so an undeliverable one retries the resume and
   never the twenty-minute phase.
 - **An unset token HOLDS and a 401 FAILS the cycle.** A rollout must not look like a fault; a
