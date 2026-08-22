@@ -577,8 +577,8 @@ in the UI is a browser-reachable kill switch for the fleet's ability to take wor
 because the quadlet still says otherwise. `windmill-worker-verify` was built as the *one verify at a
 time* mechanism, on the source design where Windmill dispatched. Under polling, **conduct's
 one-lease-per-project is the semaphore** - a suspended step occupies no worker at all - so the lane
-is bookkeeping and spare capacity rather than a limit. `agents.worker_lanes` still asserts it listens
-to `verify` alone, which remains worth knowing, and remains a row in Postgres rather than the quadlet.
+is bookkeeping and spare capacity rather than a limit. See the last item under *what is deliberately
+not built yet* for why the `verify` tag was **not** added to make it routable.
 
 ## What is deliberately not built yet
 
@@ -603,7 +603,19 @@ neither used nor watched. When it lands it is **two** fine-grained tokens, one r
 workspace secret. The runner gets neither, and `tests/test_phase.py` asserts that no phase argv
 carries `--secret` or a token.
 
-**`verify` is not yet selectable as a tag.** `global_settings.custom_tags` reads `["chromium"]` and
-there is no `worker__verify` row in `config`, so the lane exists and is pinned by its quadlet but
-nothing can route a flow step to it. That is the polling step's problem and is named here so it is
-not discovered there.
+**`verify` is still not selectable as a tag, and the polling step DECIDED NOT TO ADD IT.**
+`global_settings.custom_tags` reads `["chromium"]` and there is no `worker__verify` row in `config`,
+so the lane exists, is pinned by its quadlet, and nothing can route a flow step to it. That was
+carried here as a problem for the polling step to solve; solving it turned out to be the wrong move.
+
+**The lane stopped being a semaphore when the arrow inverted.** It was built as the *one verify at a
+time* mechanism on a design where Windmill dispatched. Under polling, **conduct's
+one-lease-per-project is the semaphore** and a suspended step occupies no worker at all - so routing
+`f/agents/phase` to the verify lane would serialise nothing, and would couple every flow to one
+worker being up. Adding the tag would be **runtime state in Postgres added for decoration**, which
+is the exact shape `agents.worker_lanes` exists to distrust.
+
+So the lane is spare capacity and bookkeeping, `agents.worker_lanes` keeps asserting it listens to
+`verify` alone - which stays worth knowing, and stays a row in Postgres rather than the quadlet -
+and the tag lands when something genuinely needs serialising at the Windmill layer rather than at
+conduct's.
