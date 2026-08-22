@@ -1265,6 +1265,21 @@ in front of every verification from that day on.
   build on the base it was given"* - a refusal that names the phase for something the refresh did.
   The fetch goes in `prepare_worktree`, where it gives the phase a fresh base and lets verification
   measure against the same one.
+- **A dispatch refreshes the mirror itself, and the base has to be PINNED at that moment or it moves
+  under the finished run.** `prepare_worktree` fetches before it clones, so a phase never runs
+  yesterday's code and the nightly timer is only a backstop. But `conduct verify` runs later and read
+  the base **live** out of staging, which re-fetches from the mirror on every call - so the nightly
+  timer, or any other phase's dispatch refresh, changed the base of a run that was already over. The
+  narrowed diff is the quiet half; the loud half is that once `main` advances at all,
+  `merge-base --is-ancestor` fails and a good run is refused with *"the phase handed back history
+  that does not build on the base it was given"*, **naming the phase for what the refresh did**. The
+  base is a column on the run row now, and a pin that no longer resolves - a force-push on the base
+  branch - is reported rather than silently replaced.
+- **`CREATE TABLE IF NOT EXISTS` does not add a column to a table that already exists**, and the
+  failure is not at deploy time: the statement is a no-op, the column is silently absent, and the
+  first `UPDATE` naming it raises inside a phase that has already run. Migrate by inspecting
+  `pragma_table_info` rather than by catching the exception - "duplicate column name" and a real SQL
+  error arrive as the same `OperationalError`.
 - **A mirror that stopped fetching is indistinguishable from one nobody has pushed to.** Its refs
   are valid, every clone works, every phase runs, and the only thing that is wrong is that the diff
   a human approves is against a base GitHub moved past. `conduct/verify.py` refuses at 72h, which is

@@ -454,7 +454,11 @@ signal read green.
   and GitHub answers a valid key for the wrong repository with `repository not found` - which reads
   as a bad URL. `-F /dev/null` is the fix.
 - **Refreshing the base at verification time breaks `merge-base --is-ancestor`**, so a good run is
-  refused for something the refresh did. Fetch at dispatch instead.
+  refused for something the refresh did. Fetch at dispatch, and **pin the base on the run row** -
+  verify runs later, and reading it live lets the nightly timer move it under a finished run.
+- **`CREATE TABLE IF NOT EXISTS` does not add a column to an existing table**, and the first UPDATE
+  naming it raises inside a phase that already ran. Migrate on `pragma_table_info`, not on the
+  exception.
 - A mirror that stopped fetching looks exactly like one nobody pushed to. `FETCH_HEAD`'s mtime dates
   the attempt, not the change.
 

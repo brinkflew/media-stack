@@ -90,6 +90,22 @@ wrong repository with `repository not found`**, which reads as a typo in the rem
 as the wrong identity. Dropping the config file from consideration is deterministic; ordering
 identities against it is not.
 
+**A dispatch refreshes the mirror before it clones, so a phase is never running yesterday's code.**
+The nightly timer is a backstop for the paths that never dispatch - not the freshness mechanism.
+`prepare_worktree` fetches from GitHub, then clones, then checks out `origin/<ref>`, so the code a
+phase runs is `main` as it stood the moment the phase started.
+
+**The base is pinned on the run row at that same moment, because `verify` runs later.** It used to
+read the base live out of staging, which re-fetches from the mirror on every call - so the nightly
+timer, or *any other phase's dispatch refresh*, moved the base of a run that had already finished.
+Two ways that hurts, and the second is the expensive one: the diff a human approves is narrower than
+the diff the phase produced, since files that landed on `main` in between stop appearing; and once
+`main` has advanced at all, `merge-base --is-ancestor base head` fails and a good run is refused with
+*"the phase handed back history that does not build on the base it was given"* - **blaming the phase
+for what the refresh did**. `verify` prefers the pin, falls back to reading live for a tree conduct
+did not dispatch, and reports the move as a **finding** rather than a refusal, because the human at
+the gate should know `main` shifted under it.
+
 **The refresh runs at `prepare_worktree` and deliberately NOT inside `verify`.** Refreshing at
 verification time looks like the obvious improvement on a 72-hour refusal and is a bug: `main`
 advancing after the phase branched makes `merge-base --is-ancestor base head` fail, so a fresher
