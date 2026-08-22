@@ -446,6 +446,20 @@ signal read green.
 - **The file that decides what a check means is usually not the file a short list names**, which is
   why the protected paths are two tiers - and why a deleted test escapes both.
 
+### A filesystem that counts against the memory ceiling, and a browser that fills it
+- **A tmpfs inside a container is part of its MEMORY budget**, unreclaimable without swap, so a full
+  one pins the cgroup at `MemoryHigh` for ever. `/tmp` 2g plus `/dev/shm` 1g inside a 3G `MemoryMax`
+  could reach the hard limit with every process behaving.
+- **`--shm-size` was inert** because podman mounts `/dev/shm` `noexec` and Chromium falls back to
+  `$TMPDIR` - the `exec` flag that makes `/tmp` usable is what made Chromium prefer it. 1,925 MB in
+  969 unlinked fds.
+- **`MemoryHigh` throttles and does not kill**, so `oom_kill` stayed 0, nothing failed, nothing
+  paged, and `cpu.stat` proved CPU innocent. The browser said `ERR_INSUFFICIENT_RESOURCES` and
+  Playwright said `element(s) not found` - which is a different sentence from "not visible".
+- **`du` cannot see an unlinked file**: 49 MB against `df`'s 2,047 MB. Only `df` and `/proc/*/fd`.
+- **A container is not memory- or CPU-namespaced**, so Chromium sizes pools from the host's 15.8 GB
+  and node from `nproc` 12, inside a 3 GB, 4-core cgroup. The hosting side has to leave room.
+
 ### Two defects in one uCore image
 - `policy.json` shipped truncated with NUL padding: nothing could be pulled or built, 22 running
   containers stayed healthy throughout, and **`jq` accepts the broken file**. The repair is a local

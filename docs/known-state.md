@@ -1188,6 +1188,53 @@ and `(False, 'db')` under the narrow set for the runner's.
   `home-server-promote.service` started Tdarr every 10 minutes. `After=` for ordering, never
   `Wants=`.
 
+## A filesystem that counts against the memory ceiling, and a browser that fills it
+
+Diagnosed 2026-08-22, after `conduct verify` failed three times in a row and the first two readings
+of it were both wrong.
+
+- **A tmpfs inside a container is part of that container's MEMORY budget, not separate from it.**
+  Its pages are charged to the cgroup that dirties them and, with no swap reachable, they cannot be
+  reclaimed - so a full tmpfs pins `memory.current` at `MemoryHigh` and the kernel throttles the
+  allocator instead of freeing anything. The runner mounted `/tmp` at **2g** and `/dev/shm` at
+  **1g** under a `MemoryMax` of **3G**: the two filesystems could reach the hard limit between them
+  with every process behaving perfectly. The sizing comment in `conduct/phase.py` had reasoned about
+  exactly this hazard and then compared **one** filesystem against **MemoryMax**, when the test is
+  the **sum** against **`MemoryHigh` minus the working set**.
+- **`--shm-size` was inert, and `/dev/shm` reading zero is what proves it.** podman mounts
+  `/dev/shm` `noexec`; Chromium's `GetShmemTempDir()` falls through to `GetTempDir()` when it needs
+  an executable mapping, and `GetTempDir()` reads `$TMPDIR`. So the 1 GB it was given went unused
+  across three full gate runs while it put **1,925 MB across 969 unlinked fds** into `/tmp` - which
+  the invocation had mounted `exec` deliberately, because `noexec` there breaks uv's managed
+  interpreters and node's temporary binaries. **The flag that made `/tmp` work is the flag that made
+  Chromium prefer it.**
+- **The failure was invisible to every signal this stack has.** `memory.events max` and `oom_kill`
+  both stayed **0** for the whole run - `MemoryHigh` throttles, it does not kill - so no unit
+  failed, no container went unhealthy, no check fired and no alert reached the phone. `cpu.stat`
+  `nr_throttled` was **0**, which retired the CPU-starvation theory on a number. What the browser
+  reported was `net::ERR_INSUFFICIENT_RESOURCES` on 88 and 101 Vite module requests, so the SPA
+  never mounted and Playwright said **`element(s) not found`** - not "not visible". A page that
+  renders late and a page that never renders produce different words, and the difference is the
+  whole diagnosis.
+- **`du` cannot see an unlinked file, and that is why two readings were wrong.** `df` reported
+  2,047 MB used while `du -x -d2 /tmp` summed to 49 MB, because a deleted-but-open file has no
+  directory entry. Only `df` and `/proc/<pid>/fd` can see it. Anything reasoning about container
+  disk usage from `du` is reasoning about a different number.
+- **A container is not memory-namespaced or CPU-namespaced, so everything inside sizes itself for
+  the HOST.** `/proc/meminfo` shows 15.8 GB and `nproc` returns 12, while the cgroup grants 3 GB and
+  four cores' worth of quota. Chromium sizes its shared-memory pools from
+  `AmountOfPhysicalMemory()`, node and esbuild size their thread pools from `nproc`. This is not
+  Chromium misbehaving and it is not fixable in the application - it is the reason the hosting side
+  has to leave room, and the reason upskald's `playwright.config.ts` was deliberately **not**
+  changed.
+- **The fix made it faster, which no part of the diagnosis predicted.** With `TMPDIR` on a
+  disk-backed bind mount the e2e leg went from 9.0-9.9 minutes to **4.7**, the whole gate from
+  ~1,160 s to **888 s**, `/tmp` peaked at **17 MB** instead of 2,047, and Chromium held **38 MB** of
+  shared memory instead of 1,925. The likely reading - offered as a reading, since it was not
+  measured directly - is that most of that 1.9 GB was self-inflicted: with the cgroup pinned,
+  Chromium could not evict its own discardable segments, so it kept allocating more. On disk the
+  loop never starts.
+
 ## Indexers
 
 - **The ISP resolver returns a blocking page for several indexer domains.** All three distinct

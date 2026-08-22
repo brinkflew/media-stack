@@ -117,9 +117,19 @@ Five of those are not obvious, and each was measured rather than reasoned about:
 - **The runner's ceiling binds before the slice's.** 3G under the slice's 4,608M, because a cgroup
   OOM picks its victim by badness across the whole subtree and rootless podman refuses to lower the
   Windmill workers' `oom_score_adj` - so with the slice binding first the kill could land on a
-  worker mid-job rather than on the phase that caused it. `/tmp` is sized *below* the memory
-  ceiling for the same class of reason: tmpfs pages are charged to the cgroup, so a larger `/tmp`
-  turns "No space left on device" into an OOM kill that names nothing.
+  worker mid-job rather than on the phase that caused it.
+- **`$TMPDIR` is a disk-backed bind mount and must never go back to being a tmpfs.** This entry
+  used to read *"`/tmp` is sized below the memory ceiling for the same class of reason: tmpfs pages
+  are charged to the cgroup, so a larger `/tmp` turns 'No space left on device' into an OOM kill
+  that names nothing."* The mechanism is right; the arithmetic was wrong twice, and on 2026-08-22 it
+  cost three full gate runs. It compared **one** filesystem against **MemoryMax**, when the tmpfs
+  and the processes draw on **one** budget - so the comparison is against `MemoryHigh` minus the
+  working set - and there are **two** tmpfs mounts, because `--shm-size` is one as well. 2g of
+  `/tmp` plus 1g of `/dev/shm` was 3G of filesystem inside a 3G hard limit.
+  **What that produced was quieter than the OOM kill it was avoiding**, which is the part worth
+  remembering: `/tmp` is now `512m`, `TMPDIR=/scratch` is a per-run bind mount under the fleet root,
+  and `bin/conduct-runner-smoke.sh` asserts the property by **filesystem type**, because a later
+  simplification back to a tmpfs would keep the path and lose the point.
 
 **What is absent is the containment**, and the list stays negative: no podman socket, no
 `--privileged`, no `--security-opt label=disable`, no mount from `config/` or `/mnt/media`, and for
