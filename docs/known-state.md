@@ -1500,6 +1500,16 @@ answering; four had never served a single query and were deleted.
   only the refusal. A `probe` phase running `git commit --allow-empty` produces a real commit with no
   model call and no credential, an empty diff that flags nothing, and a gate that passes because the
   tree is identical to a known-green base.
+- **THE ENCODER GATE REFUSED ON A DEVICE THE FLEET CANNOT ADDRESS.** A phase runner is given no
+  `--device`, no CDI reference and no `--gpus`, so refusing to dispatch while a transcode ran was
+  contention for hardware the fleet has no route to - while CPU, memory and IO, which do contend,
+  are bounded by `app-agents.slice` and by `nice -n 10`/`CPUWeight=20`. **And it failed in
+  aggregate**, the same way the reboot window's encoder veto did: defensible on every individual
+  refusal, and because dispatch is CONTINUOUS, any transcode queue at all meant the fleet never
+  started. Found on the first end-to-end run - four files queued, two mid-flight, and the first
+  thing the poll loop said was that it was holding. Recorded now rather than gated on, which is what
+  I/O pressure already gets. The reboot window's gate is untouched: killing a live transcode to
+  apply an OS image is a real cost that deserves a real refusal.
 - **A DRIFT CHECK CAN FIRE ON A KEY THE SERVER REFUSES TO KEEP.** Windmill does not store a suspend
   key whose value is its default, so sending `continue_on_disapprove_timeout: false` made
   `conduct flow --check` report DRIFTED for ever on a flow that was exactly right - git held a key

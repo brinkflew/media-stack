@@ -342,14 +342,35 @@ rules running - safe, but not what you asked for:
 ```bash
 ## The agent fleet
 
-**Twelve checks, one collector source and one alert group, all of which measure a component that is
-not installed yet.** That order is deliberate rather than premature: a fleet that spends quota
-before anything reads the quota is the failure the whole of this file exists to prevent, so the
-readers land first and `conduct` is written against them.
+**Fourteen checks, one collector source and one alert group.** The count has been wrong in this
+paragraph twice - it said twelve when `agents.mirror_fresh` had already made it thirteen - which is
+the ordinary fate of a number written in prose next to a list that grows. It is corrected rather
+than removed because the section's shape is the thing worth stating; if it drifts again, count
+`say agents` to the next `say` in `bin/verify-host.sh`.
 
-Every `conduct`-dependent check reports NOTE while `~/.cache/home-server/conduct-state` is absent,
-which is every hour until the orchestrator ships. A finding nobody can act on is how a reader learns
-to skip a whole section, and this one would otherwise have had months to teach that.
+**They were written before the thing they measure**, which was deliberate rather than premature: a
+fleet that spends quota before anything reads the quota is the failure the whole of this file exists
+to prevent, so the readers landed first and `conduct` was written against them. Most of them now
+measure something real. **The quota arm still does not**, and that is the one gap worth naming here
+rather than leaving to be discovered: `agents.quota_headroom` tells a reader conduct "refuses to
+dispatch above" 90%, `home_server_agent_quota_ratio`'s help text says the same, and
+`AgentQuotaHeadroomLow` fires on it - while nothing yet writes the three quota keys, because nothing
+yet reads a rate-limit window and any number would be invented. Inert and honest today; a lie the
+day a model phase runs without the pacing landing with it.
+
+**`agents.publish_configured` is named for what it can prove**, and its message says so. A file
+existing is not a write-capable deploy key and a row in Windmill's `variable` table is not an
+unexpired token - a fine-grained PAT expires - so a check called `publish_ready` would read green
+for the whole window between expiry and somebody pressing Approve after forty minutes of compute.
+The live write proof is in `host/systemd/README.md`'s setup loop, on the
+`agents.runner_isolation` precedent: an hourly `git push --dry-run` would be 8,760 authentications
+against GitHub a year to detect a credential that changes about never. Token expiry is surfaced by
+the flow step that holds the token, from GitHub's own
+`github-authentication-token-expiration` response header.
+
+Every `conduct`-dependent check reported NOTE while `~/.cache/home-server/conduct-state` was absent,
+which was every hour until the orchestrator shipped. A finding nobody can act on is how a reader
+learns to skip a whole section, and this one would otherwise have had months to teach that.
 
 **The marker is a flat `key=value` file in `backup-state`'s exact shape**, holding a heartbeat, a
 phase flag and its start, the two quota percentages and when they were last read, token and run

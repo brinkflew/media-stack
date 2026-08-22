@@ -455,6 +455,29 @@ continues. Refusing everywhere else would make the tool unusable on a workstatio
 `conduct` refuses to dispatch while the host is busy, over twelve units across **both** managers.
 `conduct doctor` resolves the whole list and exits non-zero when it has drifted.
 
+**The GPU encoder is NOT one of them, and it was until 2026-08-22.** The argument for refusing while
+a transcode ran was that the media stack is the tenant with a household waiting on it - which is
+true, and is not what that gate measured. **The phase runner has no GPU access at all**:
+`phase.command()` passes no `--device`, no CDI reference and no `--gpus`, and `tests/test_phase.py`
+asserts the whole invocation. So it refused on contention for a device the fleet cannot address,
+while the resources that genuinely contend - CPU, memory and IO - are bounded by
+`app-agents.slice`, which is the mechanism, and by `nice -n 10` and `CPUWeight=20`, which make the
+media stack win under pressure by design.
+
+**And it failed in aggregate, which is a lesson this repository has already paid for.** The reboot
+window's encoder veto was defensible on every single refusal and cost a deployment a whole week,
+because a Tdarr job runs for tens of minutes and the window was one instant. Here it was worse,
+because dispatch is **continuous**: any transcode queue at all meant the fleet never started.
+Measured on the first end-to-end run of the publish path - four files queued, two of them
+mid-flight, and the first thing the poll loop said was that it was holding.
+
+**It is recorded rather than gated on**, which is the answer I/O pressure already got in the same
+cascade. A run that happened beside a transcode is worth knowing about - the e2e suite is
+timing-sensitive and has flaked under load before - and that is a cost of one re-run rather than a
+fault to refuse on. `beside: something is mid-transcode` in the journal is what connects the two
+afterwards. **The reboot window's own encoder gate is untouched**, and correctly: killing a live
+transcode to apply an OS image is a real cost that deserves a real refusal.
+
 - **It has to ask the system manager too.** The cascade asked `systemctl --user` only and was blind
   to every system unit - including `rpm-ostreed-automatic`, which pulls multi-gigabyte layers and
   calls `syncfs`, and `raid-check`, a full array scrub. Neither was in any watchlist on this host,
