@@ -54,7 +54,7 @@ say()  { printf '\n%s\n' "$*"; }
 cleanup() {
 	podman rm -f conduct-smoke >/dev/null 2>&1 || true
 	podman network rm -f "$NET" >/dev/null 2>&1 || true
-	rm -rf "$WT"
+	rm -rf "$WT" "$FLEET_ROOT/scratch/.smoke"
 }
 trap cleanup EXIT INT TERM
 
@@ -68,8 +68,9 @@ runner() {
 		--network "$NET" \
 		--security-opt no-new-privileges --cap-drop=ALL \
 		--shm-size=1g --log-driver=none --no-healthcheck \
-		--read-only --read-only-tmpfs --tmpfs /tmp:rw,exec,size=2g \
+		--read-only --read-only-tmpfs --tmpfs /tmp:rw,exec,size=512m \
 		--dns 1.1.1.1 --dns 1.0.0.1 \
+		-v "$FLEET_ROOT/scratch/.smoke:/scratch:rw" -e TMPDIR=/scratch \
 		-v "$FLEET_ROOT/pw-browsers:/opt/pw-browsers:rw" \
 		-v "$FLEET_ROOT/uv-cache:/opt/uv-cache:rw" \
 		-v "$FLEET_ROOT/bun-cache:/opt/bun-cache:rw" \
@@ -94,7 +95,7 @@ printf '  image %s bytes, built %s\n' \
 # no phase has dispatched yet, leaving it out fails the tooling legs first, with
 # an error about a directory nobody was thinking about.
 mkdir -p "$WT" "$FLEET_ROOT/pw-browsers" "$FLEET_ROOT/uv-cache" "$FLEET_ROOT/bun-cache" \
-	"$FLEET_ROOT/policy"
+	"$FLEET_ROOT/policy" "$FLEET_ROOT/scratch/.smoke"
 
 # Staged here, for the same reason: the assertions live further down, but the
 # mount is needed from the first runner() call.
@@ -265,6 +266,58 @@ if runner sh -c 'printf "#!/bin/sh\nexit 0\n" > /tmp/x && chmod +x /tmp/x && /tm
 	ok "/tmp is writable and executable"
 else
 	bad "/tmp is not both writable and executable"
+fi
+
+# THE LEG THAT WOULD HAVE SAVED THREE GATE RUNS. Chromium allocates its shared
+# memory as UNLINKED files in $TMPDIR - 1,925 MB across 969 fds, measured on
+# 2026-08-22 - and it goes there rather than to /dev/shm because podman mounts
+# /dev/shm noexec and GetShmemTempDir() falls through to GetTempDir(). So
+# `--shm-size` is inert here, and whatever $TMPDIR is mounted on absorbs ~2 GB.
+#
+# On a tmpfs those pages are charged to the cgroup and CANNOT be reclaimed:
+# memory.current pinned at MemoryHigh with a working set of 510 MB, the kernel
+# throttled the allocator instead of reclaiming, and every Chromium allocation
+# failed with net::ERR_INSUFFICIENT_RESOURCES for minutes at a time. Nothing was
+# killed, no unit failed, memory.max and oom_kill both stayed 0, and `du` saw
+# 49 MB because an unlinked file has no directory entry.
+#
+# Asserted by FILESYSTEM TYPE rather than by path, because the path being right
+# is exactly what a later "simplification" back to a tmpfs would preserve.
+#
+# shellcheck disable=SC2016  # $TMPDIR must expand in the CONTAINER, not here -
+# expanding it on the host would assert against the host's /tmp and pass always.
+if runner sh -c '
+	set -e
+	[ -n "$TMPDIR" ] || { echo "TMPDIR is unset"; exit 1; }
+	printf "#!/bin/sh\nexit 0\n" > "$TMPDIR/x" && chmod +x "$TMPDIR/x" && "$TMPDIR/x"
+	t=$(stat -f -c %T "$TMPDIR")
+	[ "$t" != "tmpfs" ] || { echo "TMPDIR is a tmpfs"; exit 1; }
+'; then
+	ok "TMPDIR is writable, executable and not a tmpfs"
+else
+	bad "TMPDIR is unset, unusable, or back on a tmpfs - Chromium will pin the cgroup"
+fi
+
+# The same arithmetic conduct/tests/test_phase.py computes, asserted against the
+# kernel rather than against the argv: every tmpfs the runner can fill, summed,
+# has to leave room for the processes under the SAME ceiling. The old reasoning
+# compared one filesystem against MemoryMax; there are two, and the comparison
+# is against MemoryHigh minus the working set.
+#
+# shellcheck disable=SC2016  # the same reason: $kb and awk's $2 belong to the
+# container's shell and awk, not to this one.
+if runner sh -c '
+	total=0
+	for m in /tmp /dev/shm; do
+		kb=$(df -k "$m" 2>/dev/null | awk "NR==2{print \$2}")
+		total=$((total + ${kb:-0}))
+	done
+	echo "tmpfs total: $((total / 1024)) MB"
+	[ "$total" -le 1572864 ]
+'; then
+	ok "every tmpfs together leaves at least 1 GB under MemoryHigh"
+else
+	bad "the tmpfs mounts can reach the memory ceiling on their own"
 fi
 
 # ------------------------------------------------------------------------------
