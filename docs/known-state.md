@@ -1277,6 +1277,44 @@ in front of every verification from that day on.
   `refs/conduct/runs/<run-id>` for ever, so a single repository would hand each new worktree every
   prior phase's commits, growing without bound.
 
+## The control plane's arrow, and three states that look alike in the journal
+
+Built 2026-08-22 with the polling half of the orchestrator.
+
+- **conduct polls Windmill and Windmill has no route to conduct, which is containment rather than
+  style.** A host-side listener needs either a unix socket - the same `container_t -> unconfined_t :
+  unix_stream_socket connectto` denial that stops any container reaching the podman socket - or a
+  TCP port plus a firewalld hole `ucore.bu` can only add at first boot. Both spend real containment
+  to give an internet-facing container an RPC that spawns `claude`. In `paths.ts` this shows up as
+  `conduct` being a pseudo-node that may **never** appear as a `to`; there it reads as a modelling
+  rule and it is the security property.
+- **Work arrives as a suspended flow step, so the transport is the human gate's own mechanism** -
+  and what is conduct's and what is a human's is decided by the **module id**, which comes from the
+  flow definition in git rather than from a payload the step computed. **conduct answering an
+  approval step would be conduct approving its own gate**, so the guard is asserted by a test that
+  fails the moment it is removed. Two properties come free: refusing costs nothing, because the step
+  simply stays suspended; and discovery is **one** HTTP call, because `jobs/queue/list` returns
+  `args` and `flow_status` together - measured against 1.792, not assumed.
+- **The answer is written to the database before it is delivered, and the order is the whole point.**
+  A phase that succeeded and then could not be reported is twenty minutes already spent;
+  rediscovering the same suspended step next cycle spends it again. A row with a payload and no
+  `resumed_at` means retry the **resume** and never the phase. A crash *during* a phase is the
+  opposite case and needs nothing: no row was written, so the reconciler's existing path covers it.
+- **Not-configured and configured-but-broken must differ, and here they are one variable apart.**
+  An unset `WINDMILL_CONDUCT_TOKEN` **holds** the poll and leaves `last_ok_at` advancing, because a
+  rollout in progress must not look like a fault. A **401** stalls the heartbeat, because a revoked
+  token is a fleet that has stopped taking work while every container is healthy, every unit is
+  active and nothing else would ever say so. Do not "fix" a 401 by clearing the value.
+- **A flow is a row in Postgres the UI can edit with nothing in `git diff`** - the same shape
+  `agents.worker_lanes` exists to watch. `serve` rewrites it from git at every start, so drift is
+  self-healing rather than detected, which is why there is no `agents.flow_drift` check: nothing has
+  to grade a difference it can simply undo.
+- **The verify lane stopped being the semaphore when the arrow inverted.**
+  `windmill-worker-verify` was built as the one-verify-at-a-time mechanism on a design where
+  Windmill dispatched. Under polling, conduct's one-lease-per-project is the semaphore and a
+  suspended step occupies no worker at all - so the lane is bookkeeping and spare capacity. The
+  quadlet still reads as though it were a limit.
+
 ## Indexers
 
 - **The ISP resolver returns a blocking page for several indexer domains.** All three distinct

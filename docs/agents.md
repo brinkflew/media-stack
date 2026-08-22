@@ -485,15 +485,83 @@ journalctl --user -u home-server-conduct -f
 /var/agents/bin/conduct reconcile --dry-run            # what a killed phase left behind
 tail -f /var/home-server/cache/conduct/logs/*.log      # a phase's own output
 systemctl --user start home-server-agents-update       # pull conduct's code now
+/var/agents/bin/conduct mirror                         # fetch the project mirrors now
+systemctl --user start home-server-mirror-update       # the same, through its unit
+/var/agents/bin/conduct flow --check                   # has the UI edited the flow?
+/var/agents/bin/conduct flow                           # rewrite it from git now
 ```
 
-## What is deliberately not built yet
+**A loop reporting `holding: WINDMILL_CONDUCT_TOKEN is unset` is working exactly as designed and
+taking no work**, which is a state worth recognising before it is diagnosed as a fault. Read the
+section below before deciding conduct is idle: holding, refusing on a busy host and failing to reach
+the control plane look similar in the journal and are three different things.
 
-**Windmill polling.** conduct reconciles, heartbeats and runs a phase on demand; it takes no work
-from the control plane. That half lands next, against
-`GET /jobs/queue/list?suspended=true` and the authenticated resume above. Phase execution went first
-because it is the half where the uncertainty was - the cgroups, the caches, the SELinux labels, the
-service-name addressing - and none of that is easier to debug with a flow in front of it.
+## Work arrives as a suspended step, which is the human gate's mechanism reused
+
+**conduct polls the control plane; the control plane never calls conduct.** A host-side listener
+would need either a unix socket - the same `container_t -> unconfined_t : unix_stream_socket
+connectto` denial that stops any container reaching the podman socket - or a TCP port on the bridge
+gateway plus a firewalld hole `host/butane/ucore.bu` can only add at first boot. Both spend real
+containment to give an internet-facing container an RPC that spawns `claude`. So `windmill-server`
+publishes on `127.0.0.1` and conduct reaches *it*: no firewalld change, no new SELinux surface, and
+**`paths.ts` carries `conduct` as an outbound-only pseudo-node that may never appear as a `to`** -
+which in that file is a modelling rule and here is the security property.
+
+**A Windmill flow step suspends; conduct answers it.** One flow, `f/agents/phase`, whose first
+module is an `identity` step carrying nothing but a `suspend`. conduct polls
+`GET /jobs/queue/list?suspended=true`, and **that one call is the whole of discovery** - measured
+against 1.792 rather than assumed, it returns `args` *and* `flow_status`, the latter carrying `step`
+and a `modules[]` each with an `id`. It then dispatches the phase named in the flow's arguments and
+answers with `POST /jobs/flow/resume/{id}`, the authenticated endpoint - not a signed `jobs_u` URL,
+which exists so a human with no login can approve from a phone and would put a bearer secret in a
+log line if conduct minted one for itself.
+
+Two properties fall out of using suspend, and both are load-bearing:
+
+- **Refusing costs nothing.** A busy host means the step stays suspended and the next cycle picks it
+  up. No queue of conduct's own, no work lost, and the refusal cascade can stay as blunt as it is.
+- **The address is structural.** Whether a suspended step is conduct's or a human's is decided by
+  the **module id**, which comes from the flow definition in git - not from a payload the step
+  computed, which a step could get wrong. **conduct never answers a step it does not own**, because
+  a conduct that answers approval steps is a conduct that approves its own gate. `tests/test_poll.py`
+  asserts it, and that assertion fails the moment the prefix guard is removed.
+
+**The answer is written to the database before it is delivered, never after.** A phase that
+succeeded and then could not be reported - `windmill-server` restarting, the token revoked, the
+network gone - is twenty minutes already spent, and rediscovering the same suspended step next cycle
+would spend it again. A row in `dispatch` with a payload and no `resumed_at` means **retry the
+resume and never the phase**. A crash *during* a phase is the opposite case and needs nothing new:
+no row was written, the step is still suspended, and the reconciler reclaims the lease, the network,
+the containers and the tree - which the reboot window's escalation already requires.
+
+**An unset token holds; a refused one fails the cycle.** That is the *"not-configured and
+configured-but-broken must differ"* rule the `pg_dumpall` leg already follows: with no
+`WINDMILL_CONDUCT_TOKEN` conduct says so once a cycle and leaves `last_ok_at` advancing, because a
+rollout that has not finished must not look like a fault. A **401** does the reverse and stalls the
+heartbeat, because a revoked token is a fleet that has stopped taking work while every container is
+healthy, every unit is active and nothing else would ever say so. `agents.conduct_fresh`'s 600 s is
+far longer than a `windmill-server` restart, which is the only benign cause.
+
+**The flow is rewritten from git at every `serve` start.** A flow is a row in Postgres that the UI
+can edit with nothing in `git diff` - the exact shape `agents.worker_lanes` exists to watch - so
+`conduct/flows/phase.py` is the source of truth and drift is self-healing rather than merely
+detected. That costs no new check and no new metric, and it means a UI edit survives until the next
+restart and no longer: the same bargain `.env` already makes. `conduct flow --check` says what a
+restart would change.
+
+**The token is a workspace-owner token, and that is an accepted risk rather than an oversight.**
+Windmill CE's scopes do not express *"may list and resume jobs and nothing else"*. What bounds it is
+that `windmill-server` is on loopback, so the token is usable only from this host - and deleting it
+in the UI is a browser-reachable kill switch for the fleet's ability to take work at all.
+
+**The verify lane stopped being the semaphore when the arrow inverted**, and that is worth recording
+because the quadlet still says otherwise. `windmill-worker-verify` was built as the *one verify at a
+time* mechanism, on the source design where Windmill dispatched. Under polling, **conduct's
+one-lease-per-project is the semaphore** - a suspended step occupies no worker at all - so the lane
+is bookkeeping and spare capacity rather than a limit. `agents.worker_lanes` still asserts it listens
+to `verify` alone, which remains worth knowing, and remains a row in Postgres rather than the quadlet.
+
+## What is deliberately not built yet
 
 **The model phases themselves.** Their precondition is built - `conduct verify`, the deny hook and
 the two-tier path list all ship and are proved by planted commits rather than by a clean run - but

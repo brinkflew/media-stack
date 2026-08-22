@@ -458,6 +458,18 @@ signal read green.
 - A mirror that stopped fetching looks exactly like one nobody pushed to. `FETCH_HEAD`'s mtime dates
   the attempt, not the change.
 
+### The control plane's arrow, and three states that look alike in the journal
+- conduct polls Windmill and Windmill cannot reach conduct: a listener needs the podman-socket
+  SELinux denial or a firewalld hole. In `paths.ts` that is `conduct` never appearing as a `to`.
+- **Work is a suspended flow step, addressed by MODULE ID from git** - not by a payload. conduct
+  answering an approval step would be conduct approving its own gate.
+- **The answer is stored before it is delivered**, so an undeliverable one retries the resume and
+  never the twenty-minute phase.
+- **An unset token HOLDS and a 401 FAILS the cycle.** A rollout must not look like a fault; a
+  revoked token must not look like health.
+- A flow is a Postgres row the UI can edit, so `serve` rewrites it from git at every start.
+- The verify lane stopped being the semaphore when the arrow inverted; conduct's lease is.
+
 ### A filesystem that counts against the memory ceiling, and a browser that fills it
 - **A tmpfs inside a container is part of its MEMORY budget**, unreclaimable without swap, so a full
   one pins the cgroup at `MemoryHigh` for ever. `/tmp` 2g plus `/dev/shm` 1g inside a 3G `MemoryMax`

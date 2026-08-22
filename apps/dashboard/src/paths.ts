@@ -42,6 +42,15 @@ import { NODES, nodeByName } from "@/topology";
 export const PSEUDO_NODES: Record<string, string> = {
   wan: "a browser, on the LAN or beyond it - inbound only",
   internet: "everything outside this host - outbound only",
+  // NEITHER OF THESE MAY EVER APPEAR AS A `to`, and for conduct that is not a
+  // modelling convenience - it is the security property. conduct is a host-side
+  // systemd unit rather than a container, so it cannot be in topology.ts at all;
+  // it initiates every connection it has and nothing calls it, which is why the
+  // control plane needs no route to the host and ucore.bu needed no firewalld
+  // change. A `to` here would also splice unrelated routes together: tracePaths
+  // absorbs at terminals, so a node on both sides invents paths that do not exist.
+  conduct: "the orchestrator, a systemd --user unit on the host - outbound only",
+  runner: "a phase runner, podman run --rm on its own network - outbound only",
 };
 
 export interface Path {
@@ -111,6 +120,10 @@ export const PATHS: Path[] = [
     why: "a worker takes jobs from the queue in Postgres, not from the server - there is no edge to windmill-server at all" },
   { from: "windmill-worker-verify", to: "windmill-db", source: "git",
     why: "the same queue, filtered to one tag. Its lane is a row in worker_ping, which is also its health probe" },
+  { from: "conduct", to: "windmill-server", source: "git",
+    why: "polls 127.0.0.1 for suspended steps and resumes them - the arrow points inward, so the control plane has no route to the host" },
+  { from: "runner", to: "internet", source: "git",
+    why: "bun, uv, git and gh reach registries; isolate=true blocks every other bridge and the host's published ports, and this is the residual" },
 
   // --- declared in an apps/ config file ------------------------------------
   { from: "prometheus", to: "node-exporter", source: "git",
