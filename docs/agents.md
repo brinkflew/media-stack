@@ -58,10 +58,20 @@ no authenticated resume endpoint existed; that was a grep that looked under `job
 | this repository | `/var/home-server` | `git pull`, anonymous HTTPS - it is public |
 | conduct | `/var/agents` | `git pull` over a **read-only deploy key**, nightly at 04:50 |
 | the upskald mirror | `cache/conduct/mirrors/upskald.git` | `conduct mirror`, nightly at 04:40, over a **second** read-only deploy key |
+| a verified branch | `github.com/avanserv/upskald` | `conduct verify`, over a **third** deploy key, the only one that can write |
 
-**Two GitHub credentials on this host, both read-only, both scoped to one repository**, and neither
-of them ever enters a container. `~/.ssh/agents_deploy` fetches `brinkflew/agents` into
-`/var/agents`; `~/.ssh/upskald_deploy` fetches `avanserv/upskald` into the mirror.
+**Three GitHub credentials on this host, two of them read-only, all scoped to one repository**, and
+none of them ever enters a container. `~/.ssh/agents_deploy` fetches `brinkflew/agents` into
+`/var/agents`; `~/.ssh/upskald_deploy` fetches `avanserv/upskald` into the mirror;
+`~/.ssh/upskald_push` pushes a verified branch and does nothing else.
+
+**The third one is why `mirror.ssh_command()` takes a KEY and not a project.** With two keys for one
+repository the dangerous confusion is not the loud one: a push authenticating with the fetch key
+answers `ERROR: The key you are using is a read-only key`. Pointing the FETCH at the write key keeps
+working perfectly and silently runs an unattended nightly timer on a write-capable credential. A
+function that read `project["ssh_key"]` invited exactly that simplification; naming the key at the
+call site does not, and `tests/test_publish.py` asserts the fetch environment never mentions the
+push key.
 
 **The mirror is not a cache, and deleting it does not simplify anything.** The obvious
 simplification is to let each phase container clone the one branch it needs when it starts. Three
@@ -300,7 +310,8 @@ staging, and `git clean -xdff` excluding only the dependency directories.
 3  sanity     base is an ancestor of head, and head is at least one commit ahead
 4  diff       REFUSE refuses; FLAG and deleted tests reach the approval card
 5  pristine   a tree built from staging, gate run there, THEN assert it is clean
-6  publish    conduct pushes (contents:write); Windmill opens the PR after approval
+6  publish    conduct pushes to agents/<worktree>-<head12> over a write deploy
+              key; a person approves; Windmill's flow step opens a DRAFT PR
 ```
 
 **Step 1 exists because a phase that committed nothing passes everything else** -
@@ -378,7 +389,14 @@ produce is no failure at all.
 
 ### The GitHub credential is two credentials, and the runner holds neither
 
-conduct holds `contents:write` from `.env` and pushes the verified branch.
+**conduct pushes with a read/write DEPLOY KEY, not a `contents:write` token**,
+and the difference is the whole argument. A deploy key has **no REST API surface
+at all**: it cannot open a pull request, comment, react or apply a label, and it
+can only move refs. That makes "conduct cannot publish on its own" structural
+rather than a scope choice somebody could widen. It also reuses `mirror.py`'s
+proved `-F /dev/null -i <key> -o IdentitiesOnly=yes` shape unchanged, and puts no
+credential in `.env`, in argv or in `/proc`.
+
 **Windmill holds `pull_requests:write` as a workspace secret**, used by the flow
 step that runs *after* the human approval gate. So opening a pull request
 requires the approval structurally, rather than requiring conduct to have
@@ -386,6 +404,27 @@ honoured it, and deleting one variable in a browser stops the fleet opening pull
 requests while leaving everything else running. `windmill-worker` on `net-agents`
 reaches `api.github.com` - measured, 200 in 112 ms - which is what makes the
 split possible at all.
+
+**What the split buys, said precisely, because the paragraph above overclaimed it
+until 2026-08-22.** It is true against **tier 1** and against accident: the runner
+holds neither credential and cannot reach Windmill at all. It is **not** true
+against a compromised conduct. `WINDMILL_CONDUCT_TOKEN` is a workspace-owner
+token - already an accepted risk here, because Windmill CE's scopes cannot express
+*"may list and resume jobs and nothing else"* - so conduct can read any workspace
+variable and run any job. conduct is tier 0 and trusted by construction; the
+design never claimed otherwise, but that sentence did.
+
+**And the pull-request token is wider than its name.** GitHub's fine-grained
+**Pull requests: write** includes managing **labels** and creating **reviews**,
+and a fine-grained PAT acts as *the user* rather than as a Bot - so
+`auto-merge.yml`'s `sender.type != 'Bot'` guard does not exclude it. That token
+could therefore add `merge: ready` and approve the pull request it opened.
+Nothing in this design does either: the flow is rewritten from git at every
+`serve` start and its publish step applies no label and posts no comment. But the
+protection is that the flow is the only actor, not that the credential is
+incapable, and that is an accepted risk rather than a closed hole. Narrowing it
+means a GitHub App installation token minted per call, or excluding the publish
+identity in `auto-merge.yml`'s own guard.
 
 **Nothing else follows that secret into Windmill.** No policy, no protected-path
 list, no gate configuration: `agents.worker_lanes` exists because a worker's tags
@@ -596,28 +635,165 @@ one-lease-per-project is the semaphore** - a suspended step occupies no worker a
 is bookkeeping and spare capacity rather than a limit. See the last item under *what is deliberately
 not built yet* for why the `verify` tag was **not** added to make it routable.
 
+## The publish path, and the two live defects finishing it exposed
+
+**Six modules, three suspends, and only two of them are conduct's.** `f/agents/ship` is the whole
+chain; `f/agents/phase` stays what it was, two modules that run one gate and report. Two linear
+flows rather than one with a conditional, because the `phase` argument selects the *command a phase
+runs* and not whether the flow publishes - a `check` run through the long chain would refuse at
+`conduct_verify` for the right reason and read as a fault.
+
+```
+0  await_conduct   identity, suspend      runs, Success, then the flow suspends
+1  conduct_phase   rawscript              <- WaitingForEvents. conduct answers.
+2  await_verify    identity, suspend      runs, Success, then the flow suspends
+3  conduct_verify  rawscript              <- WaitingForEvents. conduct answers.
+4  await_human     rawscript -> the card, suspend
+5  publish_pr      rawscript              <- WaitingForEvents. A PERSON answers.
+```
+
+**`publish_pr` is deliberately not prefixed**, and that one string is the only thing between conduct
+and its own approval - `user_auth_required: true` does **not** stop it, because conduct resumes with
+a workspace-owner token, which satisfies it perfectly. So the guard moved into `poll._resume`, where
+it is a property of resuming rather than of one call site. `self_approval_disabled` is deliberately
+absent: the workspace has one seat, so it would deadlock every run a person starts by hand.
+
+**A REPORT IS A VALUE, NOT A STATUS**, and this shipped wrong in the polling round. `conduct_phase`'s
+body was `def main(report: dict): return report`, so a payload saying `{"ok": false, "exit_code": 1}`
+is a module that **succeeded** - nothing raises, and Windmill records the whole flow green. A failed
+gate has looked like a successful flow since the transport landed. Harmless while the flow was two
+modules long; the moment a verification and an approval sit behind it, a failed phase would flow
+straight into twenty minutes of verifying a tree that had already lost and then ask somebody to
+approve it. Both conduct modules **raise** on `ok: false` now. Raising rather than `stop_after_if`,
+because a stopped flow is recorded *successful* and a failed gate is not a success.
+
+### The branch carries the head sha, and that is not cosmetic
+
+The obvious name is `agents/<worktree-id>`. A worktree id is deliberately **reused** between runs -
+it is what holds the `node_modules` that make the gate minutes rather than half an hour - so one
+branch would carry every run that project ever does. The failure is not the obvious one: run N+1
+force-pushes while run N's approval is still suspended, **a person approves a card describing run N,
+and the pull request opens on run N+1's commit.** Every check passes and nothing anywhere notices.
+
+`agents/<worktree-id>-<head12>` is immutable, so the sha on the card **is** the sha in the pull
+request by construction. There is no `--force` and therefore nothing to lease, git's own
+non-fast-forward rejection is the guard, and a re-push of the same head is `Everything up-to-date` -
+which is the correct answer to running verify twice. The cost is branch litter: a declined or
+timed-out approval leaves a branch, nothing reaps it, and that is accepted rather than undecided -
+the namespace is conduct's alone, a ref costs nothing, it is evidence afterwards, and
+`delete_branch_on_merge` is on for the ones that land.
+
+**One guard is the entire boundary, measured rather than assumed.** `main` is **not** branch
+protected on `avanserv/upskald` - `GET .../branches/main/protection` answers 404 - and GitHub has no
+ref-scoped deploy key, so nothing on the far side refuses a push to the default branch. What refuses
+it is the name check in `conduct/publish.py`, which is why the prefix must be non-empty and end in
+`/` (an empty one passes `startswith` against everything, and would have turned the boundary into a
+no-op with every other test still passing) and why the computed name goes through
+`git check-ref-format` rather than a second regex - `poll.WORKTREE_RE` admits `.`, so `a..b` is a
+legal worktree id and an illegal ref component, and git owns that question.
+
+### What a person sees, and the four ways it would have arrived as nothing
+
+The card is rendered **once**, in `conduct/card.py`, and shown in two places: the full markdown
+version is `await_human`'s result, sitting directly above the approve button, and a plain-text
+summary goes to the phone. Four things about ntfy force that split, and each fails by delivering
+nothing while everything exits 0:
+
+- **It is not markdown.** ntfy renders markdown in its web app only; the Android and iOS apps show
+  the source, so a formatted card arrives as a page of asterisks.
+- **`X-Message` cannot carry a newline**, so the message travels as a JSON body and the link travels
+  in `click` rather than in the text.
+- **The default message limit is 4096 bytes** and an oversized one is answered with a 400, so the
+  summary is truncated to a budget and says that it was.
+- **A once-ever notification is lost for ever.** ntfy caches for **12 hours** and the human gate
+  waits **seven days**, so a phone that was off for thirteen hours would never see the card, the
+  gate would time out, and nothing would go red. The notice repeats every six hours while the step
+  is still suspended, and closes when it is not. It is the only thing here that repeats itself.
+
+**It is sent at answer time, not from a second discovery pass.** conduct knows a human gate is next
+at the instant it answers `conduct_verify` - it has the card in its hand - so sending there dedups on
+a key it already owns, needs no second `jobs_u/get` to dig the card out of a child job's result, and
+**cannot notify about an unrelated flow somebody wrote in the UI**, because a notice exists only for
+a gate conduct created. The six-hourly re-send needs no Windmill read beyond the suspended-id list
+the cycle already fetches, and it runs **before** the dispatch pass: both `return`s in the dispatch
+loop cut it short, and a phase would otherwise block a notification for twenty minutes.
+
+**A refusal is notified too**, with no approval link. Not symmetry - an errored flow is otherwise
+completely silent: there is no suspend, so `agents.approvals_pending` cannot see it, and the only
+other record is a journal line nobody is reading.
+
+**The connection is forced to Caddy on this host** while the URL, the TLS name and the Host header
+stay public, so the certificate verifies normally. ntfy is on `net-metrics` and publishes no host
+port, so a host-side publisher has to come in through the front door - and going out to the WAN to
+do it would put DNS, DuckDNS, the WAN address, the router's hairpin and the ISP into the path of the
+fleet's only notification, **none of which the hourly battery looks at**: `routes.ntfy` is behind
+`--routes`, which is opt-in and run by hand. Measured: 28 ms forced against 178 ms round the houses,
+both 200.
+
+**A broken notifier never fails a cycle**, and it needs no signal of its own - which is worth saying
+because the instinct is to add one. ntfy being down is already measured twice, by `routes.ntfy` and
+`metrics.alert_bridge`. What those cannot see is conduct's own password being wrong, and the backstop
+for that is already built: `agents.approvals_pending` WARNs at twelve hours and `AgentCheckWarning`
+pages at twelve and a half **through Alertmanager's own ntfy account**, so a bad password here still
+reaches the phone by a different credential within half a day.
+
+### The two live defects this exposed, both of them from the polling round
+
+**A phase killed mid-run wedged its own step for ever.** `poll.py` opens the `dispatch` row *before*
+it dispatches, so a SIGKILL mid-phase left a row with a NULL payload: the retry pass skipped it
+because it has no payload, and the discovery pass skipped it because a row exists at all. The lease,
+the network, the containers and the tree were all reclaimed and the flow step stayed suspended for
+its whole 24-hour timeout with nobody owning it, while `agents.approvals_pending` blamed a person at
+twelve hours. **Being killed mid-phase is a designed path** - the reboot window escalates past its
+second refusal - so this was reachable every Sunday morning, and `state.py`'s own comment asserted
+the opposite in as many words: *"A crash DURING a phase is the opposite case and needs nothing: no
+row was written"*. The reconciler clears the row now, bounded by `REAP_AFTER_SEC` so a live phase's
+row - which exists for its whole duration - is never touched.
+
+**The resume retry loop had no prefix guard.** The rule that conduct never answers a human's gate
+existed exactly once, on the discovery path; the retry loop resumed every row `dispatch_unresumed`
+returned with no check on `module_id` at all. Nothing could put a human-gate row in that table, so it
+was safe by accident rather than by construction - and one plausible way of recording a sent
+notification, a `dispatch` row keyed `(job_id, "publish_pr")`, would have made the next cycle
+**approve the gate and open the pull request**. That is why the notice has its own table, and why the
+guard is now inside `poll._resume` with a test that plants exactly that row and asserts the cycle
+raises.
+
+### Proving it without a model, and why a planted commit could not
+
+`prepare_worktree` resolves `origin/<ref>` and does `checkout --force --detach` then `reset --hard`,
+so a commit planted by hand in a worktree is **orphaned before the phase starts**. A planted-commit
+proof of the chain would reach `conduct_verify`, refuse *"the phase committed nothing"*, and
+demonstrate only the refusal.
+
+So the descriptor carries a **`probe` phase** whose command is `git commit --allow-empty`. It makes
+no model call and holds no credential, its diff is empty so nothing is refused or flagged, and the
+gate then runs on a tree byte-identical to a known-green base - which passes because the code is
+good rather than because anything was skipped. `rev-list --count` sees 1, which is what the
+"committed nothing" refusal keys on. One gate run, zero quota, and the whole chain from phase to
+draft pull request is exercised end to end.
+
 ## What is deliberately not built yet
 
 **The model phases themselves.** Their precondition is built - `conduct verify`, the deny hook and
 the two-tier path list all ship and are proved by planted commits rather than by a clean run - but
-nothing yet calls `claude -p`. What is still missing is the prompt, the verdict schema, the podman
-secret carrying the session credential, and the `ship` phase's own command. **`conduct verify` works
+nothing yet calls `claude -p`. What is still missing was counted rather than guessed, and it is
+twelve things rather than four. The binding one is **quota**: `bin/verify-host.sh` tells a reader
+conduct "refuses to dispatch above" 90%, `bin/collect-metrics.py` mints
+`home_server_agent_quota_ratio` saying the same, and `AgentQuotaHeadroomLow` fires on it - while
+`conduct/serve.py` deliberately omits the three quota keys because *"nothing has read a rate-limit
+window, so any number here would be invented"*. Today that is honest and inert. The moment a model
+phase runs, either the keys stay unwritten and the fleet spends the shared subscription while the
+battery reports "nothing has spent any yet", or somebody writes them without the refusal and that
+sentence becomes a lie. The rest: the prompt, the verdict schema, the podman secret carrying the
+session credential, the `ship` phase's own command, `--settings` on a command line (the file is
+rendered, hashed and mounted and named by nothing), `--strict-mcp-config` and `--setting-sources`
+(neither string appears in either repository), a pin on `@anthropic-ai/claude-code` while three
+behaviours measured against 2.1.238 are load-bearing, and a test that the `settings.json` ->
+`deny.py` exec path works - everything today runs it as `python3 deny.py`. **`conduct verify` works
 today and can be run by hand on any worktree**, which is deliberate: it is the half that had to
 exist before there was anything to verify, so that it was written against an adversary rather than
 around one.
-
-**The approval card.** `FLAG` hits and deleted test files are collected and printed; nothing yet
-puts them in front of a human. That is the polling step's, and it matters more than it sounds -
-the residual that survives both the hook and verify is exactly what that card is for.
-
-**And the publish half, step 6 of the list above.** Neither GitHub token exists yet: `conduct
-verify` ends at "this commit passes the gate and changed nothing" and pushes nowhere. That is the
-right order rather than an omission - there is nothing to publish until a model phase produces
-commits, and creating a credential before anything can use it means it sits on the host being
-neither used nor watched. When it lands it is **two** fine-grained tokens, one repository, no
-`workflow` scope: `contents:write` in `.env` for conduct, `pull_requests:write` as a Windmill
-workspace secret. The runner gets neither, and `tests/test_phase.py` asserts that no phase argv
-carries `--secret` or a token.
 
 **`verify` is still not selectable as a tag, and the polling step DECIDED NOT TO ADD IT.**
 `global_settings.custom_tags` reads `["chromium"]` and there is no `worker__verify` row in `config`,

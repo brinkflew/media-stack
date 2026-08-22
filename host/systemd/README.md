@@ -82,6 +82,55 @@ done; done
 systemctl --user start home-server-mirror-update.service
 ```
 
+**The third key is the only one that can write, and one guard is all that keeps it
+off `main`.** Measured on 2026-08-22: `main` is **not** branch protected on
+`avanserv/upskald` - `GET .../branches/main/protection` answers 404 - and GitHub
+has no ref-scoped deploy key, so nothing on the far side refuses a push to the
+default branch. What refuses it is `conduct/publish.py`, which computes
+`agents/<worktree>-<head12>` and will not push anywhere else.
+
+```bash
+ssh-keygen -t ed25519 -N '' -C conduct-push@home-server -f ~/.ssh/upskald_push
+# add ~/.ssh/upskald_push.pub to avanserv/upskald's deploy keys WITH WRITE ACCESS.
+
+# THE PROOF LOOP NOW HAS TWO AXES, and the one that matters is the second.
+# Reading proves nothing new - the fetch key already reads that repository - so
+# what has to be shown is that the FETCH key cannot write. A --dry-run push
+# negotiates with the server and updates nothing, so the whole grid is provable
+# without touching a ref.
+sha=$(git -C /var/home-server/cache/conduct/mirrors/upskald.git rev-parse refs/heads/main)
+for k in upskald_push upskald_deploy; do
+  GIT_SSH_COMMAND="ssh -F /dev/null -i ~/.ssh/$k -o IdentitiesOnly=yes" \
+    git -C /var/home-server/cache/conduct/mirrors/upskald.git \
+    push --dry-run git@github.com:avanserv/upskald.git \
+    "$sha:refs/heads/agents/proof" >/dev/null 2>&1 &&
+    echo "$k CAN write" || echo "$k cannot write"
+done
+# upskald_push CAN write / upskald_deploy cannot write. ANY OTHER RESULT IS THE
+# FINDING - a read-only key that can push means the wrong key was uploaded, and a
+# push key that cannot means the deploy key was added without write access, which
+# GitHub reports as a message about keys rather than about permissions. That is
+# the third instance here of the same misleading GitHub error the `-F /dev/null`
+# argument above exists for.
+```
+
+**And two things in Windmill, by hand, in this order.** The variable is the
+fleet's ability to open a pull request and deleting it in a browser is the kill
+switch; the folder has to exist first because **a folder path in Windmill is a
+string rather than a reference** - `f/agents/phase` deployed happily into a folder
+that was not there, so a secret placed under the same path would carry no folder
+ACL behind it.
+
+1. Settings -> Folders -> new folder `agents`.
+2. Variables -> new variable, path `f/agents/github_pr_token`, **secret**, holding
+   a GitHub fine-grained PAT scoped to `avanserv/upskald` alone with
+   **Pull requests: write** and **no `workflow` scope**. Add `Contents: read` if
+   the create call answers 404 - a fine-grained token needs to see the head branch
+   on a private repository, and that failure reads like a wrong slug.
+
+`bin/verify-host.sh` reports both halves as `agents.publish_configured`, and is
+honest about what it cannot prove: that either credential still authenticates.
+
 **The mirror it fills is not a cache and deleting it does not simplify anything.**
 `avanserv/upskald` is private and the phase runner may hold no GitHub credential in
 any form, so a container cannot clone it; the base every diff is measured against has

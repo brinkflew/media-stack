@@ -124,6 +124,17 @@ export const PATHS: Path[] = [
     why: "polls 127.0.0.1 for suspended steps and resumes them - the arrow points inward, so the control plane has no route to the host" },
   { from: "runner", to: "internet", source: "git",
     why: "bun, uv, git and gh reach registries; isolate=true blocks every other bridge and the host's published ports, and this is the residual" },
+  // OWED SINCE THE MIRROR GOT ITS OWN CREDENTIAL and never drawn: conduct has
+  // fetched from github.com over a deploy key since 2026-08-22. It now also
+  // pushes a verified branch, and publishes to ntfy through the PUBLIC hostname -
+  // out to the WAN and back through Caddy, because ntfy is on net-metrics and
+  // publishes no host port. That last one is why there is no conduct -> ntfy
+  // edge: the route genuinely does not exist, and drawing it would be a picture
+  // of the network that is wrong, which is worse than none.
+  { from: "conduct", to: "internet", source: "git",
+    why: "fetches the mirror and pushes the verified branch over two deploy keys, and reaches ntfy through the front door because ntfy publishes no host port" },
+  { from: "windmill-worker", to: "internet", source: "git",
+    why: "the flow step that opens the pull request calls api.github.com with the one credential this workspace holds; it also resolves job dependencies from PyPI" },
 
   // --- declared in an apps/ config file ------------------------------------
   { from: "prometheus", to: "node-exporter", source: "git",

@@ -1433,3 +1433,82 @@ answering; four had never served a single query and were deleted.
   already be failing to download it, and nothing in the queue view says so. `search.stalled_queue`
   now warns. **It is named and never cleared**: removing the item deletes a partial download, which
   is a person's decision and not a timer's.
+
+## The publish path, and two ways a killed phase never came back
+
+- **A REPORT IS A VALUE, NOT A STATUS.** A Windmill flow module whose body is `return report`
+  succeeds whatever the report says, so a payload of `{"ok": false, "exit_code": 1}` is recorded as
+  a **green flow** - nothing raises, `CompletedJob success=true`. A failed gate had looked like a
+  successful run since the transport landed, and the live proof did not catch it because the gate it
+  ran passed. Harmless at two modules; the moment a verification and an approval sit behind it, a
+  failed phase flows into twenty minutes of verifying a tree that already lost and then asks a person
+  to approve it. The module raises now - and raises rather than `stop_after_if`, because a stopped
+  flow is recorded *successful* and a failed gate is not a success.
+- **A PHASE KILLED MID-RUN WEDGED ITS OWN STEP FOR EVER, and the code's own comment denied it.**
+  `poll.py` opens the `dispatch` row before it dispatches, so a SIGKILL leaves a row with a NULL
+  payload: the retry pass skips it (no payload) and the discovery pass skips it (a row exists). The
+  lease, the network, the containers and the tree are all reclaimed and **the flow step stays
+  suspended for its full 24-hour timeout with nobody owning it**, while `agents.approvals_pending`
+  blames a person at twelve hours. Being killed mid-phase is a **designed** path here - the reboot
+  window escalates past its second refusal - so it was reachable every Sunday morning, and
+  `state.py` said *"A crash DURING a phase is the opposite case and needs nothing: no row was
+  written"*. A row was written. The reconciler clears it, bounded by `REAP_AFTER_SEC` so a live
+  phase's row is never touched.
+- **THE RESUME RETRY LOOP HAD NO PREFIX GUARD.** The rule that conduct never answers a human's gate
+  lived at exactly one call site, on the discovery path; the retry loop resumed every unresumed row
+  with no check on `module_id`. Nothing could put a human-gate row there, so it was safe by accident
+  - and one plausible way to record a sent notification, a `dispatch` row keyed
+  `(job_id, "publish_pr")`, would have made the next cycle **approve the gate and open the pull
+  request**. The guard belongs to resuming, not to a call site, and the notice has its own table.
+- **`main` IS NOT BRANCH PROTECTED and GitHub has no ref-scoped deploy key**, so nothing on the far
+  side refuses a push to the default branch from a write-capable credential. The name check in
+  `conduct/publish.py` is the entire boundary - which is why an empty branch prefix is refused
+  outright (`startswith("")` is true of everything, so it would silently make the guard a no-op with
+  every test still passing) and why the name goes through `git check-ref-format` rather than a second
+  regex: `WORKTREE_RE` admits `.`, so `a..b` is a legal worktree id and an illegal ref component.
+- **A BRANCH NAMED FOR A REUSED WORKTREE LETS A PULL REQUEST CHANGE UNDER AN APPROVAL.** Worktree
+  ids are reused deliberately - they hold the `node_modules` that make the gate minutes - so
+  `agents/<worktree>` would carry every run. Run N+1 force-pushes while run N's approval is still
+  suspended, a person approves a card describing run N, and the pull request opens on N+1's commit,
+  with every check passing. The head sha goes in the branch name: immutable, no `--force`, nothing
+  to lease, and `Everything up-to-date` is the correct answer to verifying twice.
+- **A DEPLOY KEY HAS NO REST SURFACE AND A `pull_requests:write` PAT HAS MORE THAN ITS NAME.** The
+  key cannot open a pull request, comment or label at all, which makes half the credential split
+  structural. The token is the other half and it includes **labels** and **reviews**, and a
+  fine-grained PAT acts as *the user* rather than a Bot - so `auto-merge.yml`'s `sender.type != 'Bot'`
+  guard does not exclude it and that token could arm auto-merge on its own pull request. Accepted and
+  recorded; what protects it is that the flow is the only actor, not that the credential is
+  incapable. The same honesty applies one level up: a workspace-**owner** token can read any variable
+  and run any job, so the split contains tier 1 and accident, never a compromised conduct.
+- **ntfy WOULD HAVE DELIVERED NOTHING IN FOUR DIFFERENT WAYS, all of them exiting 0.** It renders
+  markdown in its **web app only** - the phone apps show the source; `X-Message` cannot carry a
+  newline, so the body must be JSON; the default message limit is **4096 bytes** and an oversized one
+  is refused with a 400 rather than truncated; and it caches for **12 hours** against a human gate
+  that waits seven days, so **a once-ever notification is lost for ever** if the phone was off for
+  thirteen. The notice repeats every six hours while the step is still suspended.
+- **A HOST-SIDE PUBLISHER HAS TO COME IN THROUGH THE FRONT DOOR, AND THE HOURLY BATTERY NEVER LOOKS
+  AT THAT ROUTE.** ntfy is on `net-metrics` and publishes no host port, and `routes.ntfy` lives
+  behind `--routes`, which is opt-in - so DNS, DuckDNS, the WAN address, the router's hairpin and the
+  ISP would all sit in the path of the fleet's only notification with nothing hourly measuring any of
+  them. Forcing the connection to Caddy on this host keeps the URL, the TLS name and the certificate
+  and deletes all of it: 28 ms against 178 ms, both 200. The edge in `paths.ts` is therefore
+  `conduct -> internet` and **not** `conduct -> ntfy` - the direct route does not exist, and the lint
+  cannot catch that lie because it short-circuits any edge touching a pseudo-node.
+- **A PLANTED COMMIT CANNOT PROVE THE CHAIN.** `prepare_worktree` resolves `origin/<ref>` and does
+  `checkout --force --detach` then `reset --hard`, so anything committed by hand is orphaned before
+  the phase starts - the run reaches verification, refuses "the phase committed nothing", and proves
+  only the refusal. A `probe` phase running `git commit --allow-empty` produces a real commit with no
+  model call and no credential, an empty diff that flags nothing, and a gate that passes because the
+  tree is identical to a known-green base.
+- **A FOLDER PATH IN WINDMILL IS A STRING, NOT A REFERENCE.** `f/agents/phase` deployed happily into
+  a folder that does not exist, so a secret placed under the same path would carry no folder ACL.
+- **`render-template.py` EXITS ON AN UNSET VARIABLE**, so adding one to `apps/ntfy/server.yml` makes
+  ntfy refuse to start until `.env` carries it - and ntfy is the alert path, so that failure cannot
+  page you about itself. `sops` and the push have to land before the server renders, which is the
+  order CLAUDE.md's secrets block already gives; the hazard is restarting ntfy after a `git pull` and
+  before `./bin/render-env.sh`.
+- **DRAFT PULL REQUESTS ARE A PAID-PLAN FEATURE ON PRIVATE REPOSITORIES**, and none of a repository's
+  merged pull requests proves the plan allows them - `avanserv` is on `team`, checked. Opening as a
+  draft is the right posture anyway: `ai-review` is the **only** draft-gated job in `ci.yml`, so a
+  draft gets the whole pipeline without a robot reviewing a robot, and auto-merge cannot arm on it.
+  Note that `CI Passed` counts a skipped job as a pass.

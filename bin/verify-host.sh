@@ -2187,6 +2187,67 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 	fi
 
+	# CAN THE FLEET PUBLISH AT ALL, and this check is named for what it can prove
+	# rather than for what you would like to know. A file existing is not a
+	# write-capable deploy key and a row in Windmill's `variable` table is not an
+	# unexpired token, so `publish_ready` would have been a promise this cannot
+	# keep - it would read green for the whole window between a fine-grained PAT
+	# expiring and somebody pressing Approve after forty minutes of compute.
+	#
+	# THE LIVE PROOF IS DELIBERATELY ELSEWHERE, and the precedent is
+	# agents.runner_isolation: an hourly `git push --dry-run` would be 8,760
+	# authentications against GitHub a year to detect a credential that changes
+	# about never. The write direction is proved in host/systemd/README.md's setup
+	# loop, and token expiry is surfaced by the flow step itself from GitHub's own
+	# github-authentication-token-expiration response header - by the one caller
+	# that holds the token and can therefore ask.
+	#
+	# WHAT IT DOES CATCH: a key that was never made, one that a restore or an
+	# editor left group-readable (ssh refuses a 0644 key and says nothing useful),
+	# one with a passphrase (there is no agent under a systemd --user unit, so the
+	# push hangs), and the browser-reachable kill switch having been pulled.
+	pk_path="${HOME}/.ssh/upskald_push"
+	pk_state="" pk_mode=""
+	if [ ! -f "$pk_path" ]; then
+		pk_state="no push key at $pk_path"
+	else
+		pk_mode=$(stat -c %a "$pk_path" 2>/dev/null || echo "?")
+		case "$pk_mode" in
+		600|400) : ;;
+		*) pk_state="the push key is mode $pk_mode; ssh refuses anything more open" ;;
+		esac
+		# A PASSPHRASE IS A HANG, NOT AN ERROR. `ssh-keygen -y -P ""` answers the
+		# public half for an unencrypted key and fails for an encrypted one, and
+		# it never touches the network.
+		if [ -z "$pk_state" ] && ! ssh-keygen -y -P "" -f "$pk_path" >/dev/null 2>&1; then
+			pk_state="the push key has a passphrase, and a systemd --user unit has no agent to answer it"
+		fi
+	fi
+
+	pr_var=""
+	if [ -z "$(podman ps --filter name=^windmill-db$ --format '{{.Names}}' 2>/dev/null)" ]; then
+		pr_var="unknown"
+	else
+		var_sql="select count(*) from variable where path = 'f/agents/github_pr_token'"
+		pr_var=$(podman exec -e VAR_SQL="$var_sql" windmill-db \
+			sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$VAR_SQL"' 2>/dev/null)
+		pr_var="${pr_var:-unknown}"
+	fi
+
+	if [ -n "$pk_state" ]; then
+		fact agents_publish_configured 0 num
+		warn agents.publish_configured "$pk_state - conduct verify will pass and then refuse to publish, see host/systemd/README.md"
+	elif [ "$pr_var" = "unknown" ]; then
+		fact agents_publish_configured 0 num
+		note agents.publish_configured "the push key is present and windmill-db is not running, so the pull-request token cannot be read"
+	elif [ "$pr_var" = "0" ]; then
+		fact agents_publish_configured 0 num
+		warn agents.publish_configured "the push key is present but f/agents/github_pr_token is absent from the Windmill workspace - the kill switch is pulled, so an approved run errors instead of opening a pull request. Deliberate is fine; forgotten is not"
+	else
+		fact agents_publish_configured 1 num
+		ok agents.publish_configured "a push key at mode $pk_mode with no passphrase, and a pull-request token in the workspace - neither of which proves either one still authenticates"
+	fi
+
 	# --------------------------------------------------------------------------
 	# Seeding policy. Whether the 72h floor is actually being enforced.
 	# --------------------------------------------------------------------------

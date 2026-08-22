@@ -302,7 +302,7 @@ if [ -f "$paths" ] && [ -f "$topo" ] && command -v python3 >/dev/null 2>&1; then
 
 		# Raise this when edges are added. It exists so that a parse which has
 		# stopped matching reads as a failure rather than as a clean run.
-		MIN_PATHS = 44
+		MIN_PATHS = 46
 
 		paths = pathlib.Path(sys.argv[1]).read_text()
 		topo = pathlib.Path(sys.argv[2]).read_text()

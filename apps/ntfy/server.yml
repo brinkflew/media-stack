@@ -49,8 +49,8 @@ cache-duration: "12h"
 # which to complete a passkey prompt.
 auth-default-access: "deny-all"
 
-# No self-registration and no password reset. This is a two-account instance
-# and both accounts are declared below.
+# No self-registration and no password reset. This is a three-account instance
+# and all three are declared below.
 enable-signup: false
 enable-login: true
 
@@ -59,7 +59,7 @@ enable-login: true
 # and an absent line reads as an oversight rather than a decision. Nothing here
 # sends files, and an upload endpoint on a public host is not worth the reach.
 
-# NEITHER ACCOUNT IS AN ADMIN, and that is deliberate rather than an oversight.
+# NONE OF THE THREE IS AN ADMIN, and that is deliberate rather than an oversight.
 # Nothing in normal operation needs the role: the users are declared here, the
 # topic is fixed, and `podman exec ntfy ntfy ...` is available for anything
 # genuinely administrative. The same argument as the off-site backup key that
@@ -68,9 +68,16 @@ enable-login: true
 auth-users:
   - "${NTFY_USER}:${NTFY_USER_HASH}:user"
   - "alertmanager:${NTFY_ALERT_HASH}:user"
+  - "conduct:${NTFY_CONDUCT_HASH}:user"
 
 # The publisher is WRITE-ONLY. It has no reason to read the topic, and a
 # credential that sits in a container config should carry the least it can.
 auth-access:
   - "${NTFY_USER}:home-server:rw"
   - "alertmanager:home-server:wo"
+  # The agent fleet, telling you a run is waiting. Its own account rather than
+  # the bridge's so that either publisher can be revoked without the other, and
+  # write-only for the same reason as the bridge: it has no business reading the
+  # topic back. THE SAME TOPIC, so the phone keeps one subscription - an approval
+  # arriving beside the alerts is the right place for it.
+  - "conduct:home-server:wo"

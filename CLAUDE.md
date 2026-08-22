@@ -480,6 +480,18 @@ signal read green.
 - A flow is a Postgres row the UI can edit, so `serve` rewrites it from git at every start.
 - The verify lane stopped being the semaphore when the arrow inverted; conduct's lease is.
 
+### The publish path, and two ways a killed phase never came back
+- **A report is a value, not a status**: a flow module returning `{"ok": false}` succeeds, so a
+  failed gate was recorded as a green flow from the moment the transport landed.
+- **A phase killed mid-run wedged its own step for ever** - `poll` opens the dispatch row before it
+  dispatches - and `state.py`'s comment said the opposite. The retry loop also had no prefix guard,
+  so one plausible way to record a notification would have let conduct approve its own gate.
+- **`main` is not branch protected**, so one name check is the whole boundary; and a branch named
+  for a reused worktree lets a pull request change under an approval.
+- A deploy key has no REST surface; a `pull_requests:write` PAT has labels and reviews, and is not a
+  Bot. ntfy would have delivered nothing four different ways, all exiting 0.
+- A planted commit cannot prove the chain, because `prepare_worktree` resets the tree.
+
 ### A filesystem that counts against the memory ceiling, and a browser that fills it
 - **A tmpfs inside a container is part of its MEMORY budget**, unreclaimable without swap, so a full
   one pins the cgroup at `MemoryHigh` for ever. `/tmp` 2g plus `/dev/shm` 1g inside a 3G `MemoryMax`
