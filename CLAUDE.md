@@ -491,6 +491,9 @@ signal read green.
 - A deploy key has no REST surface; a `pull_requests:write` PAT has labels and reviews, and is not a
   Bot. ntfy would have delivered nothing four different ways, all exiting 0.
 - A planted commit cannot prove the chain, because `prepare_worktree` resets the tree.
+- **The base pin read the wrong repository**, so a phase was blamed for commits other people pushed
+  between the mirror refreshing and staging catching up. An empty commit was refused for touching
+  `Makefile`.
 - **The encoder gate refused on a device the fleet cannot address** - a runner gets no GPU at all -
   and, dispatch being continuous, any transcode queue stopped the fleet outright.
 - **A drift check can fire on a key the server refuses to keep** - Windmill drops a default, so git

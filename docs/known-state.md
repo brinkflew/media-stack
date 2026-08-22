@@ -1500,6 +1500,19 @@ answering; four had never served a single query and were deleted.
   only the refusal. A `probe` phase running `git commit --allow-empty` produces a real commit with no
   model call and no credential, an empty diff that flags nothing, and a gate that passes because the
   tree is identical to a known-green base.
+- **THE BASE PIN READ THE REPOSITORY THE PHASE WAS NOT CLONED FROM, and it blamed the phase for
+  other people's commits.** `dispatch` pinned with `staging.base(project)`, which defaults to the
+  **staging** repository - and staging is only fetched from the mirror by `staging.ensure()`, which
+  runs later, inside verify. So the pin captured staging's PRE-refresh state while the worktree had
+  just been cloned from the freshly refreshed mirror. The diff is then measured from a base older
+  than the one the phase branched from, and **every commit somebody else pushed in that window is
+  attributed to the phase**. Found on the first end-to-end run of the publish path: a phase whose
+  entire output was `git commit --allow-empty` was refused for touching `Makefile` and
+  `e2e/playwright.config.ts`, neither of which it had gone near. **The other direction is the one
+  nobody would have caught** - a stranger's changes on the approval card as the agent's work. The
+  worktree is cloned from the mirror, so the mirror defines the base; verify still reads staging,
+  because that is where the phase's commits were fetched to and where the diff is computed. Two
+  callers, two repositories, which is what the argument is for.
 - **THE ENCODER GATE REFUSED ON A DEVICE THE FLEET CANNOT ADDRESS.** A phase runner is given no
   `--device`, no CDI reference and no `--gpus`, so refusing to dispatch while a transcode ran was
   contention for hardware the fleet has no route to - while CPU, memory and IO, which do contend,
