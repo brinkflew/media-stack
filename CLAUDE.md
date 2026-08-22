@@ -446,6 +446,18 @@ signal read green.
 - **The file that decides what a check means is usually not the file a short list names**, which is
   why the protected paths are two tiers - and why a deleted test escapes both.
 
+### The mirror is not a cache, and the second key cannot go where the first one is
+- A phase container cannot just clone the branch: the repo is private and the runner may hold no
+  GitHub credential at all, the diff's base must come from a repository the phase cannot write, and
+  one host-side copy is what pins base and worktree to the same moment.
+- **A second deploy key added to the existing `Host github.com` block loses to `IdentitiesOnly`**,
+  and GitHub answers a valid key for the wrong repository with `repository not found` - which reads
+  as a bad URL. `-F /dev/null` is the fix.
+- **Refreshing the base at verification time breaks `merge-base --is-ancestor`**, so a good run is
+  refused for something the refresh did. Fetch at dispatch instead.
+- A mirror that stopped fetching looks exactly like one nobody pushed to. `FETCH_HEAD`'s mtime dates
+  the attempt, not the change.
+
 ### A filesystem that counts against the memory ceiling, and a browser that fills it
 - **A tmpfs inside a container is part of its MEMORY budget**, unreclaimable without swap, so a full
   one pins the cgroup at `MemoryHigh` for ever. `/tmp` 2g plus `/dev/shm` 1g inside a 3G `MemoryMax`

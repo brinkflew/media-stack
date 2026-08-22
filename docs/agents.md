@@ -57,12 +57,53 @@ no authenticated resume endpoint existed; that was a grep that looked under `job
 |---|---|---|
 | this repository | `/var/home-server` | `git pull`, anonymous HTTPS - it is public |
 | conduct | `/var/agents` | `git pull` over a **read-only deploy key**, nightly at 04:50 |
-| the upskald mirror | `cache/conduct/mirrors/upskald.git` | **rsynced from a workstation** |
+| the upskald mirror | `cache/conduct/mirrors/upskald.git` | `conduct mirror`, nightly at 04:40, over a **second** read-only deploy key |
 
-**The server holds no GitHub credential beyond that one deploy key**, and the key can fetch one
-private repository and nothing else. That is why the mirror is seeded from a machine that already
-has credentials rather than cloned here: the check phase needs a static mirror, and refreshing it is
-what will need a credential, later, deliberately.
+**Two GitHub credentials on this host, both read-only, both scoped to one repository**, and neither
+of them ever enters a container. `~/.ssh/agents_deploy` fetches `brinkflew/agents` into
+`/var/agents`; `~/.ssh/upskald_deploy` fetches `avanserv/upskald` into the mirror.
+
+**The mirror is not a cache, and deleting it does not simplify anything.** The obvious
+simplification is to let each phase container clone the one branch it needs when it starts. Three
+things stop that, and only the first is about credentials:
+
+- **`avanserv/upskald` is private and the runner may hold no GitHub credential in any form** - not a
+  token, not a `gh` login, not a `.netrc`, not a credential helper, asserted against the argv by
+  `tests/test_phase.py`. A container that clones from GitHub is a container holding a credential for
+  GitHub. The mirror is where that requirement was moved to the host side.
+- **The base of the diff has to come from a repository the phase cannot write.** Even if the
+  container could clone, conduct would still need its own host-side copy to measure against, so the
+  copy is not avoidable - only duplicated.
+- **One host-side copy is what pins the base.** Worktree and base come out of the same object store
+  refreshed at one moment, so the sha a human approves is the sha the gate ran against. Two
+  independent clones straddle a push and nothing says so.
+
+**What was never load-bearing is the workstation.** Until 2026-08-22 the mirror arrived by rsync,
+because the host had no key for that repository - and the consequence was that re-seeding it stood
+in front of every verification as a step written down nowhere. The key removes that; the three
+reasons above are untouched.
+
+**`-F /dev/null`, not a second `~/.ssh/config` block, and it is the one mechanical trap here.**
+That file pins `Host github.com` to `agents_deploy` with `IdentitiesOnly yes`, so a second key added
+the obvious way either loses to that block or races it - and **GitHub answers a valid key for the
+wrong repository with `repository not found`**, which reads as a typo in the remote URL rather than
+as the wrong identity. Dropping the config file from consideration is deterministic; ordering
+identities against it is not.
+
+**The refresh runs at `prepare_worktree` and deliberately NOT inside `verify`.** Refreshing at
+verification time looks like the obvious improvement on a 72-hour refusal and is a bug: `main`
+advancing after the phase branched makes `merge-base --is-ancestor base head` fail, so a fresher
+base turns a good run into *"the phase handed back history that does not build on the base it was
+given"*. `conduct/verify.py`'s 72-hour refusal stays as the backstop for the timer having stopped,
+and `agents.mirror_fresh` is the detector in front of it - a mirror that quietly stopped fetching is
+indistinguishable from one nobody has pushed to, so it reads `FETCH_HEAD`'s mtime, which the fetch
+writes for free.
+
+**Two bare repositories, and they stay two.** `mirrors/` holds upstream refs; `staging/` holds
+`refs/conduct/runs/<run-id>` and is the only thing conduct pushes into. Collapsing them once conduct
+controls the refspec is tempting and the three reasons in `conduct/staging.py` do dissolve - but a
+fourth does not: `git clone --local` copies **every** ref, so one repository would hand every future
+worktree every prior phase's commits, growing without bound.
 
 **The mirror lives under the fleet root because of SELinux.** `chcon -R -t container_file_t` was
 applied to `cache/conduct` once and new files inherit the type from their parent, so an rsynced

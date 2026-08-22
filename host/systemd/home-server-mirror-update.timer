@@ -1,0 +1,30 @@
+# ==============================================================================
+# 04:40, ten minutes ahead of the checkout pull, and both well clear of 03:00
+# ------------------------------------------------------------------------------
+# Daily, because the cost of being current is a few kilobytes over ssh and the
+# cost of not being is that conduct verify measures every diff against a base
+# GitHub has moved past - silently for up to 72 hours, and then as a refusal.
+#
+# BEFORE home-server-agents-update AT 04:50, deliberately. If a change to
+# conduct/mirror.py and a mirror refresh land on the same night, the refresh
+# should be the one that runs on the code that was already deployed and proved,
+# not on code pulled thirty seconds earlier. Ordering by clock rather than by
+# After= because these are two independent jobs, not a pipeline: neither should
+# fail or wait because of the other.
+#
+# Persistent=true so a machine that was off at 04:40 fetches when it returns.
+# Enabling it does NOT fire it - the stamp is written on enable, measured - which
+# is why the README's setup runs it once by hand alongside the keygen.
+# ==============================================================================
+
+[Unit]
+Description=Fetch conduct's project mirrors daily
+
+[Timer]
+OnCalendar=*-*-* 04:40
+Persistent=true
+RandomizedDelaySec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

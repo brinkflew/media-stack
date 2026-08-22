@@ -1,0 +1,48 @@
+# ==============================================================================
+# Fetch each project's mirror from GitHub, so the base of every diff is current
+# ------------------------------------------------------------------------------
+# THE MIRROR IS NOT A CACHE, which is the thing to know before deciding this unit
+# is redundant with a clone-at-start. `cache/conduct/mirrors/<project>.git` exists
+# because the phase runner may hold no GitHub credential in any form and the
+# project is private, so the credential has to live host-side; because the base a
+# diff is measured against must come from a repository the phase cannot write;
+# and because one host-side copy is what pins base and worktree to the same
+# moment. conduct/mirror.py carries the argument in full.
+#
+# WHAT CHANGED ON 2026-08-22 is only how it is refreshed. It used to arrive by
+# rsync from a workstation - the host had no key for that repository - which made
+# re-seeding it a hand step nobody had written down, standing in front of every
+# verification. A second read-only deploy key, ~/.ssh/upskald_deploy, fetch only,
+# one repository, made once by hand; see this directory's README.
+#
+# THE FAILURE IS NOT SILENT AND THAT IS DELIBERATE. A mirror that stops moving
+# looks exactly like a mirror nothing has pushed to, right up until verify starts
+# refusing three days later with a message about the base being stale rather than
+# about the fetch. agents.mirror_fresh in bin/verify-host.sh reads FETCH_HEAD's
+# mtime, which a fetch writes for free - the durable record this repository's own
+# rule asks every automated job for.
+#
+# Symlinked into ~/.config/systemd/user/ - see host/systemd/README.md.
+# ==============================================================================
+
+[Unit]
+Description=Fetch conduct's project mirrors from GitHub
+Documentation=file:/var/home-server/docs/agents.md
+ConditionPathExists=/var/agents/bin/conduct
+
+[Service]
+Type=oneshot
+ExecStart=/var/agents/bin/conduct mirror
+TimeoutStartSec=600
+
+# The same accounting as everything else the fleet does. conduct itself is in
+# this slice and so is every phase scope; a fetch that ran outside it would be
+# the one member the aggregate ceiling could not see.
+Slice=app-agents.slice
+MemoryHigh=256M
+MemoryMax=512M
+
+# Yields to the stack, same shape as home-server-metrics and home-server-backup.
+Nice=10
+CPUWeight=20
+IOWeight=20

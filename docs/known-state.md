@@ -1235,6 +1235,48 @@ of it were both wrong.
   Chromium could not evict its own discardable segments, so it kept allocating more. On disk the
   loop never starts.
 
+## The mirror is not a cache, and the second key cannot go where the first one is
+
+Built 2026-08-22, when PR #241 merged and the fleet could not see it: the mirror still read a commit
+from two days earlier, and re-seeding it existed only as a hand step written down nowhere - standing
+in front of every verification from that day on.
+
+- **A phase container cannot simply clone the branch it needs, and the mirror is where that
+  requirement was moved to.** Three reasons, and only the first is about credentials.
+  `avanserv/upskald` is **private** and the runner may hold no GitHub credential in any form - not a
+  token, not a `gh` login, not a `.netrc`, not a credential helper, asserted against the argv by
+  `tests/test_phase.py` - so a container that clones from GitHub is a container holding a credential
+  for GitHub. The **base of the diff has to come from a repository the phase cannot write**, so
+  conduct needs a host-side copy whatever the container does; the copy is not avoidable, only
+  duplicated. And **one host-side copy is what pins the base**: worktree and base come out of the
+  same object store refreshed at one moment, where two independent clones straddle a push with
+  nothing saying so. What was never load-bearing is the workstation, and that is the half that went.
+- **A second deploy key must not be added to the existing `Host github.com` block**, and the failure
+  if it is does not name the cause. `~/.ssh/config` pins that host to `~/.ssh/agents_deploy` with
+  `IdentitiesOnly yes`, so a second `IdentityFile` either loses to it or races it - and **GitHub
+  answers a valid key for the wrong repository with `repository not found`**, which reads as a typo
+  in the remote URL. `conduct/mirror.py` passes `-F /dev/null -i <key> -o IdentitiesOnly=yes` and
+  drops the config file from consideration entirely: ordering identities against it is not
+  deterministic, and ignoring it is. Proved in all four directions - each key reaches its own
+  repository and neither reaches the other.
+- **Refreshing the mirror at verification time is the obvious improvement on a 72-hour refusal, and
+  it is a bug.** `main` advancing after the phase branched makes `git merge-base --is-ancestor base
+  head` fail, so a fresher base turns a good run into *"the phase handed back history that does not
+  build on the base it was given"* - a refusal that names the phase for something the refresh did.
+  The fetch goes in `prepare_worktree`, where it gives the phase a fresh base and lets verification
+  measure against the same one.
+- **A mirror that stopped fetching is indistinguishable from one nobody has pushed to.** Its refs
+  are valid, every clone works, every phase runs, and the only thing that is wrong is that the diff
+  a human approves is against a base GitHub moved past. `conduct/verify.py` refuses at 72h, which is
+  the backstop and not the detector - by then three nightly fetches have failed silently.
+  `agents.mirror_fresh` reads **`FETCH_HEAD`'s mtime**, which dates the *attempt* rather than the
+  change, so "nothing moved upstream" does not read as "the timer stopped".
+- **The two bare repositories stay two, and the reason survives the credential.** Three of the
+  reasons `conduct/staging.py` gives for not reusing the mirror dissolve once conduct controls the
+  refspec. A fourth does not: `git clone --local` copies **every** ref, and staging accumulates
+  `refs/conduct/runs/<run-id>` for ever, so a single repository would hand each new worktree every
+  prior phase's commits, growing without bound.
+
 ## Indexers
 
 - **The ISP resolver returns a blocking page for several indexer domains.** All three distinct

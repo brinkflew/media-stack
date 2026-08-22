@@ -2129,6 +2129,57 @@ if [ -z "$GREENBOOT" ]; then
 		fi
 	fi
 
+	# THE MIRROR, WHICH LOOKS FINE WHEN IT HAS STOPPED. cache/conduct/mirrors/ is
+	# where every phase worktree is cloned from and where conduct verify takes the
+	# base of every diff, and it is fetched nightly by
+	# home-server-mirror-update.timer over a read-only deploy key.
+	#
+	# A MIRROR THAT STOPPED FETCHING IS INDISTINGUISHABLE FROM ONE NOBODY HAS
+	# PUSHED TO. Its refs are valid, every clone made from it works, every phase
+	# runs - and the diff a human is asked to approve is against a base GitHub has
+	# moved past. conduct/verify.py refuses at 72h, which is the backstop rather
+	# than the detector: by then three nightly fetches have failed and nothing has
+	# said so. FETCH_HEAD's mtime is the durable record, written by the fetch
+	# itself, which is what this repository's own rule asks of every automated job.
+	#
+	# 36h, not 24. The timer is daily with a 5-minute jitter, so one missed night
+	# is a real signal and one late run is not - the same reasoning as the backup
+	# ages one section over.
+	mirror_root="${DOCKER_VOLUME_CACHE:-/var/home-server/cache}/conduct/mirrors"
+	mf_oldest="" mf_stale="" mf_n=0
+	if [ ! -d "$mirror_root" ]; then
+		fact agents_mirror_age_s ""
+		note agents.mirror_fresh "$mirror_root does not exist yet - conduct has no project mirror"
+	else
+		for mf_repo in "$mirror_root"/*.git; do
+			[ -d "$mf_repo" ] || continue
+			mf_n=$((mf_n + 1))
+			# FETCH_HEAD, not HEAD and not the newest ref. A fetch that brings
+			# nothing down still writes FETCH_HEAD, so this dates the ATTEMPT -
+			# and "nothing changed upstream" must not read as "the timer stopped".
+			mf_head="$mf_repo/FETCH_HEAD"
+			if [ ! -f "$mf_head" ]; then
+				mf_stale="$mf_stale ${mf_repo##*/}(never)"
+				continue
+			fi
+			mf_age=$(( $(date +%s) - $(stat -c %Y "$mf_head" 2>/dev/null || echo 0) ))
+			if [ -z "$mf_oldest" ] || [ "$mf_age" -gt "$mf_oldest" ]; then
+				mf_oldest=$mf_age
+			fi
+			if [ "$mf_age" -gt 129600 ]; then
+				mf_stale="$mf_stale ${mf_repo##*/}($((mf_age / 3600))h)"
+			fi
+		done
+		fact agents_mirror_age_s "${mf_oldest:-}" num
+		if [ "$mf_n" -eq 0 ]; then
+			note agents.mirror_fresh "no mirror under $mirror_root - conduct has cloned none yet"
+		elif [ -n "$mf_stale" ]; then
+			warn agents.mirror_fresh "mirror(s) not fetched recently:$mf_stale - every diff conduct verify measures is against a base GitHub has moved past, and it refuses outright at 72h; 'systemctl --user start home-server-mirror-update.service' and read its journal, the usual cause is the deploy key"
+		else
+			ok agents.mirror_fresh "$mf_n mirror(s), oldest fetched $((${mf_oldest:-0} / 3600))h ago"
+		fi
+	fi
+
 	# --------------------------------------------------------------------------
 	# Seeding policy. Whether the 72h floor is actually being enforced.
 	# --------------------------------------------------------------------------
