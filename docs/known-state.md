@@ -1625,6 +1625,21 @@ answering; four had never served a single query and were deleted.
   the partial-snapshot-and-a-lock condition `reboot-when-staged.sh` already refuses over. The window
   is 00:00/01:00/02:00 UTC: three attempts, the quietest band in the session series, and stopping
   one hour short of the backup.
+- **WIDENING A `Persistent=true` TIMER'S CALENDAR FIRES IT IMMEDIATELY ON THE NEXT
+  `daemon-reload`**, which is the mirror image of the trap one entry over - there, enabling a
+  Persistent timer writes its stamp straight away and it does NOT fire. Observed on deploy: the
+  stamp held `Sat 00:00:49` from the last run under `OnCalendar=daily`, the new
+  `00,01,02:00` made `Sat 02:00` a scheduled elapse that had been missed, and systemd ran the unit
+  at 19:16:57 the instant the drop-in loaded. **A new calendar creates missed elapses in the past,
+  and Persistent catches up on them.** Harmless here because the gate refused it - the whole
+  deployment was a live test of the gate - but the same reload on an UNGATED unit would have
+  restarted twenty-seven containers on a Saturday evening. Deploy a widened update timer when you
+  would be content for it to run there and then, or clear the stamp first.
+- **A skipped unit reports `Result=exec-condition`, not `Result=success`.** It is still
+  `ActiveState=inactive`, still absent from `list-units --failed`, and `is-failed` still says no -
+  which is the property that matters and the one the design rests on. Recorded because a reader
+  checking `Result` after a deferral would otherwise read `exec-condition` as a fault. Nothing here
+  keys on it: `check_timer_run` reads `ExecMainStatus` and `ExecMainExitTimestamp`.
 - **THE SYMLINK LOOP GLOBS BY EXTENSION, AND THIS IS THE THIRD TIME THAT HAS COST SOMETHING.**
   `host/systemd/README.md` linked `*.service.d` only, so the first `*.timer.d` in this repository
   was invisible: `daemon-reload` succeeded, `systemctl cat` showed podman's stock timer, and the

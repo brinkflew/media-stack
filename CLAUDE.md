@@ -628,6 +628,9 @@ signal read green.
   on top of the 03:00 backup.
 - **The `host/systemd/` symlink loop globs by EXTENSION** and knew only `*.service.d`, so the first
   `*.timer.d` was invisible with `daemon-reload` reporting success. Third time.
+- **Widening a `Persistent=true` timer's calendar fires it immediately on the next
+  `daemon-reload`** - the new schedule creates missed elapses in the past. The mirror of the
+  first-enable trap. A skipped unit also reports `Result=exec-condition`, which is not a failure.
 
 ## Target architecture
 
