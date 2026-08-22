@@ -310,6 +310,11 @@ signal read green.
 - `WebUI\LocalHostAuth` must be `false`, or gluetun's port-forward push gets a 403 for ever - and
   **JOAL shares that namespace**, so it reaches qBittorrent's WebUI unauthenticated. Not cheaply
   fixable; what would close it is dropping JOAL.
+- **The daily passkey prompt was Tinyauth's stock `sessionExpiry`, absolute rather than idle-based**
+  - stamped at login, never refreshed, so constant use did not extend it. Not the nightly
+  auto-update: `NRestarts=0` across a 24h-apart pair of sign-ins. Now thirty days. Pocket ID's
+  60-minute `SESSION_DURATION` is left alone deliberately - it is what keeps the rollover a real
+  passkey ceremony rather than a silent redirect.
 
 ### The host: image, driver, and which updater is armed
 - uCore `stable-nvidia-lts`, immutable: host tools go in `~/.local/bin`, host config in

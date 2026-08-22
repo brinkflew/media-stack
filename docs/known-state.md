@@ -118,6 +118,33 @@ nothing points at is one nobody reads.
   out of the pod would have it announce from the host's own IP, which is the reason it is in there.
   **What would actually close it is dropping JOAL**, and that is a decision about whether ratio
   padding is wanted at all, not a networking fix.
+- **THE DAILY PASSKEY PROMPT WAS A STOCK DEFAULT NOBODY CHOSE, AND IT IS ABSOLUTE RATHER THAN
+  IDLE-BASED.** Tinyauth's `sessionExpiry` is 86400 - one day - and nothing in this repository set
+  it, so sign-on had inherited the value since the day it was built. The expiry is stamped at login
+  and never refreshed, which is the part that makes it feel like a fault: using the stack constantly
+  does not extend it, so the prompt arrives every day no matter what. Three independent
+  measurements, because the first plausible theory was wrong: `tinyauth config` read back
+  `sessionExpiry: 86400` from the running process; both rows in `tinyauth.db` had
+  `expiry - created_at` of exactly `86400`; and Pocket ID's audit log showed sign-ins 24.05h,
+  24.57h, 24.76h and 24.25h apart, **drifting later each day** and jumping to 48.09h on a day the
+  stack went unused - the signature of a rolling clock rather than a scheduled event.
+  **It is NOT the nightly `AutoUpdate=registry` recreating the container**, which is the theory that
+  fits at a glance and predicts a fixed time of day rather than a drift. Sessions live in
+  `tinyauth.db`, a bind mount, so they survive a restart: `tinyauth.service` and `pocket-id.service`
+  both read `NRestarts=0` across a pair of sign-ins a full 24h apart inside one unbroken uptime.
+  That is also what makes revoking a session a `DELETE` from that table plus a unit restart rather
+  than a wait. Now `TINYAUTH_AUTH_SESSIONEXPIRY=2592000`, thirty days.
+- **The passkey CEREMONY, as opposed to its frequency, is a second clock - and it was left alone.**
+  Pocket ID's own `SESSION_DURATION` is also unset, default 60 minutes, so by the time Tinyauth's
+  cookie dies Pocket ID has long forgotten the browser and cannot answer the redirect silently.
+  Raising it would make the rollover a silent redirect and was **declined**: the whole value of this
+  design is that renewal costs a real WebAuthn signature from the device rather than a cookie
+  renewing itself unattended. Worth knowing before someone reads the 60-minute default as an
+  oversight and "fixes" it.
+- **A session's expiry is written at creation, so changing the setting does not touch sessions that
+  already exist.** After the deploy above there was one more daily prompt before the first
+  thirty-day session existed. A rollover on the old schedule is therefore not a failed deploy, and
+  the clock is the wrong thing to check - read `expiry - created_at` off the new row instead.
 
 ## The host: image, driver, and which updater is armed
 

@@ -165,6 +165,20 @@ Two things about this that are easy to get wrong, both learned the hard way:
   separately. A mismatch fails registration at `/api/webauthn/register/finish` with an unhelpful
   "couldn't process the response from your passkey".
 
+**A sign-in lasts thirty days, and the number is set rather than inherited.** Tinyauth's
+`sessionExpiry` defaults to 86400 - one day - and the expiry is **absolute**: stamped at login and
+never refreshed, so using the stack constantly does not extend it and the passkey prompt arrives
+daily regardless. That default went unnoticed for as long as it did because nothing here recorded
+what the lifetime was supposed to be, so a daily prompt was indistinguishable from a fault.
+`TINYAUTH_AUTH_SESSIONEXPIRY=2592000` in `stacks/infra/tinyauth.container` is the knob.
+
+Two things follow that are worth knowing before diagnosing a repeated prompt. **Sessions live in
+`config/tinyauth/tinyauth.db`, so they survive a restart** - the nightly `AutoUpdate=registry` is
+not what ends them, and revoking one is a `DELETE` from that table plus `systemctl --user restart
+tinyauth` rather than a wait. And **Pocket ID's own `SESSION_DURATION` is a second clock**, left at
+its 60-minute default deliberately: it is why the rollover is a full passkey ceremony instead of a
+silent redirect, which is the point of the design and not an oversight to be tuned away.
+
 `watch`, `request` and `ntfy` are the only routes not behind sign-on: each authenticates its own
 users, and their clients have no browser in which to complete a passkey prompt. **`agents` is
 deliberately not a fourth**, and the reason is the inverse of theirs: the resume URLs that approve an

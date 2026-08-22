@@ -54,6 +54,27 @@ Environment=TINYAUTH_DATABASE_PATH=/data/tinyauth.db
 # Caddy's address as the client and every IP-based rule would be wrong.
 Environment=TINYAUTH_AUTH_TRUSTEDPROXIES=${NET_SUBNET_INGRESS}
 Environment=TINYAUTH_AUTH_SECURECOOKIE=true
+# Tinyauth's default is 86400 - one day - and it is ABSOLUTE rather than idle-based:
+# the expiry is stamped at login and never refreshed, so using the stack constantly
+# does not extend it. That cost a passkey prompt every single day, and it was a
+# default nobody chose rather than a decision. Measured before changing it: both rows
+# in tinyauth.db had expiry - created_at = exactly 86400, and Pocket ID's audit log
+# showed sign-ins 24.05h, 24.57h and 24.76h apart, drifting later each day.
+#
+# NOT the nightly AutoUpdate recreating this container, which is the obvious theory
+# and is wrong: sessions live in tinyauth.db, which is a bind mount, so they survive a
+# restart. Both this unit and pocket-id read NRestarts=0 across a pair of sign-ins 24h
+# apart. That also makes revoking a session a DELETE from that table plus a restart,
+# rather than a wait.
+#
+# Pocket ID's own SESSION_DURATION stays at its 60-minute default DELIBERATELY. It is
+# the second clock, and it is why the rollover is a full passkey ceremony instead of a
+# silent redirect - a real WebAuthn signature from the device rather than a cookie
+# renewing itself unattended, which is the security this whole design rests on.
+#
+# SESSIONMAXLIFETIME is not the knob: it caps a sliding expiry, and this one is
+# already absolute, so it would only add a ceiling that never binds.
+Environment=TINYAUTH_AUTH_SESSIONEXPIRY=2592000
 # Skip Tinyauth's own login page and go straight to the passkey prompt.
 Environment=TINYAUTH_OAUTH_AUTOREDIRECT=pocketid
 Environment="TINYAUTH_OAUTH_PROVIDERS_POCKETID_NAME=Pocket ID"
