@@ -1500,6 +1500,14 @@ answering; four had never served a single query and were deleted.
   only the refusal. A `probe` phase running `git commit --allow-empty` produces a real commit with no
   model call and no credential, an empty diff that flags nothing, and a gate that passes because the
   tree is identical to a known-green base.
+- **A DRIFT CHECK CAN FIRE ON A KEY THE SERVER REFUSES TO KEEP.** Windmill does not store a suspend
+  key whose value is its default, so sending `continue_on_disapprove_timeout: false` made
+  `conduct flow --check` report DRIFTED for ever on a flow that was exactly right - git held a key
+  the server had dropped. **The mirror image of the `lock` trap**: that one is the server ADDING what
+  git did not send, stripped by name; this is the server DROPPING what git did send, and the fix is
+  not to send it. Detection is unharmed, because a UI edit setting it to `true` is not the default
+  and therefore IS stored. Caught on the first deploy of the flow, the only run where it would have
+  been obvious rather than ambient.
 - **A FOLDER PATH IN WINDMILL IS A STRING, NOT A REFERENCE.** `f/agents/phase` deployed happily into
   a folder that does not exist, so a secret placed under the same path would carry no folder ACL.
 - **`render-template.py` EXITS ON AN UNSET VARIABLE**, so adding one to `apps/ntfy/server.yml` makes

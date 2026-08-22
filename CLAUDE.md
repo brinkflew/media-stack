@@ -491,6 +491,8 @@ signal read green.
 - A deploy key has no REST surface; a `pull_requests:write` PAT has labels and reviews, and is not a
   Bot. ntfy would have delivered nothing four different ways, all exiting 0.
 - A planted commit cannot prove the chain, because `prepare_worktree` resets the tree.
+- **A drift check can fire on a key the server refuses to keep** - Windmill drops a default, so git
+  held a key the deployed flow never had. The mirror image of the `lock` trap.
 
 ### A filesystem that counts against the memory ceiling, and a browser that fills it
 - **A tmpfs inside a container is part of its MEMORY budget**, unreclaimable without swap, so a full
