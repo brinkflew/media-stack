@@ -631,6 +631,9 @@ signal read green.
 - **Widening a `Persistent=true` timer's calendar fires it immediately on the next
   `daemon-reload`** - the new schedule creates missed elapses in the past. The mirror of the
   first-enable trap. A skipped unit also reports `Result=exec-condition`, which is not a failure.
+- **A skipped run CLEARS `ExecMainExitTimestamp` rather than leaving it stale**, so `check_timer_run`
+  says "has never run" and FAILs from the FIRST deferral. Got wrong twice before it was measured;
+  the check grades on the deferral age and reads none of the unit's own timestamps.
 
 ## Target architecture
 

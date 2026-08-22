@@ -1638,8 +1638,19 @@ answering; four had never served a single query and were deleted.
 - **A skipped unit reports `Result=exec-condition`, not `Result=success`.** It is still
   `ActiveState=inactive`, still absent from `list-units --failed`, and `is-failed` still says no -
   which is the property that matters and the one the design rests on. Recorded because a reader
-  checking `Result` after a deferral would otherwise read `exec-condition` as a fault. Nothing here
-  keys on it: `check_timer_run` reads `ExecMainStatus` and `ExecMainExitTimestamp`.
+  checking `Result` after a deferral would otherwise read `exec-condition` as a fault.
+- **A SKIPPED RUN CLEARS `ExecMainExitTimestamp` RATHER THAN LEAVING IT STALE**, and that is the
+  sharpest edge in this whole change. After one `ExecCondition=` refusal the unit reported an empty
+  `ExecMainStartTimestamp` AND an empty `ExecMainExitTimestamp` under a fresh `InvocationID` - on a
+  day it had genuinely run and finished at 00:01:45. So `check_timer_run` does not go gradually
+  stale over its two periods: it reports **"container update has never run"** and FAILs from the
+  FIRST deferral, on a host that updated eight hours earlier.
+  **This was got wrong twice before it was measured.** The first version of `update.podman_run`
+  assumed "never advances" and WARNed whenever a streak was open, which fired on a single night's
+  deferral - the gate working correctly - and took `summary.status` with it. The fix for THAT
+  assumed the stamp would merely be old and required it to be past 48h, a condition that can never
+  be true because the field is empty, so every deferral went straight to FAIL. The check is graded
+  on the DEFERRAL age now, and touches nothing that reads the unit's own timestamps.
 - **THE SYMLINK LOOP GLOBS BY EXTENSION, AND THIS IS THE THIRD TIME THAT HAS COST SOMETHING.**
   `host/systemd/README.md` linked `*.service.d` only, so the first `*.timer.d` in this repository
   was invisible: `daemon-reload` succeeded, `systemctl cat` showed podman's stock timer, and the

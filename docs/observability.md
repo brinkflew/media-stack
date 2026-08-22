@@ -87,12 +87,16 @@ tripwire on the NVMe, not a rotation policy.
 
 `bin/update-when-idle.sh` runs as `ExecCondition=` on `podman-auto-update.service` and skips the run
 while somebody is watching Jellyfin - see `bin/README.md` for what counts. Three ids and two facts
-exist because **a skipped unit never advances `ExecMainExitTimestamp`**, so without them two nights
-of deferral is indistinguishable from a timer that has stopped firing:
+exist because **a skipped unit CLEARS `ExecMainExitTimestamp`** - measured, and worse than it
+sounds. It is not that a skip fails to advance the stamp: after one refusal the unit reports an
+empty `ExecMainStartTimestamp` and an empty `ExecMainExitTimestamp` under a fresh `InvocationID`, on
+a day it had genuinely run and finished at 00:01:45. So `check_timer_run` does not degrade
+gracefully here - it says **"has never run"** and FAILs from the very first deferral, on a host that
+updated hours earlier:
 
 | Id | What it measures |
 |---|---|
-| `update.podman_run` | Unchanged in the ordinary case. When the gate itself ran within 26h **and** a deferral streak is open, this WARNs and names the deferral instead of `check_timer_run`'s "the timer has stopped firing" - which would be false, and is the sentence a reader would act on. |
+| `update.podman_run` | Unchanged when nothing is being deferred. When the gate itself ran within 26h **and** a streak is open, this reports the deferral instead of `check_timer_run`'s "has never run" - which would be false, and is the sentence a reader would act on. PASS for the first night or two, because that is the gate working; WARN past that, since the 3-day ceiling should be about to end it. |
 | `update.playback_defer` | The streak. PASS below the 3-day ceiling, because a deferral of a night or two is the gate working. WARN past it, which means the escalation did not fire - the only genuinely wrong state this can see. |
 | `update.playback_probe` | Whether the gate could ask at all. It updates anyway when Jellyfin is unreachable, so this is the record that it did. |
 

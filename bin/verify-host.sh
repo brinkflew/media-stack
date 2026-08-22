@@ -1063,28 +1063,34 @@ if [ -z "$GREENBOOT" ]; then
 	fact update_playback_defers "${upd_defers:-}" num
 	fact update_playback_deferred_at "${upd_defer_at:-}"
 
-	# ONLY WHEN THE DEFERRAL IS WHAT MAKES THE RUN LOOK BROKEN. Written the obvious
-	# way - branch whenever a streak is open - this WARNed on a single night's
-	# deferral, which is the gate working exactly as designed, and took
-	# summary.status to warn with it. A check that fires on normal operation is
-	# one people learn to ignore. check_timer_run is stale at two periods, so
-	# below 48h it still has the right answer and should keep giving it; the
-	# deferral is news for update.playback_defer, not for this id.
+	# A SKIPPED RUN CLEARS ExecMainExitTimestamp, IT DOES NOT MERELY FAIL TO
+	# ADVANCE IT. Measured: after one ExecCondition= refusal the unit reports an
+	# empty ExecMainStartTimestamp AND an empty ExecMainExitTimestamp under a
+	# fresh InvocationID, on a day it had genuinely run and finished at 00:01:45.
+	# So check_timer_run does not go gradually stale here - it reports "has never
+	# run" and FAILs from the FIRST deferral, on a host that updated hours ago.
 	#
-	# THE GATE MUST ALSO HAVE RUN RECENTLY FOR THE DEFERRAL TO EXPLAIN ANYTHING. A
+	# That is why this branch cannot be conditioned on the run age, which was the
+	# first attempt at fixing the noise below: the age is not merely old, it is
+	# absent, so the condition could never fire and every deferral went straight
+	# to a FAIL saying the update had never run.
+	#
+	# GRADED BY THE DEFERRAL INSTEAD, because the first version WARNed on a single
+	# night - the gate working exactly as designed - and took summary.status with
+	# it. A check that fires on normal operation is one people learn to ignore.
+	# One or two nights is normal and PASSes; past that it is worth a look,
+	# because the 3d ceiling should be about to end it.
+	#
+	# THE GATE MUST HAVE RUN RECENTLY FOR ANY OF THIS TO EXPLAIN ANYTHING. A
 	# streak left behind by a gate that itself stopped running explains nothing
 	# and would turn this into the silencer it exists to avoid, so a stale
 	# last_run_at falls through to the helper and its blunter verdict.
-	pau_run=$(systemctl --user show podman-auto-update.service \
-		-p ExecMainExitTimestamp --value 2>/dev/null)
-	pau_age_h=""
-	if [ -n "$pau_run" ]; then
-		upd_epoch=$(date -d "$pau_run" +%s 2>/dev/null)
-		[ -z "${upd_epoch:-}" ] || pau_age_h=$(( ( $(date +%s) - upd_epoch ) / 3600 ))
-	fi
-	if [ -n "$upd_since_d" ] && [ -n "$upd_ran_h" ] && [ "$upd_ran_h" -le 26 ] &&
-	   [ -n "$pau_age_h" ] && [ "$pau_age_h" -gt 48 ]; then
-		warn update.podman_run "the last container update was ${pau_age_h}h ago because it has been DEFERRED for ${upd_since_d}d, $upd_defers attempt(s) - somebody was watching Jellyfin each time. Past 3d it updates anyway. This is a deferral, not a stopped timer"
+	if [ -n "$upd_since_d" ] && [ -n "$upd_ran_h" ] && [ "$upd_ran_h" -le 26 ]; then
+		if [ "$upd_since_d" -lt 2 ]; then
+			ok update.podman_run "the container update was deferred ${upd_since_d}d ago, $upd_defers attempt(s) - somebody was watching Jellyfin. A skip clears ExecMainExitTimestamp, so this is a deferral and not a stopped timer"
+		else
+			warn update.podman_run "the container update has been DEFERRED ${upd_since_d}d, $upd_defers attempt(s) - somebody was watching Jellyfin each time. Past 3d it updates anyway. This is a deferral, not a stopped timer"
+		fi
 	else
 		check_timer_run update.podman_run "container update" 86400 podman-auto-update.service --user
 	fi
